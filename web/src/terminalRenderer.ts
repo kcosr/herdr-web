@@ -11,6 +11,7 @@ const TOUCH_SELECTION_LONG_PRESS_MS = 600;
 const TOUCH_SELECTION_TOLERANCE_PX = 10;
 const TOUCH_SELECTION_SCROLL_INTENT_PX = 5;
 const TOUCH_SELECTION_CLEAR_DELAY_MS = 1200;
+const TOUCH_COMPAT_MOUSE_SUPPRESS_MS = 1200;
 const TAP_URL_PATTERN =
   /(?:https?:\/\/|mailto:|ftp:\/\/|ssh:\/\/|git:\/\/|tel:|magnet:|gemini:\/\/|gopher:\/\/|news:)[\w\-.~:/?#@!$&*+,;=%]+/giu;
 const TAP_URL_TRAILING_PUNCTUATION = /[.,;!?)\]]+$/u;
@@ -273,6 +274,9 @@ export class GhosttyRenderer implements TerminalRenderer {
     let selectionStart: TerminalCellPosition | null = null;
     let selectionEnd: TerminalCellPosition | null = null;
     let selectionClearTimer: number | null = null;
+    const suppressMouseEvents = (duration = TOUCH_COMPAT_MOUSE_SUPPRESS_MS) => {
+      suppressMouseUntil = performance.now() + duration;
+    };
     const clearSelectionTimer = () => {
       if (selectionTimer !== null) {
         window.clearTimeout(selectionTimer);
@@ -323,6 +327,7 @@ export class GhosttyRenderer implements TerminalRenderer {
       selectionEnd = position;
       selectingFromTouch = true;
       touchMoved = true;
+      suppressMouseEvents();
       terminal.textarea?.blur();
       terminal.clearSelection();
       selectTerminalViewportRange(terminal, position, position);
@@ -332,6 +337,7 @@ export class GhosttyRenderer implements TerminalRenderer {
     };
     const completeTouchSelection = (event: TouchEvent) => {
       preventTouchEvent(event);
+      suppressMouseEvents();
       const selectedText =
         selectionStart && selectionEnd
           ? terminalSelectedTextFromViewportRange(terminal, selectionStart, selectionEnd)
@@ -387,7 +393,7 @@ export class GhosttyRenderer implements TerminalRenderer {
         const mouseTracking = terminal.hasMouseTracking();
         if (this.#mobileTouchSelectionEnabled && !mouseTracking) {
           preventTouchEvent(event);
-          suppressMouseUntil = performance.now() + TOUCH_SELECTION_LONG_PRESS_MS + 300;
+          suppressMouseEvents(TOUCH_SELECTION_LONG_PRESS_MS + TOUCH_COMPAT_MOUSE_SUPPRESS_MS);
         }
         const touch = event.touches[0];
         touchStartX = touch.clientX;
@@ -480,11 +486,13 @@ export class GhosttyRenderer implements TerminalRenderer {
         if (typeof event.stopImmediatePropagation === "function") {
           event.stopImmediatePropagation();
         }
+        suppressMouseEvents();
         terminal.textarea?.blur();
       } else {
         const linkText = touchLinkText(event);
         if (linkText?.trim()) {
           preventTouchEvent(event);
+          suppressMouseEvents();
           terminal.textarea?.blur();
           this.#mobileTouchSelectionHandler?.(linkText);
         } else {
@@ -502,6 +510,7 @@ export class GhosttyRenderer implements TerminalRenderer {
       clearSelectionTimer();
       if (selectingFromTouch) {
         terminal.clearSelection();
+        suppressMouseEvents();
       }
       stopTouchSelection();
       lastTouchY = null;
@@ -512,21 +521,33 @@ export class GhosttyRenderer implements TerminalRenderer {
       pendingTouchLines = 0;
       terminal.textarea?.blur();
     };
-    const onMouseDown = (event: MouseEvent) => {
-      if (terminal.hasMouseTracking()) {
-        return;
-      }
+    const suppressCompatMouseEvent = (event: MouseEvent) => {
       if (performance.now() < suppressMouseUntil) {
         event.preventDefault();
         event.stopPropagation();
         if (typeof event.stopImmediatePropagation === "function") {
           event.stopImmediatePropagation();
         }
+        return true;
+      }
+      return false;
+    };
+    const onMouseDown = (event: MouseEvent) => {
+      if (terminal.hasMouseTracking()) {
+        return;
+      }
+      if (suppressCompatMouseEvent(event)) {
         return;
       }
       if (event.button === 0) {
         redirectTapFocus(event);
       }
+    };
+    const onMouseUp = (event: MouseEvent) => {
+      suppressCompatMouseEvent(event);
+    };
+    const onClick = (event: MouseEvent) => {
+      suppressCompatMouseEvent(event);
     };
 
     container.addEventListener("touchstart", onTouchStart, {
@@ -537,6 +558,8 @@ export class GhosttyRenderer implements TerminalRenderer {
     container.addEventListener("touchend", onTouchEnd, { capture: true });
     container.addEventListener("touchcancel", onTouchCancel, { capture: true });
     container.addEventListener("mousedown", onMouseDown, { capture: true });
+    container.addEventListener("mouseup", onMouseUp, { capture: true });
+    container.addEventListener("click", onClick, { capture: true });
     this.#touchCleanup = () => {
       clearSelectionTimer();
       clearSelectionClearTimer();
@@ -545,6 +568,8 @@ export class GhosttyRenderer implements TerminalRenderer {
       container.removeEventListener("touchend", onTouchEnd, { capture: true });
       container.removeEventListener("touchcancel", onTouchCancel, { capture: true });
       container.removeEventListener("mousedown", onMouseDown, { capture: true });
+      container.removeEventListener("mouseup", onMouseUp, { capture: true });
+      container.removeEventListener("click", onClick, { capture: true });
     };
   }
 

@@ -16,6 +16,9 @@
 
 ### Fixed
 
+- Removed explicit mobile terminal tap-to-deselect handling so Android/browser selection clearing can
+  handle existing selections without an extra terminal click path.
+
 ### Removed
 
 ## [0.1.0] - 2026-06-16

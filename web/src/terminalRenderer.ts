@@ -250,7 +250,6 @@ export class GhosttyRenderer implements TerminalRenderer {
     let touchStartY: number | null = null;
     let touchMoved = false;
     let touchScrolled = false;
-    let touchStartedWithSelection = false;
     let pendingTouchLines = 0;
     let suppressMouseUntil = 0;
     let selectionTimer: number | null = null;
@@ -373,11 +372,9 @@ export class GhosttyRenderer implements TerminalRenderer {
         lastTouchY = touch.clientY;
         touchMoved = false;
         touchScrolled = false;
-        touchStartedWithSelection =
-          this.#mobileTouchSelectionEnabled && !mouseTracking && terminal.hasSelection();
         selectingFromTouch = false;
         selectionStart = null;
-        if (this.#mobileTouchSelectionEnabled && !mouseTracking && !touchStartedWithSelection) {
+        if (this.#mobileTouchSelectionEnabled && !mouseTracking) {
           clearSelectionClearTimer();
           selectionTimer = window.setTimeout(startTouchSelection, TOUCH_SELECTION_LONG_PRESS_MS);
         }
@@ -440,7 +437,6 @@ export class GhosttyRenderer implements TerminalRenderer {
         touchStartY = null;
         touchMoved = false;
         touchScrolled = false;
-        touchStartedWithSelection = false;
         pendingTouchLines = 0;
         return;
       }
@@ -451,7 +447,6 @@ export class GhosttyRenderer implements TerminalRenderer {
         touchStartY = null;
         touchMoved = false;
         touchScrolled = false;
-        touchStartedWithSelection = false;
         pendingTouchLines = 0;
         return;
       }
@@ -461,11 +456,6 @@ export class GhosttyRenderer implements TerminalRenderer {
         if (typeof event.stopImmediatePropagation === "function") {
           event.stopImmediatePropagation();
         }
-        terminal.textarea?.blur();
-      } else if (touchStartedWithSelection) {
-        preventTouchEvent(event);
-        clearSelectionClearTimer();
-        terminal.clearSelection();
         terminal.textarea?.blur();
       } else {
         const linkText = touchLinkText(event);
@@ -482,7 +472,6 @@ export class GhosttyRenderer implements TerminalRenderer {
       touchStartY = null;
       touchMoved = false;
       touchScrolled = false;
-      touchStartedWithSelection = false;
       pendingTouchLines = 0;
     };
     const onTouchCancel = () => {
@@ -496,7 +485,6 @@ export class GhosttyRenderer implements TerminalRenderer {
       touchStartY = null;
       touchMoved = false;
       touchScrolled = false;
-      touchStartedWithSelection = false;
       pendingTouchLines = 0;
       terminal.textarea?.blur();
     };

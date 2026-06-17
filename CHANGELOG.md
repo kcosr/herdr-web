@@ -12,6 +12,9 @@
 
 ### Removed
 
+- Removed the legacy browser snapshot polling and event WebSocket fallback; the web app now requires
+  the bridge state stream.
+
 ## [0.1.1] - 2026-06-17
 
 ### Breaking Changes

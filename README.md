@@ -215,12 +215,11 @@ work when the terminal's hidden keyboard input has focus. OS-reserved shortcuts 
 The bridge exposes:
 
 - `GET /api/capabilities`: bridge feature flags and allow-listed browser commands
-- `GET /api/snapshot`: workspaces, tabs, panes, layouts, and shared web selection
 - `POST /api/command`: allow-listed workspace/tab/pane commands
+- `POST /api/state/refresh`: request a targeted state stream snapshot refresh
 - `POST /api/selection`: bridge-owned selected pane for syncing browser clients
 - `POST /api/uploads`: save uploaded files into the configured upload directory
-- `GET /ws/events`: Herdr structural events
-- `GET /ws/ui-events`: bridge-local UI events such as selection changes
+- `GET /ws/state`: initial workspace snapshot and sequenced state updates
 - `GET /ws/terminal`: terminal attach stream
 
 Herdr core currently allows only one terminal attach owner per terminal. The bridge works around
@@ -237,8 +236,8 @@ must also be same-origin with the bridge, an explicitly allowed origin such as A
 be explicitly allowed with `--allow-host HOSTNAME`. This is a DNS-rebinding/CSRF guard, not user
 authentication.
 
-Pane selection is bridge-owned. Selecting a pane in one browser updates `/api/selection`, broadcasts
-over `/ws/ui-events`, and other browsers switch to the same pane.
+Pane selection is bridge-owned. Selecting a pane in one browser updates `/api/selection`, and the
+bridge publishes the change over `/ws/state` so other browsers switch to the same pane.
 
 ## Vendoring Strategy
 
@@ -269,9 +268,8 @@ GitHub release creation, and manual artifact upload.
 
 The cleaner upstream shape is for Herdr to expose a supported web bridge or public protocol surface:
 
-- stable snapshot endpoint
+- stable workspace state stream
 - stable command allow-listing
-- stable event stream
 - terminal attach fanout or multi-client attach
 - exact pane focus/selection API
 - resize ownership semantics

@@ -33,10 +33,9 @@ session.
 The app expects these bridge routes:
 
 - `/api/capabilities`
-- `/api/snapshot`
 - `/api/command`
+- `/api/state/refresh`
 - `/api/selection`
 - `/api/uploads`
-- `/ws/events`
-- `/ws/ui-events`
+- `/ws/state`
 - `/ws/terminal`

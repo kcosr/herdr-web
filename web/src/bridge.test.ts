@@ -44,8 +44,8 @@ describe("bridge URL builders", () => {
   it("builds same-origin HTTP and WebSocket URLs", () => {
     vi.stubGlobal("location", { protocol: "https:", host: "app.local:8787" });
 
-    expect(buildHttpUrl(null, "/api/snapshot")).toBe("/api/snapshot");
-    expect(buildWsUrl(null, "/ws/events")).toBe("wss://app.local:8787/ws/events");
+    expect(buildHttpUrl(null, "/api/capabilities")).toBe("/api/capabilities");
+    expect(buildWsUrl(null, "/ws/state")).toBe("wss://app.local:8787/ws/state");
 
     vi.unstubAllGlobals();
   });
@@ -53,8 +53,8 @@ describe("bridge URL builders", () => {
   it("builds configured HTTP and WebSocket URLs", () => {
     const query = new URLSearchParams({ terminal_id: "term-1" });
 
-    expect(buildHttpUrl("http://192.168.1.20:4000", "/api/snapshot")).toBe(
-      "http://192.168.1.20:4000/api/snapshot",
+    expect(buildHttpUrl("http://192.168.1.20:4000", "/api/capabilities")).toBe(
+      "http://192.168.1.20:4000/api/capabilities",
     );
     expect(buildWsUrl("http://192.168.1.20:4000", "/ws/terminal", query)).toBe(
       "ws://192.168.1.20:4000/ws/terminal?terminal_id=term-1",

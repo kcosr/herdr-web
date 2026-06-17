@@ -148,7 +148,7 @@ When updating Herdr:
 Remove `vendor/herdr-compat` when Herdr exposes enough public surface for the bridge to live outside
 Herdr:
 
-- public snapshot/events API
+- public workspace state stream API
 - public terminal websocket or stable terminal attach protocol crate
 - multi-client terminal fanout or documented attach ownership
 - exact pane focus/selection endpoint

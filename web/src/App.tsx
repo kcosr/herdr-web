@@ -33,7 +33,6 @@ import type { MobileTerminalTapTarget } from "./mobileTerminalPrefs";
 import { addNativeBackHandler, addNativeKeyboardHideHandler, isNativeAndroid } from "./native";
 import { ActionMenu, ConfirmDialog, RenameDialog, useLongPress } from "./overlays";
 import type { MenuItem } from "./overlays";
-import { resumeRefreshMode } from "./resumeRefresh";
 import { TerminalView } from "./TerminalView";
 import {
   aggregateStatus,
@@ -266,7 +265,7 @@ export function App() {
   );
   if (stateRefreshSchedulerRef.current === null) {
     stateRefreshSchedulerRef.current = createStateRefreshScheduler({
-      enabled: () => Boolean(bridgeRef.current.capabilities?.state_stream),
+      enabled: () => bridgeRef.current.canConnect && bridgeRef.current.capabilities !== null,
       currentStreamId: () => stateStreamModelRef.current.streamId,
       hasCurrentSnapshot: () =>
         connectionKeyRef.current === bridgeRef.current.connectionKey &&
@@ -521,153 +520,96 @@ export function App() {
         disposed = true;
       };
     }
-    if (bridge.capabilities?.state_stream) {
-      resetSnapshot();
-      setLoadState("loading");
-      const stateSocket = openStateSocket(bridge.wsUrl, (message) => {
-        if (disposed || connectionKeyRef.current !== bridge.connectionKey) {
-          return "ignore";
-        }
-        if (message.type === "snapshot") {
-          settleStateRefresh(message.refresh_ids);
-        } else if (message.type === "resync_required") {
-          settleStateRefresh(message.refresh_ids, new Error(message.reason));
-        }
-        if (message.type === "error") {
-          clearStateRefreshWaiters(message.message);
-          setLoadState("loading");
-          return "reconnect";
-        }
-        const hadSnapshot = stateStreamModelRef.current.snapshot !== null;
-        const result = applyStateMessage(stateStreamModelRef.current, message);
-        stateStreamModelRef.current = result.model;
-        if (result.status === "resync") {
-          if (message.type === "resync_required" && message.refresh_ids?.length) {
-            return "continue";
-          }
-          void requestStateRefresh("resync_required").catch(() => {
-            if (
-              !disposed &&
-              connectionKeyRef.current === bridge.connectionKey &&
-              stateStreamModelRef.current.snapshot === null
-            ) {
-              setLoadState("error");
-            }
-          });
+    resetSnapshot();
+    setLoadState("loading");
+    const stateSocket = openStateSocket(bridge.wsUrl, (message) => {
+      if (disposed || connectionKeyRef.current !== bridge.connectionKey) {
+        return "ignore";
+      }
+      if (message.type === "snapshot") {
+        settleStateRefresh(message.refresh_ids);
+      } else if (message.type === "resync_required") {
+        settleStateRefresh(message.refresh_ids, new Error(message.reason));
+      }
+      if (message.type === "error") {
+        clearStateRefreshWaiters(message.message);
+        setLoadState("loading");
+        return "reconnect";
+      }
+      const hadSnapshot = stateStreamModelRef.current.snapshot !== null;
+      const result = applyStateMessage(stateStreamModelRef.current, message);
+      stateStreamModelRef.current = result.model;
+      if (result.status === "resync") {
+        if (message.type === "resync_required" && message.refresh_ids?.length) {
           return "continue";
         }
-        setSnapshot(result.model.snapshot);
-        setSnapshotConnectionKey(bridge.connectionKey);
-        setLoadState("ready");
-        if (
-          result.selectedPaneId !== undefined &&
-          (message.type === "selection.changed" || !hadSnapshot)
-        ) {
-          setSelectedPaneId(result.selectedPaneId);
-          const pane = result.model.snapshot?.panes.find(
-            (item) => item.pane_id === result.selectedPaneId,
-          );
-          const selectedWorkspaceId = pane?.workspace_id ?? null;
-          setActiveSpaceId((current) => {
-            if (message.type === "selection.changed") {
-              return selectedWorkspaceId;
-            }
-            if (
-              current &&
-              result.model.snapshot?.workspaces.some((workspace) => workspace.workspace_id === current)
-            ) {
-              return current;
-            }
-            return selectedWorkspaceId;
-          });
-        }
+        void requestStateRefresh("resync_required").catch(() => {
+          if (
+            !disposed &&
+            connectionKeyRef.current === bridge.connectionKey &&
+            stateStreamModelRef.current.snapshot === null
+          ) {
+            setLoadState("error");
+          }
+        });
         return "continue";
-      });
-      return () => {
-        disposed = true;
-        clearStateRefreshWaiters("state stream closed");
-        stateSocket.close();
-      };
-    }
-    const refresh = () =>
-      refreshSnapshot(
-        bridge.httpUrl,
-        (next) => {
-          setSnapshot(next);
-          setSnapshotConnectionKey(bridge.connectionKey);
-        },
-        setLoadState,
-        () => disposed,
-      );
-    void refresh();
-    const interval = window.setInterval(refresh, 10000);
-    const events = openEventsSocket(bridge.wsUrl, "/ws/events", () => void refresh());
-    const uiEvents = openEventsSocket(bridge.wsUrl, "/ws/ui-events", (event) => {
-      const paneId = selectionPaneId(event);
-      if (paneId) {
-        setSelectedPaneId(paneId);
-        const pane = snapshotRef.current?.panes.find((item) => item.pane_id === paneId);
-        if (pane) {
-          setActiveSpaceId(pane.workspace_id);
-        }
       }
-      void refresh();
+      setSnapshot(result.model.snapshot);
+      setSnapshotConnectionKey(bridge.connectionKey);
+      setLoadState("ready");
+      if (
+        result.selectedPaneId !== undefined &&
+        (message.type === "selection.changed" || !hadSnapshot)
+      ) {
+        setSelectedPaneId(result.selectedPaneId);
+        const pane = result.model.snapshot?.panes.find(
+          (item) => item.pane_id === result.selectedPaneId,
+        );
+        const selectedWorkspaceId = pane?.workspace_id ?? null;
+        setActiveSpaceId((current) => {
+          if (message.type === "selection.changed") {
+            return selectedWorkspaceId;
+          }
+          if (
+            current &&
+            result.model.snapshot?.workspaces.some((workspace) => workspace.workspace_id === current)
+          ) {
+            return current;
+          }
+          return selectedWorkspaceId;
+        });
+      }
+      return "continue";
     });
     return () => {
       disposed = true;
-      events?.close();
-      uiEvents?.close();
-      window.clearInterval(interval);
+      clearStateRefreshWaiters("state stream closed");
+      stateSocket.close();
     };
   }, [
     bridge.canConnect,
     bridge.capabilities,
-    bridge.capabilities?.state_stream,
     bridge.connectionKey,
-    bridge.httpUrl,
     requestStateRefresh,
     stateStreamReconnectToken,
     bridge.wsUrl,
   ]);
 
   useEffect(() => {
-    const mode = resumeRefreshMode({
-      canConnect: bridge.canConnect,
-      hasCapabilities: bridge.capabilities !== null,
-      stateStream: Boolean(bridge.capabilities?.state_stream),
-      previousToken: stateStreamResumeTokenRef.current,
-      currentToken: bridge.resumeToken,
-    });
-    if (mode === "none") {
+    if (
+      !bridge.canConnect ||
+      bridge.capabilities === null ||
+      stateStreamResumeTokenRef.current === bridge.resumeToken
+    ) {
       stateStreamResumeTokenRef.current = bridge.resumeToken;
       return;
     }
     stateStreamResumeTokenRef.current = bridge.resumeToken;
-    if (mode === "state_stream") {
-      void requestStateRefresh("android_resume").catch(() => {});
-      return;
-    }
-    const requestConnectionKey = bridge.connectionKey;
-    void fetchSnapshot(bridge.httpUrl)
-      .then((next) => {
-        if (!isConnectionResultCurrent(connectionKeyRef.current, requestConnectionKey)) {
-          return;
-        }
-        setSnapshot(next);
-        setSnapshotConnectionKey(requestConnectionKey);
-        setLoadState("ready");
-      })
-      .catch(() => {
-        if (isConnectionResultCurrent(connectionKeyRef.current, requestConnectionKey)) {
-          setLoadState("error");
-        }
-      });
+    void requestStateRefresh("android_resume").catch(() => {});
   }, [
     bridge.canConnect,
     bridge.capabilities,
-    bridge.capabilities?.state_stream,
     bridge.connectionKey,
-    bridge.httpUrl,
     bridge.resumeToken,
     requestStateRefresh,
   ]);
@@ -681,7 +623,7 @@ export function App() {
   }, [error]);
 
   useEffect(() => {
-    if (!bridge.capabilities?.state_stream || !bridge.canConnect) {
+    if (!bridge.canConnect || bridge.capabilities === null) {
       return;
     }
     const onVisibilityChange = () => {
@@ -694,13 +636,13 @@ export function App() {
     return () => document.removeEventListener("visibilitychange", onVisibilityChange);
   }, [
     bridge.canConnect,
-    bridge.capabilities?.state_stream,
+    bridge.capabilities,
     bridge.connectionKey,
     requestStateRefresh,
   ]);
 
   useEffect(() => {
-    if (!bridge.capabilities?.state_stream || !bridge.canConnect) {
+    if (!bridge.canConnect || bridge.capabilities === null) {
       return;
     }
     const timer = window.setInterval(() => {
@@ -709,7 +651,7 @@ export function App() {
       }
     }, 60000);
     return () => window.clearInterval(timer);
-  }, [bridge.canConnect, bridge.capabilities?.state_stream, requestStateRefresh]);
+  }, [bridge.canConnect, bridge.capabilities, requestStateRefresh]);
 
   useEffect(() => {
     const onPopState = (event: PopStateEvent) => {
@@ -1085,34 +1027,11 @@ export function App() {
       setBackendSettingsOpen(true);
       return;
     }
-    if (bridge.capabilities?.state_stream) {
-      void requestStateRefresh("manual").catch(() => {
-        if (connectionKeyRef.current === bridge.connectionKey && stateStreamModelRef.current.snapshot === null) {
-          setLoadState("error");
-        }
-      });
-      return;
-    }
-    const requestConnectionKey = bridge.connectionKey;
-    setLoadState("loading");
-    void fetchSnapshot(bridge.httpUrl)
-      .then((next) => {
-        if (!isConnectionResultCurrent(connectionKeyRef.current, requestConnectionKey)) {
-          return;
-        }
-        stateStreamModelRef.current = {
-          ...stateStreamModelRef.current,
-          snapshot: next,
-        };
-        setSnapshot(next);
-        setSnapshotConnectionKey(requestConnectionKey);
-        setLoadState("ready");
-      })
-      .catch(() => {
-        if (connectionKeyRef.current === requestConnectionKey) {
-          setLoadState("error");
-        }
-      });
+    void requestStateRefresh("manual").catch(() => {
+      if (connectionKeyRef.current === bridge.connectionKey && stateStreamModelRef.current.snapshot === null) {
+        setLoadState("error");
+      }
+    });
   };
 
   async function exec(action: () => Promise<{ [key: string]: unknown }>, selectCreated = false) {
@@ -1120,44 +1039,17 @@ export function App() {
     setBusy(true);
     try {
       const result = await action();
-      if (bridge.capabilities?.state_stream) {
-        if (!isConnectionResultCurrent(connectionKeyRef.current, requestConnectionKey)) {
-          return false;
-        }
-        setSnapshotConnectionKey(requestConnectionKey);
-        setLoadState("ready");
-        const paneId = selectCreated ? createdPaneId(result) : null;
-        if (paneId) {
-          setSelectedPaneId(paneId);
-          void syncSelectedPane(bridge.httpUrl, paneId).catch(() => {});
-          if (isCompactLayout) {
-            openMobileDetail();
-          }
-        }
-        setError(null);
-        return true;
-      }
-      const next = await fetchSnapshot(bridge.httpUrl);
       if (!isConnectionResultCurrent(connectionKeyRef.current, requestConnectionKey)) {
         return false;
       }
-      stateStreamModelRef.current = {
-        ...stateStreamModelRef.current,
-        snapshot: next,
-      };
-      setSnapshot(next);
       setSnapshotConnectionKey(requestConnectionKey);
       setLoadState("ready");
-      if (selectCreated) {
-        const paneId = createdPaneId(result);
-        const created = paneId ? next.panes.find((pane) => pane.pane_id === paneId) : undefined;
-        if (created) {
-          setSelectedPaneId(created.pane_id);
-          setActiveSpaceId(created.workspace_id);
-          void syncSelectedPane(bridge.httpUrl, created.pane_id).catch(() => {});
-          if (isCompactLayout) {
-            openMobileDetail();
-          }
+      const paneId = selectCreated ? createdPaneId(result) : null;
+      if (paneId) {
+        setSelectedPaneId(paneId);
+        void syncSelectedPane(bridge.httpUrl, paneId).catch(() => {});
+        if (isCompactLayout) {
+          openMobileDetail();
         }
       }
       setError(null);
@@ -2621,14 +2513,6 @@ function stageBreadcrumb(
   return [workspace?.label, tabLabel].filter(Boolean).join(" · ") || pane.pane_id;
 }
 
-async function fetchSnapshot(httpUrl: (path: string, query?: URLSearchParams) => string) {
-  const response = await fetch(httpUrl("/api/snapshot"));
-  if (!response.ok) {
-    throw new Error(`snapshot failed: ${response.status}`);
-  }
-  return (await response.json()) as Snapshot;
-}
-
 class StateRefreshHttpError extends Error {
   constructor(
     readonly status: number,
@@ -2680,39 +2564,6 @@ function delay(ms: number) {
   return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 }
 
-async function refreshSnapshot(
-  httpUrl: (path: string, query?: URLSearchParams) => string,
-  setSnapshot: (snapshot: Snapshot) => void,
-  setLoadState: (state: LoadState) => void,
-  isDisposed: () => boolean,
-) {
-  try {
-    const next = await fetchSnapshot(httpUrl);
-    if (!isDisposed()) {
-      setSnapshot(next);
-      setLoadState("ready");
-    }
-  } catch {
-    if (!isDisposed()) {
-      setLoadState("error");
-    }
-  }
-}
-
-function selectionPaneId(event: MessageEvent) {
-  if (typeof event.data !== "string") {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(event.data) as { type?: unknown; pane_id?: unknown };
-    return parsed.type === "herdr_web.selection_changed" && typeof parsed.pane_id === "string"
-      ? parsed.pane_id
-      : null;
-  } catch {
-    return null;
-  }
-}
-
 function blurActiveTextInput() {
   const element = document.activeElement;
   if (!(element instanceof HTMLElement)) {
@@ -2726,53 +2577,6 @@ function blurActiveTextInput() {
   ) {
     element.blur();
   }
-}
-
-function openEventsSocket(
-  wsUrl: (path: string, query?: URLSearchParams) => string,
-  path: string,
-  onEvent: (event: MessageEvent) => void,
-) {
-  const url = wsUrl(path);
-  let socket: WebSocket | null = null;
-  let closed = false;
-  let reconnectTimer: number | null = null;
-  let attempts = 0;
-
-  const connect = () => {
-    if (closed) {
-      return;
-    }
-    const next = new WebSocket(url);
-    socket = next;
-    next.addEventListener("open", () => {
-      attempts = 0;
-    });
-    next.addEventListener("message", onEvent);
-    next.addEventListener("close", () => {
-      if (closed || socket !== next || reconnectTimer !== null) {
-        return;
-      }
-      const delay = Math.min(500 * 2 ** attempts, 5000);
-      attempts += 1;
-      reconnectTimer = window.setTimeout(() => {
-        reconnectTimer = null;
-        connect();
-      }, delay);
-    });
-  };
-
-  connect();
-  return {
-    close() {
-      closed = true;
-      if (reconnectTimer !== null) {
-        window.clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-      socket?.close();
-    },
-  };
 }
 
 function openStateSocket(

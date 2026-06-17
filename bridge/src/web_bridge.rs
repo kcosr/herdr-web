@@ -53,7 +53,6 @@ const STATE_STREAM_READ_TIMEOUT: Duration = Duration::from_millis(250);
 const STATE_STREAM_REBUILD_DEBOUNCE: Duration = Duration::from_millis(100);
 const STATE_STREAM_STARTUP_DRAIN: Duration = Duration::from_millis(50);
 const STATE_STREAM_STARTUP_CONVERGENCE_LIMIT: usize = 3;
-const SNAPSHOT_CACHE_MAX_AGE: Duration = Duration::from_millis(250);
 const SNAPSHOT_CACHE_REBUILD_ATTEMPTS: usize = 3;
 static UPLOAD_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static STATE_STREAM_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -121,7 +120,6 @@ struct SnapshotTabInfo {
 #[derive(Debug, Serialize)]
 struct Capabilities {
     commands: &'static [&'static str],
-    state_stream: bool,
 }
 
 #[derive(Debug)]
@@ -140,14 +138,12 @@ struct SnapshotCache {
 #[derive(Debug, Clone)]
 struct SnapshotCacheEntry {
     snapshot: Snapshot,
-    built_at: Instant,
     built_started_at: Instant,
     rebuild_epoch: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
 enum SnapshotCachePolicy {
-    MaxAge(Duration),
     RebuildAfter { epoch: usize, not_before: Instant },
 }
 
@@ -568,10 +564,6 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
     spawn_structural_refresh_loop(state.clone());
     let app = Router::new()
         .route(
-            "/api/snapshot",
-            get(snapshot_handler).options(preflight_handler),
-        )
-        .route(
             "/api/capabilities",
             get(capabilities_handler).options(preflight_handler),
         )
@@ -591,9 +583,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
             "/api/uploads",
             post(upload_handler).options(preflight_handler),
         )
-        .route("/ws/events", get(events_ws_handler))
         .route("/ws/state", get(state_ws_handler))
-        .route("/ws/ui-events", get(ui_events_ws_handler))
         .route("/ws/terminal", get(terminal_ws_handler))
         .fallback_service(ServeDir::new(options.static_dir))
         .layer(middleware::from_fn_with_state(
@@ -1591,19 +1581,6 @@ async fn upload_handler(
     Ok(Json(response))
 }
 
-async fn snapshot_handler(
-    State(state): State<BridgeState>,
-    headers: HeaderMap,
-) -> Result<Json<Snapshot>, BridgeError> {
-    ensure_allowed_request(&headers, &state.request_policy)?;
-    let snapshot = tokio::task::spawn_blocking(move || {
-        build_snapshot_cached(&state, SnapshotCachePolicy::MaxAge(SNAPSHOT_CACHE_MAX_AGE))
-    })
-    .await
-    .map_err(|err| BridgeError::Protocol(err.to_string()))??;
-    Ok(Json(snapshot))
-}
-
 fn build_snapshot_cached(
     state: &BridgeState,
     policy: SnapshotCachePolicy,
@@ -1634,7 +1611,6 @@ fn build_snapshot_cached(
         }
         let entry = SnapshotCacheEntry {
             snapshot,
-            built_at: Instant::now(),
             built_started_at,
             rebuild_epoch,
         };
@@ -1658,7 +1634,6 @@ fn build_snapshot_cached(
 fn snapshot_policy_target_epoch(state: &BridgeState, policy: SnapshotCachePolicy) -> usize {
     let required_epoch = required_snapshot_epoch(state);
     match policy {
-        SnapshotCachePolicy::MaxAge(_) => required_epoch,
         SnapshotCachePolicy::RebuildAfter { epoch, .. } => required_epoch.max(epoch),
     }
 }
@@ -1691,9 +1666,6 @@ fn snapshot_cache_entry_usable(
 ) -> bool {
     let epoch_current = entry.rebuild_epoch >= target_epoch;
     match policy {
-        SnapshotCachePolicy::MaxAge(max_age) => {
-            epoch_current && entry.built_at.elapsed() <= max_age
-        }
         SnapshotCachePolicy::RebuildAfter { not_before, .. } => {
             epoch_current && entry.built_started_at >= not_before
         }
@@ -1762,7 +1734,6 @@ async fn capabilities_handler(
     ensure_allowed_request(&headers, &state.request_policy)?;
     Ok(Json(Capabilities {
         commands: ALLOWED_COMMANDS,
-        state_stream: true,
     }))
 }
 
@@ -1920,30 +1891,6 @@ async fn terminal_ws_handler(
         .into_response()
 }
 
-async fn events_ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<BridgeState>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(err) = ensure_allowed_request(&headers, &state.request_policy) {
-        return err.into_response();
-    }
-    ws.on_upgrade(move |socket| handle_events_socket(socket, state))
-        .into_response()
-}
-
-async fn ui_events_ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<BridgeState>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(err) = ensure_allowed_request(&headers, &state.request_policy) {
-        return err.into_response();
-    }
-    ws.on_upgrade(move |socket| handle_ui_events_socket(socket, state))
-        .into_response()
-}
-
 async fn state_ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<BridgeState>,
@@ -1954,51 +1901,6 @@ async fn state_ws_handler(
     }
     ws.on_upgrade(move |socket| handle_state_socket(socket, state))
         .into_response()
-}
-
-async fn handle_events_socket(socket: WebSocket, state: BridgeState) {
-    let api = state.api.clone();
-    let mut ui_event_rx = state.ui_event_tx.subscribe();
-    let subscribed = tokio::task::spawn_blocking(move || open_event_subscription(api)).await;
-    let Ok(Ok(mut event_rx)) = subscribed else {
-        return;
-    };
-
-    let (mut ws_sender, mut ws_receiver) = socket.split();
-    loop {
-        tokio::select! {
-            Some(event) = event_rx.recv() => {
-                if event_may_close_terminal_session(&event) {
-                    let prune_state = state.clone();
-                    tokio::task::spawn_blocking(move || prune_detached_terminal_sessions(&prune_state));
-                }
-                if ws_sender.send(Message::Text(event.into())).await.is_err() {
-                    break;
-                }
-            }
-            event = ui_event_rx.recv() => {
-                match event {
-                    Ok(event) => {
-                        if ws_sender.send(Message::Text(event.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-            Some(message) = ws_receiver.next() => {
-                match message {
-                    Ok(Message::Close(_)) | Err(_) => break,
-                    Ok(Message::Text(_))
-                    | Ok(Message::Binary(_))
-                    | Ok(Message::Ping(_))
-                    | Ok(Message::Pong(_)) => {}
-                }
-            }
-            else => break,
-        }
-    }
 }
 
 async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
@@ -2309,36 +2211,6 @@ async fn refresh_state_projection(
     *upstream = next_upstream;
     *projection = next_projection;
     Ok(projection.snapshot_message(stream_id, (!refresh_ids.is_empty()).then_some(refresh_ids)))
-}
-
-async fn handle_ui_events_socket(socket: WebSocket, state: BridgeState) {
-    let mut ui_event_rx = state.ui_event_tx.subscribe();
-    let (mut ws_sender, mut ws_receiver) = socket.split();
-    loop {
-        tokio::select! {
-            event = ui_event_rx.recv() => {
-                match event {
-                    Ok(event) => {
-                        if ws_sender.send(Message::Text(event.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-            Some(message) = ws_receiver.next() => {
-                match message {
-                    Ok(Message::Close(_)) | Err(_) => break,
-                    Ok(Message::Text(_))
-                    | Ok(Message::Binary(_))
-                    | Ok(Message::Ping(_))
-                    | Ok(Message::Pong(_)) => {}
-                }
-            }
-            else => break,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -2755,12 +2627,6 @@ fn close_terminal_session(
     }
 }
 
-fn event_may_close_terminal_session(event: &str) -> bool {
-    event.contains("workspace.closed")
-        || event.contains("tab.closed")
-        || event.contains("pane.closed")
-}
-
 fn event_closes_terminal_session(event: &EventEnvelope) -> bool {
     matches!(
         event.data,
@@ -2776,49 +2642,6 @@ fn close_message(reason: &str) -> String {
         r#"{{"type":"closed","reason":{}}}"#,
         serde_json::to_string(reason).unwrap_or_else(|_| "\"closed\"".into())
     )
-}
-
-fn open_event_subscription(
-    api: ApiClient,
-) -> Result<tokio::sync::mpsc::UnboundedReceiver<String>, BridgeError> {
-    let mut subscriptions = structural_refresh_subscriptions();
-    subscriptions.push(Subscription::PaneAgentDetected {});
-    let request = Request {
-        id: "herdr-web:events".to_string(),
-        method: Method::EventsSubscribe(EventsSubscribeParams { subscriptions }),
-    };
-    let (ack, mut stream) = api.subscribe_value(&request, None)?;
-    let response = herdr_compat::api::client::parse_response_value(ack)?;
-    if !matches!(response.result, ResponseResult::SubscriptionStarted {}) {
-        return Err(BridgeError::Protocol(format!(
-            "unexpected subscription response: {:?}",
-            response.result
-        )));
-    }
-
-    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-    thread::spawn(move || loop {
-        match stream.next_value() {
-            Ok(Some(event)) => {
-                if event_tx.send(event.to_string()).is_err() {
-                    break;
-                }
-            }
-            Ok(None) => break,
-            Err(err) => {
-                let _ = event_tx.send(
-                    serde_json::json!({
-                        "type": "error",
-                        "error": err.to_string(),
-                    })
-                    .to_string(),
-                );
-                break;
-            }
-        }
-    });
-
-    Ok(event_rx)
 }
 
 fn spawn_structural_refresh_loop(state: BridgeState) {
@@ -3723,37 +3546,10 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_cache_reuses_fresh_entries_and_rebuild_epochs() {
-        let state = test_bridge_state();
-        *state.selected_pane_id.lock().unwrap() = Some("p1".to_string());
-        {
-            let mut cache = state.snapshot_cache.lock().unwrap();
-            cache.snapshot = Some(SnapshotCacheEntry {
-                snapshot: test_snapshot(),
-                built_at: Instant::now(),
-                built_started_at: Instant::now(),
-                rebuild_epoch: 10,
-            });
-        }
-
-        let fresh =
-            build_snapshot_cached(&state, SnapshotCachePolicy::MaxAge(Duration::from_secs(1)))
-                .unwrap();
-        assert_eq!(fresh.panes[0].pane_id, "p1");
-        assert_eq!(fresh.selected_pane_id.as_deref(), Some("p1"));
-
-        state.snapshot_required_epoch.store(11, Ordering::Release);
-        let stale =
-            build_snapshot_cached(&state, SnapshotCachePolicy::MaxAge(Duration::from_secs(1)));
-        assert!(stale.is_err());
-    }
-
-    #[test]
     fn snapshot_cache_rebuild_after_requires_subscription_ready_snapshot() {
         let snapshot = test_snapshot();
         let entry = SnapshotCacheEntry {
             snapshot,
-            built_at: Instant::now(),
             built_started_at: Instant::now(),
             rebuild_epoch: 20,
         };

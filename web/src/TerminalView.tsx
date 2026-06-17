@@ -185,6 +185,34 @@ export function TerminalView({
     [copyText],
   );
 
+  const measureTerminal = useCallback(
+    (renderer: TerminalRenderer, mode: "fit" | "refresh" = "fit") => {
+      try {
+        return mode === "refresh" ? renderer.refreshMetrics() : renderer.fit();
+      } catch (error) {
+        if (rendererRef.current === renderer) {
+          console.warn("terminal resize skipped", error);
+        }
+        return null;
+      }
+    },
+    [],
+  );
+
+  const resizeTerminal = useCallback(
+    (mode: "fit" | "refresh" = "fit") => {
+      const renderer = rendererRef.current;
+      if (!renderer) {
+        return;
+      }
+      const size = measureTerminal(renderer, mode);
+      if (size) {
+        sendResizeRef.current(size);
+      }
+    },
+    [measureTerminal],
+  );
+
   // Re-apply scroll tuning live when crossing the desktop/mobile breakpoint,
   // without tearing down the socket.
   useEffect(() => {
@@ -273,7 +301,10 @@ export function TerminalView({
         });
 
         resizeObserver = new ResizeObserver(() => {
-          sendResize(renderer.fit());
+          const size = measureTerminal(renderer);
+          if (size) {
+            sendResize(size);
+          }
         });
         resizeObserver.observe(host);
 
@@ -281,7 +312,10 @@ export function TerminalView({
         if (fontReady) {
           void fontReady.then(() => {
             if (!disposed) {
-              sendResize(renderer.refreshMetrics());
+              const size = measureTerminal(renderer, "refresh");
+              if (size) {
+                sendResize(size);
+              }
             }
           });
         }
@@ -327,8 +361,12 @@ export function TerminalView({
             return;
           }
           clearConnectTimer();
+          const initialSize = measureTerminal(renderer);
+          if (!initialSize) {
+            return;
+          }
           const nextSocket = new WebSocket(
-            terminalSocketUrl(wsUrl, pane.terminal_id, renderer.fit()),
+            terminalSocketUrl(wsUrl, pane.terminal_id, initialSize),
           );
           socket = nextSocket;
           socketRef.current = nextSocket;
@@ -345,7 +383,10 @@ export function TerminalView({
               lastCloseReason = null;
               setCloseReason(null);
               setConnectionState("attached");
-              sendResize(renderer.fit());
+              const size = measureTerminal(renderer);
+              if (size) {
+                sendResize(size);
+              }
               if (autoFocusRef.current) {
                 window.setTimeout(() => renderer.focus(), 0);
               }
@@ -426,7 +467,7 @@ export function TerminalView({
       rendererRef.current = null;
       host.replaceChildren();
     };
-  }, [connectionKey, pane?.terminal_id, resumeToken, wsUrl]);
+  }, [connectionKey, measureTerminal, pane?.terminal_id, resumeToken, wsUrl]);
 
   useEffect(() => {
     rendererRef.current?.setTapFocusHandler(
@@ -463,21 +504,15 @@ export function TerminalView({
     if (refitToken === 0) {
       return;
     }
-    const renderer = rendererRef.current;
-    if (renderer) {
-      sendResizeRef.current(renderer.refreshMetrics());
-    }
-  }, [refitToken]);
+    resizeTerminal("refresh");
+  }, [refitToken, resizeTerminal]);
 
   useEffect(() => {
     if (!mobileControls || !pane) {
       return;
     }
     const refit = () => {
-      const renderer = rendererRef.current;
-      if (renderer) {
-        sendResizeRef.current(renderer.refreshMetrics());
-      }
+      resizeTerminal("refresh");
     };
     const frame = window.requestAnimationFrame(refit);
     const timers = [80, 280, 520].map((delay) => window.setTimeout(refit, delay));
@@ -487,7 +522,7 @@ export function TerminalView({
         window.clearTimeout(timer);
       }
     };
-  }, [mobileControls, pane?.terminal_id]);
+  }, [mobileControls, pane?.terminal_id, resizeTerminal]);
 
   const sendTerminalInput = (data: string) => {
     const socket = socketRef.current;

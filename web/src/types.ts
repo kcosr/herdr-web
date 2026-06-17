@@ -83,15 +83,16 @@ export type StateMessage =
       generation: number;
       sequence: number;
       snapshot: Snapshot;
+      stream_id?: string;
+      refresh_ids?: string[];
     }
   | {
-      type: "pane.agent_status_changed" | "pane.agent_detected" | "pane.upserted";
+      type: "pane.agent_status_changed" | "pane.agent_detected";
       generation: number;
       sequence: number;
       pane: PaneInfo;
       workspace: WorkspaceInfo;
       tab: TabInfo;
-      layout?: LayoutSnapshot;
     }
   | {
       type: "selection.changed";
@@ -100,47 +101,11 @@ export type StateMessage =
       pane_id: string;
     }
   | {
-      type: "workspace.upserted";
-      generation: number;
-      sequence: number;
-      workspace: WorkspaceInfo;
-    }
-  | {
-      type: "workspace.removed";
-      generation: number;
-      sequence: number;
-      workspace_id: string;
-    }
-  | {
-      type: "tab.upserted";
-      generation: number;
-      sequence: number;
-      tab: TabInfo;
-      layout?: LayoutSnapshot;
-    }
-  | {
-      type: "tab.removed";
-      generation: number;
-      sequence: number;
-      tab_id: string;
-      workspace_id: string;
-    }
-  | {
-      type: "pane.removed";
-      generation: number;
-      sequence: number;
-      pane_id: string;
-      workspace_id: string;
-      tab_id?: string;
-      workspace?: WorkspaceInfo;
-      tab?: TabInfo;
-      layout?: LayoutSnapshot;
-    }
-  | {
       type: "resync_required";
       generation: number;
       sequence: number;
       reason: string;
+      refresh_ids?: string[];
     }
   | {
       type: "error";

@@ -54,6 +54,8 @@ const STATE_STREAM_REBUILD_DEBOUNCE: Duration = Duration::from_millis(100);
 const STATE_STREAM_STARTUP_DRAIN: Duration = Duration::from_millis(50);
 const STATE_STREAM_STARTUP_CONVERGENCE_LIMIT: usize = 3;
 static UPLOAD_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static STATE_STREAM_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static STATE_REFRESH_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone)]
 struct BridgeOptions {
@@ -73,6 +75,8 @@ struct BridgeState {
     terminal_sessions: Arc<Mutex<HashMap<String, SharedTerminalSession>>>,
     selected_pane_id: Arc<Mutex<Option<String>>>,
     ui_event_tx: tokio::sync::broadcast::Sender<String>,
+    state_refresh_tx: tokio::sync::broadcast::Sender<StateRefreshEvent>,
+    active_state_streams: Arc<Mutex<HashSet<String>>>,
     upload_dir: PathBuf,
 }
 
@@ -118,7 +122,47 @@ struct BridgeProjection {
     snapshot: Snapshot,
     generation: u64,
     next_sequence: u64,
-    subscriptions_stale: bool,
+    quiescent: bool,
+}
+
+#[derive(Debug, Clone)]
+struct StateRefreshEvent {
+    target_stream_id: Option<String>,
+    refresh_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StateRefreshRequest {
+    stream_id: String,
+    reason: StateRefreshReason,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StateRefreshReason {
+    Visibility,
+    AndroidResume,
+    ResyncRequired,
+    Manual,
+    Safety,
+}
+
+#[derive(Debug, Serialize)]
+struct StateRefreshResponse {
+    refresh_id: String,
+}
+
+struct ActiveStateStreamGuard {
+    stream_id: String,
+    active_state_streams: Arc<Mutex<HashSet<String>>>,
+}
+
+impl Drop for ActiveStateStreamGuard {
+    fn drop(&mut self) {
+        if let Ok(mut active_state_streams) = self.active_state_streams.lock() {
+            active_state_streams.remove(&self.stream_id);
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -129,6 +173,9 @@ enum StateMessage {
         generation: u64,
         sequence: u64,
         snapshot: Snapshot,
+        stream_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        refresh_ids: Option<Vec<String>>,
     },
     #[serde(rename = "pane.agent_status_changed")]
     PaneAgentStatusChanged {
@@ -152,63 +199,13 @@ enum StateMessage {
         sequence: u64,
         pane_id: String,
     },
-    #[serde(rename = "workspace.upserted")]
-    WorkspaceUpserted {
-        generation: u64,
-        sequence: u64,
-        workspace: SnapshotWorkspaceInfo,
-    },
-    #[serde(rename = "workspace.removed")]
-    WorkspaceRemoved {
-        generation: u64,
-        sequence: u64,
-        workspace_id: String,
-    },
-    #[serde(rename = "tab.upserted")]
-    TabUpserted {
-        generation: u64,
-        sequence: u64,
-        tab: SnapshotTabInfo,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        layout: Option<PaneLayoutSnapshot>,
-    },
-    #[serde(rename = "tab.removed")]
-    TabRemoved {
-        generation: u64,
-        sequence: u64,
-        tab_id: String,
-        workspace_id: String,
-    },
-    #[serde(rename = "pane.upserted")]
-    PaneUpserted {
-        generation: u64,
-        sequence: u64,
-        pane: PaneInfo,
-        workspace: SnapshotWorkspaceInfo,
-        tab: SnapshotTabInfo,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        layout: Option<PaneLayoutSnapshot>,
-    },
-    #[serde(rename = "pane.removed")]
-    PaneRemoved {
-        generation: u64,
-        sequence: u64,
-        pane_id: String,
-        workspace_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        tab_id: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        workspace: Option<SnapshotWorkspaceInfo>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        tab: Option<SnapshotTabInfo>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        layout: Option<PaneLayoutSnapshot>,
-    },
     #[serde(rename = "resync_required")]
     ResyncRequired {
         generation: u64,
         sequence: u64,
         reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        refresh_ids: Option<Vec<String>>,
     },
     #[serde(rename = "error")]
     Error {
@@ -300,6 +297,12 @@ impl fmt::Display for BridgeError {
             Self::Forbidden(message) => write!(f, "{message}"),
             Self::Protocol(message) => write!(f, "{message}"),
         }
+    }
+}
+
+impl BridgeError {
+    fn is_unknown_pane(&self) -> bool {
+        matches!(self, Self::Protocol(message) if message.contains("unknown pane "))
     }
 }
 
@@ -527,6 +530,8 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
         selected_pane_id: Arc::new(Mutex::new(None)),
         ui_event_tx: tokio::sync::broadcast::channel(256).0,
+        state_refresh_tx: tokio::sync::broadcast::channel(256).0,
+        active_state_streams: Arc::new(Mutex::new(HashSet::new())),
         upload_dir: options.upload_dir.clone(),
     };
     let app = Router::new()
@@ -541,6 +546,10 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         .route(
             "/api/command",
             post(command_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/state/refresh",
+            post(state_refresh_handler).options(preflight_handler),
         )
         .route(
             "/api/selection",
@@ -1215,6 +1224,7 @@ async fn command_handler(
     validate_web_command(&request.method)?;
     fill_clear_rename_labels(&state.api, &mut request.method)?;
     let should_prune_terminal_sessions = command_may_close_terminal_session(&request.method);
+    let should_refresh_state_streams = command_may_change_structure(&request.method);
 
     let api = state.api.clone();
     let response = tokio::task::spawn_blocking(move || api.request(request))
@@ -1226,7 +1236,52 @@ async fn command_handler(
         let prune_state = state.clone();
         tokio::task::spawn_blocking(move || prune_detached_terminal_sessions(&prune_state));
     }
+    if should_refresh_state_streams {
+        let state_refresh_tx = state.state_refresh_tx.clone();
+        let event = StateRefreshEvent {
+            target_stream_id: None,
+            refresh_id: None,
+        };
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = state_refresh_tx.send(event);
+        });
+    }
     Ok(Json(value))
+}
+
+async fn state_refresh_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+    Json(body): Json<StateRefreshRequest>,
+) -> Result<Json<StateRefreshResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    if body.stream_id.trim().is_empty() {
+        return Err(BridgeError::BadRequest("missing stream_id".to_string()));
+    }
+    {
+        let active_state_streams = state.active_state_streams.lock().map_err(|_| {
+            BridgeError::Protocol("state stream registry lock poisoned".to_string())
+        })?;
+        if !active_state_streams.contains(&body.stream_id) {
+            return Err(BridgeError::BadRequest(format!(
+                "unknown stream_id: {}",
+                body.stream_id
+            )));
+        }
+    }
+    let refresh_id = next_state_refresh_id();
+    let _ = &body.reason;
+    let state_refresh_tx = state.state_refresh_tx.clone();
+    let event = StateRefreshEvent {
+        target_stream_id: Some(body.stream_id),
+        refresh_id: Some(refresh_id.clone()),
+    };
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let _ = state_refresh_tx.send(event);
+    });
+    Ok(Json(StateRefreshResponse { refresh_id }))
 }
 
 fn command_may_close_terminal_session(method: &Method) -> bool {
@@ -1236,6 +1291,46 @@ fn command_may_close_terminal_session(method: &Method) -> bool {
             | Method::TabClose(_)
             | Method::PaneClose(_)
             | Method::PaneMove(_)
+    )
+}
+
+fn command_may_change_structure(method: &Method) -> bool {
+    matches!(
+        method,
+        Method::WorkspaceCreate(_)
+            | Method::WorkspaceClose(_)
+            | Method::WorkspaceRename(_)
+            | Method::WorkspaceFocus(_)
+            | Method::WorktreeOpen(_)
+            | Method::WorktreeRemove(_)
+            | Method::AgentStart(_)
+            | Method::TabCreate(_)
+            | Method::TabClose(_)
+            | Method::TabRename(_)
+            | Method::TabFocus(_)
+            | Method::PaneSplit(_)
+            | Method::PaneClose(_)
+            | Method::PaneMove(_)
+            | Method::PaneSwap(_)
+            | Method::PaneZoom(_)
+            | Method::PaneResize(_)
+            | Method::PaneRename(_)
+            | Method::PaneFocusDirection(_)
+            | Method::LayoutApply(_)
+    )
+}
+
+fn next_state_stream_id() -> String {
+    format!(
+        "stream-{}",
+        STATE_STREAM_COUNTER.fetch_add(1, Ordering::Relaxed) + 1
+    )
+}
+
+fn next_state_refresh_id() -> String {
+    format!(
+        "refresh-{}",
+        STATE_REFRESH_COUNTER.fetch_add(1, Ordering::Relaxed) + 1
     )
 }
 
@@ -1707,6 +1802,18 @@ async fn handle_events_socket(socket: WebSocket, state: BridgeState) {
 }
 
 async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
+    let stream_id = next_state_stream_id();
+    {
+        let mut active_state_streams = match state.active_state_streams.lock() {
+            Ok(active_state_streams) => active_state_streams,
+            Err(_) => return,
+        };
+        active_state_streams.insert(stream_id.clone());
+    }
+    let _stream_guard = ActiveStateStreamGuard {
+        stream_id: stream_id.clone(),
+        active_state_streams: state.active_state_streams.clone(),
+    };
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let setup_state = state.clone();
     let setup = tokio::task::spawn_blocking(move || open_state_projection(setup_state)).await;
@@ -1739,7 +1846,8 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
     };
 
     let mut ui_event_rx = state.ui_event_tx.subscribe();
-    let snapshot_message = projection.snapshot_message();
+    let mut refresh_rx = state.state_refresh_tx.subscribe();
+    let snapshot_message = projection.snapshot_message(&stream_id, None);
     let Ok(text) = serde_json::to_string(&snapshot_message) else {
         return;
     };
@@ -1751,7 +1859,7 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
         tokio::select! {
             event = upstream.rx.recv() => {
                 let Some(event) = event else {
-                    let message = projection.resync_required("Herdr subscription stream closed");
+                    let message = projection.resync_required("Herdr subscription stream closed", None);
                     let Ok(text) = serde_json::to_string(&message) else {
                         return;
                     };
@@ -1764,59 +1872,51 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
                             let prune_state = state.clone();
                             tokio::task::spawn_blocking(move || prune_detached_terminal_sessions(&prune_state));
                         }
-                        match projection.apply_event(&state, envelope) {
-                            Ok(messages) => {
-                                for message in messages {
-                                    let Ok(text) = serde_json::to_string(&message) else {
-                                        continue;
-                                    };
-                                    if ws_sender.send(Message::Text(text.into())).await.is_err() {
-                                        return;
+                        if !projection.accepts_upstream_patch() {
+                            continue;
+                        }
+                        let event = match projection.apply_event(&state, envelope) {
+                            Ok(Some(message)) => Some(message),
+                            Ok(None) => None,
+                            Err(err) if err.is_unknown_pane() => {
+                                let refresh_result = refresh_state_projection(
+                                    &state,
+                                    &stream_id,
+                                    &mut projection,
+                                    &mut upstream,
+                                    Vec::new(),
+                                ).await;
+                                match refresh_result {
+                                    Ok(message) => {
+                                        let Ok(text) = serde_json::to_string(&message) else {
+                                            return;
+                                        };
+                                        if ws_sender.send(Message::Text(text.into())).await.is_err() {
+                                            return;
+                                        }
+                                        None
                                     }
-                                }
-                                if projection.subscriptions_stale {
-                                    tokio::time::sleep(STATE_STREAM_REBUILD_DEBOUNCE).await;
-                                    let rebuild_state = state.clone();
-                                    let rebuilt = tokio::task::spawn_blocking(move || open_state_projection(rebuild_state)).await;
-                                    match rebuilt {
-                                        Ok(Ok((mut next_projection, next_upstream))) => {
-                                            next_projection.generation = projection.generation + 1;
-                                            next_projection.next_sequence = projection.next_sequence;
-                                            upstream.cancel();
-                                            upstream = next_upstream;
-                                            projection = next_projection;
-                                            let message = projection.snapshot_message();
-                                            let Ok(text) = serde_json::to_string(&message) else {
-                                                return;
-                                            };
-                                            if ws_sender.send(Message::Text(text.into())).await.is_err() {
-                                                return;
-                                            }
-                                        }
-                                        _ => {
-                                            let message = projection.resync_required("failed to rebuild Herdr subscriptions");
-                                            let Ok(text) = serde_json::to_string(&message) else {
-                                                return;
-                                            };
-                                            if ws_sender.send(Message::Text(text.into())).await.is_err() {
-                                                return;
-                                            }
-                                        }
+                                    Err(err) => {
+                                        projection.quiescent = true;
+                                        Some(projection.patch_failed(err, None))
                                     }
                                 }
                             }
-                            Err(err) => {
-                                let message = projection.patch_failed(err);
-                                let Ok(text) = serde_json::to_string(&message) else {
-                                    return;
-                                };
-                                if ws_sender.send(Message::Text(text.into())).await.is_err() {
-                                    return;
-                                }
+                            Err(err) => Some(projection.patch_failed(err, None)),
+                        };
+                        if let Some(message) = event {
+                            let Ok(text) = serde_json::to_string(&message) else {
+                                return;
+                            };
+                            if ws_sender.send(Message::Text(text.into())).await.is_err() {
+                                return;
                             }
                         }
                     }
                     UpstreamStateEvent::Status(status) => {
+                        if !projection.accepts_upstream_patch() {
+                            continue;
+                        }
                         match projection.apply_status(&state, status, false) {
                             Ok(message) => {
                                 let Ok(text) = serde_json::to_string(&message) else {
@@ -1826,8 +1926,36 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
                                     return;
                                 }
                             }
+                            Err(err) if err.is_unknown_pane() => {
+                                match refresh_state_projection(
+                                    &state,
+                                    &stream_id,
+                                    &mut projection,
+                                    &mut upstream,
+                                    Vec::new(),
+                                ).await {
+                                    Ok(message) => {
+                                        let Ok(text) = serde_json::to_string(&message) else {
+                                            return;
+                                        };
+                                        if ws_sender.send(Message::Text(text.into())).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                    Err(err) => {
+                                        projection.quiescent = true;
+                                        let message = projection.patch_failed(err, None);
+                                        let Ok(text) = serde_json::to_string(&message) else {
+                                            return;
+                                        };
+                                        if ws_sender.send(Message::Text(text.into())).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
                             Err(err) => {
-                                let message = projection.patch_failed(err);
+                                let message = projection.patch_failed(err, None);
                                 let Ok(text) = serde_json::to_string(&message) else {
                                     return;
                                 };
@@ -1838,7 +1966,7 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
                         }
                     }
                     UpstreamStateEvent::ResyncRequired(reason) => {
-                        let message = projection.resync_required(reason);
+                        let message = projection.resync_required(reason, None);
                         let Ok(text) = serde_json::to_string(&message) else {
                             return;
                         };
@@ -1860,6 +1988,9 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
                 match event {
                     Ok(event) => {
                         if let Some(pane_id) = selection_event_pane_id(&event) {
+                            if !projection.accepts_selection_change(&pane_id) {
+                                continue;
+                            }
                             projection.snapshot.selected_pane_id = Some(pane_id.clone());
                             let message = projection.selection_changed(pane_id);
                             let Ok(text) = serde_json::to_string(&message) else {
@@ -1871,7 +2002,60 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        let message = projection.resync_required("selection event stream lagged");
+                        let message = projection.resync_required("selection event stream lagged", None);
+                        let Ok(text) = serde_json::to_string(&message) else {
+                            return;
+                        };
+                        if ws_sender.send(Message::Text(text.into())).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+            event = refresh_rx.recv() => {
+                match event {
+                    Ok(event) => {
+                        if event.target_stream_id.as_deref().is_some_and(|target| target != stream_id) {
+                            continue;
+                        }
+                        let mut refresh_ids = event.refresh_id.into_iter().collect::<Vec<_>>();
+                        tokio::time::sleep(STATE_STREAM_REBUILD_DEBOUNCE).await;
+                        while let Ok(event) = refresh_rx.try_recv() {
+                            if event.target_stream_id.as_deref().is_some_and(|target| target != stream_id) {
+                                continue;
+                            }
+                            refresh_ids.extend(event.refresh_id);
+                        }
+                        match refresh_state_projection(
+                            &state,
+                            &stream_id,
+                            &mut projection,
+                            &mut upstream,
+                            refresh_ids.clone(),
+                        ).await {
+                            Ok(message) => {
+                                let Ok(text) = serde_json::to_string(&message) else {
+                                    return;
+                                };
+                                if ws_sender.send(Message::Text(text.into())).await.is_err() {
+                                    return;
+                                }
+                            }
+                            Err(err) => {
+                                projection.quiescent = true;
+                                let message = projection.patch_failed_with_refresh_ids(err, refresh_ids);
+                                let Ok(text) = serde_json::to_string(&message) else {
+                                    return;
+                                };
+                                if ws_sender.send(Message::Text(text.into())).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let message = projection.resync_required("state refresh stream lagged", None);
                         let Ok(text) = serde_json::to_string(&message) else {
                             return;
                         };
@@ -1894,6 +2078,27 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
             else => return,
         }
     }
+}
+
+async fn refresh_state_projection(
+    state: &BridgeState,
+    stream_id: &str,
+    projection: &mut BridgeProjection,
+    upstream: &mut StateSubscription,
+    refresh_ids: Vec<String>,
+) -> Result<StateMessage, BridgeError> {
+    let rebuild_state = state.clone();
+    let rebuilt = tokio::task::spawn_blocking(move || open_state_projection(rebuild_state))
+        .await
+        .map_err(|err| BridgeError::Protocol(err.to_string()))??;
+    let (mut next_projection, next_upstream) = rebuilt;
+    next_projection.generation = projection.generation + 1;
+    next_projection.next_sequence = projection.next_sequence;
+    next_projection.quiescent = false;
+    upstream.cancel();
+    *upstream = next_upstream;
+    *projection = next_projection;
+    Ok(projection.snapshot_message(stream_id, (!refresh_ids.is_empty()).then_some(refresh_ids)))
 }
 
 async fn handle_ui_events_socket(socket: WebSocket, state: BridgeState) {
@@ -1959,7 +2164,7 @@ impl BridgeProjection {
             snapshot,
             generation: 1,
             next_sequence: 1,
-            subscriptions_stale: false,
+            quiescent: false,
         }
     }
 
@@ -1969,19 +2174,43 @@ impl BridgeProjection {
         sequence
     }
 
-    fn snapshot_message(&mut self) -> StateMessage {
+    fn accepts_upstream_patch(&self) -> bool {
+        !self.quiescent
+    }
+
+    fn accepts_selection_change(&self, pane_id: &str) -> bool {
+        !self.quiescent
+            || self
+                .snapshot
+                .panes
+                .iter()
+                .any(|pane| pane.pane_id == pane_id)
+    }
+
+    fn snapshot_message(
+        &mut self,
+        stream_id: &str,
+        refresh_ids: Option<Vec<String>>,
+    ) -> StateMessage {
         StateMessage::Snapshot {
             generation: self.generation,
             sequence: self.next_sequence(),
             snapshot: self.snapshot.clone(),
+            stream_id: stream_id.to_string(),
+            refresh_ids,
         }
     }
 
-    fn resync_required(&mut self, reason: impl Into<String>) -> StateMessage {
+    fn resync_required(
+        &mut self,
+        reason: impl Into<String>,
+        refresh_id: Option<String>,
+    ) -> StateMessage {
         StateMessage::ResyncRequired {
             generation: self.generation,
             sequence: self.next_sequence(),
             reason: reason.into(),
+            refresh_ids: refresh_id.map(|id| vec![id]),
         }
     }
 
@@ -1994,8 +2223,21 @@ impl BridgeProjection {
         }
     }
 
-    fn patch_failed(&mut self, err: BridgeError) -> StateMessage {
-        self.resync_required(format!("state patch failed: {err}"))
+    fn patch_failed(&mut self, err: BridgeError, refresh_id: Option<String>) -> StateMessage {
+        self.resync_required(format!("state patch failed: {err}"), refresh_id)
+    }
+
+    fn patch_failed_with_refresh_ids(
+        &mut self,
+        err: BridgeError,
+        refresh_ids: Vec<String>,
+    ) -> StateMessage {
+        StateMessage::ResyncRequired {
+            generation: self.generation,
+            sequence: self.next_sequence(),
+            reason: format!("state patch failed: {err}"),
+            refresh_ids: (!refresh_ids.is_empty()).then_some(refresh_ids),
+        }
     }
 
     fn selection_changed(&mut self, pane_id: String) -> StateMessage {
@@ -2052,287 +2294,8 @@ impl BridgeProjection {
         &mut self,
         state: &BridgeState,
         envelope: EventEnvelope,
-    ) -> Result<Vec<StateMessage>, BridgeError> {
-        let mut messages = Vec::new();
+    ) -> Result<Option<StateMessage>, BridgeError> {
         match envelope.data {
-            EventData::WorkspaceCreated { workspace }
-            | EventData::WorkspaceUpdated { workspace }
-            | EventData::WorktreeCreated { workspace, .. }
-            | EventData::WorktreeOpened { workspace, .. } => {
-                let wrapped = wrap_workspace(workspace.clone(), &self.snapshot.panes);
-                if self
-                    .snapshot
-                    .workspaces
-                    .iter()
-                    .any(|cached| cached == &wrapped)
-                {
-                    return Ok(messages);
-                }
-                let workspace = self.upsert_workspace(workspace);
-                messages.push(self.workspace_upserted(workspace));
-            }
-            EventData::WorkspaceRenamed {
-                workspace_id,
-                label,
-            } => {
-                let mut workspace = match workspace_info(&state.api, &workspace_id) {
-                    Ok(workspace) => workspace,
-                    Err(_) => self
-                        .snapshot
-                        .workspaces
-                        .iter()
-                        .find(|item| item.info.workspace_id == workspace_id)
-                        .map(|item| item.info.clone())
-                        .ok_or_else(|| {
-                            BridgeError::Protocol(format!("unknown workspace {workspace_id}"))
-                        })?,
-                };
-                workspace.label = label;
-                workspace.label = workspace.label.trim().to_string();
-                let wrapped = wrap_workspace(workspace.clone(), &self.snapshot.panes);
-                if self
-                    .snapshot
-                    .workspaces
-                    .iter()
-                    .any(|cached| cached == &wrapped)
-                {
-                    return Ok(messages);
-                }
-                let workspace = self.upsert_workspace(workspace);
-                messages.push(self.workspace_upserted(workspace));
-            }
-            EventData::WorkspaceFocused { workspace_id } => {
-                if self.snapshot.workspaces.iter().all(|workspace| {
-                    workspace.info.focused == (workspace.info.workspace_id == workspace_id)
-                }) {
-                    return Ok(messages);
-                }
-                for workspace in &mut self.snapshot.workspaces {
-                    workspace.info.focused = workspace.info.workspace_id == workspace_id;
-                }
-                let affected = self.snapshot.workspaces.iter().cloned().collect::<Vec<_>>();
-                for workspace in affected {
-                    messages.push(self.workspace_upserted(workspace));
-                }
-            }
-            EventData::WorkspaceClosed { workspace_id, .. } => {
-                if workspace_info(&state.api, &workspace_id).is_ok() {
-                    debug!("ignoring stale workspace.closed for live workspace {workspace_id}");
-                    return Ok(messages);
-                }
-                self.snapshot
-                    .workspaces
-                    .retain(|workspace| workspace.info.workspace_id != workspace_id);
-                self.snapshot
-                    .tabs
-                    .retain(|tab| tab.info.workspace_id != workspace_id);
-                self.snapshot
-                    .panes
-                    .retain(|pane| pane.workspace_id != workspace_id);
-                self.snapshot
-                    .layouts
-                    .retain(|layout| layout.workspace_id != workspace_id);
-                self.clear_missing_selection();
-                self.subscriptions_stale = true;
-                messages.push(self.workspace_removed(workspace_id));
-            }
-            EventData::TabCreated { tab } => {
-                if self
-                    .snapshot
-                    .tabs
-                    .iter()
-                    .any(|cached| cached.info.tab_id == tab.tab_id)
-                {
-                    debug!("ignoring stale tab.created for existing tab {}", tab.tab_id);
-                    return Ok(messages);
-                }
-                let tab = self.upsert_tab(tab);
-                let workspace = self.refresh_workspace(&state.api, &tab.info.workspace_id)?;
-                let layout = self.refresh_layout(&state.api, &tab.info.tab_id);
-                messages.push(self.workspace_upserted(workspace));
-                messages.push(self.tab_upserted(tab, layout));
-            }
-            EventData::TabRenamed { tab_id, label, .. } => {
-                let mut tab = match tab_info(&state.api, &tab_id) {
-                    Ok(tab) => tab,
-                    Err(_) => self
-                        .snapshot
-                        .tabs
-                        .iter()
-                        .find(|item| item.info.tab_id == tab_id)
-                        .map(|item| item.info.clone())
-                        .ok_or_else(|| BridgeError::Protocol(format!("unknown tab {tab_id}")))?,
-                };
-                tab.label = label;
-                tab.label = tab.label.trim().to_string();
-                let wrapped = wrap_tab(tab.clone());
-                if self.snapshot.tabs.iter().any(|cached| cached == &wrapped) {
-                    return Ok(messages);
-                }
-                let tab = self.upsert_tab(tab);
-                messages.push(self.tab_upserted(tab, None));
-            }
-            EventData::TabFocused {
-                tab_id,
-                workspace_id,
-            } => {
-                let workspace = self.refresh_workspace(&state.api, &workspace_id)?;
-                let tabs_already_focused = self
-                    .snapshot
-                    .tabs
-                    .iter()
-                    .filter(|tab| tab.info.workspace_id == workspace_id)
-                    .all(|tab| tab.info.focused == (tab.info.tab_id == tab_id));
-                if tabs_already_focused
-                    && self
-                        .snapshot
-                        .workspaces
-                        .iter()
-                        .any(|cached| cached == &workspace)
-                {
-                    return Ok(messages);
-                }
-                for tab in &mut self.snapshot.tabs {
-                    if tab.info.workspace_id == workspace_id {
-                        tab.info.focused = tab.info.tab_id == tab_id;
-                    }
-                }
-                let affected = self
-                    .snapshot
-                    .tabs
-                    .iter()
-                    .filter(|tab| tab.info.workspace_id == workspace_id)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                for tab in affected {
-                    messages.push(self.tab_upserted(tab, None));
-                }
-                messages.push(self.workspace_upserted(workspace));
-            }
-            EventData::TabClosed {
-                tab_id,
-                workspace_id,
-            } => {
-                if tab_info(&state.api, &tab_id).is_ok() {
-                    debug!("ignoring stale tab.closed for live tab {tab_id}");
-                    return Ok(messages);
-                }
-                self.remove_tab(&tab_id);
-                self.clear_missing_selection();
-                self.subscriptions_stale = true;
-                let workspace = self.refresh_workspace(&state.api, &workspace_id)?;
-                messages.push(self.tab_removed(tab_id, workspace_id));
-                messages.push(self.workspace_upserted(workspace));
-            }
-            EventData::PaneCreated { pane } => {
-                if self
-                    .snapshot
-                    .panes
-                    .iter()
-                    .any(|cached| cached.pane_id == pane.pane_id)
-                {
-                    debug!(
-                        "ignoring stale pane.created for existing pane {}",
-                        pane.pane_id
-                    );
-                    return Ok(messages);
-                }
-                messages.push(self.refresh_and_upsert_pane(state, pane)?);
-                self.subscriptions_stale = true;
-            }
-            EventData::PaneFocused {
-                pane_id,
-                workspace_id: _,
-            } => {
-                let pane = pane_info(&state.api, &pane_id)?;
-                if self
-                    .snapshot
-                    .panes
-                    .iter()
-                    .filter(|cached| cached.tab_id == pane.tab_id)
-                    .all(|cached| cached.focused == (cached.pane_id == pane.pane_id))
-                {
-                    return Ok(messages);
-                }
-                for cached in &mut self.snapshot.panes {
-                    if cached.tab_id == pane.tab_id {
-                        cached.focused = cached.pane_id == pane.pane_id;
-                    }
-                }
-                messages.push(self.refresh_and_upsert_pane(state, pane)?);
-            }
-            EventData::PaneMoved {
-                previous_pane_id,
-                previous_workspace_id,
-                previous_tab_id,
-                pane,
-                created_workspace,
-                created_tab,
-                closed_workspace_id,
-                closed_tab_id,
-            } => {
-                let source_workspace_id = previous_workspace_id.clone();
-                let source_tab_id = previous_tab_id.clone();
-                let source_workspace_closed = closed_workspace_id
-                    .as_ref()
-                    .is_some_and(|workspace_id| workspace_id == &source_workspace_id);
-                let source_tab_closed = closed_tab_id
-                    .as_ref()
-                    .is_some_and(|tab_id| tab_id == &source_tab_id);
-                if let Some(workspace_id) = closed_workspace_id {
-                    self.snapshot
-                        .workspaces
-                        .retain(|workspace| workspace.info.workspace_id != workspace_id);
-                    self.snapshot
-                        .tabs
-                        .retain(|tab| tab.info.workspace_id != workspace_id);
-                    self.snapshot
-                        .panes
-                        .retain(|pane| pane.workspace_id != workspace_id);
-                    self.snapshot
-                        .layouts
-                        .retain(|layout| layout.workspace_id != workspace_id);
-                    messages.push(self.workspace_removed(workspace_id));
-                }
-                if let Some(tab_id) = closed_tab_id {
-                    self.remove_tab(&tab_id);
-                    messages.push(self.tab_removed(tab_id, previous_workspace_id.clone()));
-                }
-                self.remove_pane(&previous_pane_id);
-                if previous_pane_id != pane.pane_id {
-                    messages.push(self.pane_removed(
-                        previous_pane_id,
-                        source_workspace_id.clone(),
-                        Some(source_tab_id.clone()),
-                        None,
-                        None,
-                        None,
-                    ));
-                }
-                if !source_workspace_closed {
-                    let workspace = self.refresh_workspace(&state.api, &source_workspace_id)?;
-                    messages.push(self.workspace_upserted(workspace));
-                }
-                if !source_tab_closed {
-                    let tab = self.refresh_tab(&state.api, &source_tab_id)?;
-                    let layout = self.refresh_layout(&state.api, &source_tab_id);
-                    messages.push(self.tab_upserted(tab, layout));
-                }
-                if let Some(workspace) = created_workspace {
-                    let workspace = self.upsert_workspace(workspace);
-                    messages.push(self.workspace_upserted(workspace));
-                }
-                if let Some(tab) = created_tab {
-                    let tab = self.upsert_tab(tab);
-                    messages.push(self.tab_upserted(tab, None));
-                }
-                messages.push(self.refresh_and_upsert_pane(state, *pane)?);
-                self.subscriptions_stale = true;
-            }
-            EventData::PaneExited { pane_id, .. } => {
-                let pane = pane_info(&state.api, &pane_id)?;
-                messages.push(self.refresh_and_upsert_pane(state, pane)?);
-            }
             EventData::PaneAgentDetected { pane_id, .. } => {
                 let pane = pane_info(&state.api, &pane_id)?;
                 let status = PaneAgentStatusChangedEvent {
@@ -2345,57 +2308,12 @@ impl BridgeProjection {
                     display_agent: pane.display_agent.clone(),
                     state_labels: pane.state_labels.clone(),
                 };
-                messages.push(self.apply_status(state, status, true)?);
-            }
-            EventData::PaneClosed {
-                pane_id,
-                workspace_id,
-            } => {
-                if pane_info(&state.api, &pane_id).is_ok() {
-                    debug!("ignoring stale pane.closed for live pane {pane_id}");
-                    return Ok(messages);
-                }
-                let tab_id = self
-                    .snapshot
-                    .panes
-                    .iter()
-                    .find(|pane| pane.pane_id == pane_id)
-                    .map(|pane| pane.tab_id.clone())
-                    .ok_or_else(|| BridgeError::Protocol(format!("unknown pane {pane_id}")))?;
-                self.remove_pane(&pane_id);
-                self.clear_missing_selection();
-                let workspace = Some(self.refresh_workspace(&state.api, &workspace_id)?);
-                let tab = Some(self.refresh_tab(&state.api, &tab_id)?);
-                let layout = self.refresh_layout(&state.api, &tab_id);
-                messages.push(self.pane_removed(
-                    pane_id,
-                    workspace_id,
-                    Some(tab_id),
-                    workspace,
-                    tab,
-                    layout,
-                ));
-                self.subscriptions_stale = true;
-            }
-            EventData::WorktreeRemoved { workspace_id, .. } => {
-                let workspace = self.refresh_workspace(&state.api, &workspace_id)?;
-                messages.push(self.workspace_upserted(workspace));
+                return Ok(Some(self.apply_status(state, status, true)?));
             }
             EventData::PaneOutputChanged { .. } | EventData::PaneAgentStatusChanged { .. } => {}
+            _ => {}
         }
-        Ok(messages)
-    }
-
-    fn refresh_and_upsert_pane(
-        &mut self,
-        state: &BridgeState,
-        pane: PaneInfo,
-    ) -> Result<StateMessage, BridgeError> {
-        self.upsert_pane(pane.clone());
-        let workspace = self.refresh_workspace(&state.api, &pane.workspace_id)?;
-        let tab = self.refresh_tab(&state.api, &pane.tab_id)?;
-        let layout = self.refresh_layout(&state.api, &pane.tab_id);
-        Ok(self.pane_upserted(pane, workspace, tab, layout))
+        Ok(None)
     }
 
     fn refresh_workspace(
@@ -2416,26 +2334,6 @@ impl BridgeProjection {
         Ok(self.upsert_tab(tab))
     }
 
-    fn refresh_layout(&mut self, api: &ApiClient, tab_id: &str) -> Option<PaneLayoutSnapshot> {
-        let pane = self
-            .snapshot
-            .panes
-            .iter()
-            .find(|pane| pane.tab_id == tab_id)?;
-        let layout = match api_request(
-            api,
-            &format!("herdr-web:layout:{tab_id}"),
-            Method::PaneLayout(PaneLayoutParams {
-                pane_id: Some(pane.pane_id.clone()),
-            }),
-        ) {
-            Ok(ResponseResult::PaneLayout { layout }) => layout,
-            Ok(_) | Err(_) => return None,
-        };
-        upsert_layout(&mut self.snapshot.layouts, layout.clone());
-        Some(layout)
-    }
-
     fn upsert_workspace(&mut self, workspace: WorkspaceInfo) -> SnapshotWorkspaceInfo {
         let wrapped = wrap_workspace(workspace, &self.snapshot.panes);
         upsert_by(&mut self.snapshot.workspaces, wrapped.clone(), |item| {
@@ -2451,115 +2349,6 @@ impl BridgeProjection {
         });
         wrapped
     }
-
-    fn upsert_pane(&mut self, pane: PaneInfo) {
-        upsert_by(&mut self.snapshot.panes, pane, |item| item.pane_id.as_str());
-    }
-
-    fn remove_tab(&mut self, tab_id: &str) {
-        self.snapshot.tabs.retain(|tab| tab.info.tab_id != tab_id);
-        self.snapshot.panes.retain(|pane| pane.tab_id != tab_id);
-        self.snapshot
-            .layouts
-            .retain(|layout| layout.tab_id != tab_id);
-    }
-
-    fn remove_pane(&mut self, pane_id: &str) {
-        self.snapshot.panes.retain(|pane| pane.pane_id != pane_id);
-    }
-
-    fn clear_missing_selection(&mut self) {
-        if self
-            .snapshot
-            .selected_pane_id
-            .as_ref()
-            .is_some_and(|pane_id| {
-                !self
-                    .snapshot
-                    .panes
-                    .iter()
-                    .any(|pane| pane.pane_id == *pane_id)
-            })
-        {
-            self.snapshot.selected_pane_id = None;
-        }
-    }
-
-    fn workspace_upserted(&mut self, workspace: SnapshotWorkspaceInfo) -> StateMessage {
-        StateMessage::WorkspaceUpserted {
-            generation: self.generation,
-            sequence: self.next_sequence(),
-            workspace,
-        }
-    }
-
-    fn workspace_removed(&mut self, workspace_id: String) -> StateMessage {
-        StateMessage::WorkspaceRemoved {
-            generation: self.generation,
-            sequence: self.next_sequence(),
-            workspace_id,
-        }
-    }
-
-    fn tab_upserted(
-        &mut self,
-        tab: SnapshotTabInfo,
-        layout: Option<PaneLayoutSnapshot>,
-    ) -> StateMessage {
-        StateMessage::TabUpserted {
-            generation: self.generation,
-            sequence: self.next_sequence(),
-            tab,
-            layout,
-        }
-    }
-
-    fn tab_removed(&mut self, tab_id: String, workspace_id: String) -> StateMessage {
-        StateMessage::TabRemoved {
-            generation: self.generation,
-            sequence: self.next_sequence(),
-            tab_id,
-            workspace_id,
-        }
-    }
-
-    fn pane_upserted(
-        &mut self,
-        pane: PaneInfo,
-        workspace: SnapshotWorkspaceInfo,
-        tab: SnapshotTabInfo,
-        layout: Option<PaneLayoutSnapshot>,
-    ) -> StateMessage {
-        StateMessage::PaneUpserted {
-            generation: self.generation,
-            sequence: self.next_sequence(),
-            pane,
-            workspace,
-            tab,
-            layout,
-        }
-    }
-
-    fn pane_removed(
-        &mut self,
-        pane_id: String,
-        workspace_id: String,
-        tab_id: Option<String>,
-        workspace: Option<SnapshotWorkspaceInfo>,
-        tab: Option<SnapshotTabInfo>,
-        layout: Option<PaneLayoutSnapshot>,
-    ) -> StateMessage {
-        StateMessage::PaneRemoved {
-            generation: self.generation,
-            sequence: self.next_sequence(),
-            pane_id,
-            workspace_id,
-            tab_id,
-            workspace,
-            tab,
-            layout,
-        }
-    }
 }
 
 fn upsert_by<T>(items: &mut Vec<T>, item: T, key: impl Fn(&T) -> &str) {
@@ -2568,15 +2357,6 @@ fn upsert_by<T>(items: &mut Vec<T>, item: T, key: impl Fn(&T) -> &str) {
         items[index] = item;
     } else {
         items.push(item);
-    }
-}
-
-fn upsert_layout(layouts: &mut Vec<PaneLayoutSnapshot>, layout: PaneLayoutSnapshot) {
-    let tab_id = layout.tab_id.clone();
-    if let Some(index) = layouts.iter().position(|item| item.tab_id == tab_id) {
-        layouts[index] = layout;
-    } else {
-        layouts.push(layout);
     }
 }
 
@@ -3246,6 +3026,71 @@ fn unsupported_daemon_protocol_message(protocol: u32) -> String {
 mod tests {
     use super::*;
 
+    fn test_snapshot() -> Snapshot {
+        Snapshot {
+            workspaces: vec![SnapshotWorkspaceInfo {
+                info: WorkspaceInfo {
+                    workspace_id: "w1".to_string(),
+                    number: 1,
+                    label: "repo".to_string(),
+                    focused: true,
+                    pane_count: 1,
+                    tab_count: 1,
+                    active_tab_id: "t1".to_string(),
+                    agent_status: herdr_compat::api::schema::AgentStatus::Idle,
+                    worktree: None,
+                },
+                can_clear_name: false,
+            }],
+            tabs: vec![SnapshotTabInfo {
+                info: TabInfo {
+                    tab_id: "t1".to_string(),
+                    workspace_id: "w1".to_string(),
+                    number: 1,
+                    label: "main".to_string(),
+                    focused: true,
+                    pane_count: 1,
+                    agent_status: herdr_compat::api::schema::AgentStatus::Idle,
+                },
+                can_clear_name: true,
+            }],
+            panes: vec![PaneInfo {
+                pane_id: "p1".to_string(),
+                terminal_id: "term-1".to_string(),
+                workspace_id: "w1".to_string(),
+                tab_id: "t1".to_string(),
+                focused: true,
+                cwd: None,
+                foreground_cwd: None,
+                label: None,
+                agent: None,
+                agent_session: None,
+                title: None,
+                display_agent: None,
+                agent_status: herdr_compat::api::schema::AgentStatus::Idle,
+                custom_status: None,
+                state_labels: HashMap::new(),
+                revision: 1,
+            }],
+            layouts: Vec::new(),
+            selected_pane_id: Some("p1".to_string()),
+        }
+    }
+
+    fn test_bridge_state() -> BridgeState {
+        BridgeState {
+            api: ApiClient::for_socket_path(PathBuf::from("/tmp/herdr-web-test.sock")),
+            client_socket_path: PathBuf::from("/tmp/herdr-web-client-test.sock"),
+            request_policy: test_policy("127.0.0.1", 8787),
+            terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
+            selected_pane_id: Arc::new(Mutex::new(None)),
+            ui_event_tx: tokio::sync::broadcast::channel(16).0,
+            state_refresh_tx: tokio::sync::broadcast::channel(16).0,
+            active_state_streams: Arc::new(Mutex::new(HashSet::new())),
+            upload_dir: PathBuf::from("/tmp"),
+        }
+    }
+
     #[test]
     fn parses_input_frame() {
         assert_eq!(
@@ -3324,6 +3169,163 @@ mod tests {
                 .count(),
             2
         );
+        assert!(subscriptions.iter().all(|item| matches!(
+            item,
+            Subscription::PaneAgentDetected {} | Subscription::PaneAgentStatusChanged { .. }
+        )));
+    }
+
+    #[test]
+    fn state_refresh_reasons_are_local_only() {
+        assert!(
+            serde_json::from_value::<StateRefreshRequest>(serde_json::json!({
+                "stream_id": "stream-1",
+                "reason": "manual"
+            }))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<StateRefreshRequest>(serde_json::json!({
+                "stream_id": "stream-1",
+                "reason": "visibility"
+            }))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<StateRefreshRequest>(serde_json::json!({
+                "stream_id": "stream-1",
+                "reason": "command"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<StateRefreshRequest>(serde_json::json!({
+                "stream_id": "stream-1",
+                "reason": "initial_load"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<StateRefreshRequest>(serde_json::json!({
+                "stream_id": "stream-1",
+                "reason": "stream_reconnect"
+            }))
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn state_refresh_handler_requires_active_stream_and_broadcasts_refresh_id() {
+        let state = test_bridge_state();
+        let unknown = state_refresh_handler(
+            State(state.clone()),
+            origin_headers("127.0.0.1:8787", Some("http://127.0.0.1:8787")),
+            Json(StateRefreshRequest {
+                stream_id: "missing".to_string(),
+                reason: StateRefreshReason::Manual,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(unknown, BridgeError::BadRequest(message) if message.contains("unknown stream_id"))
+        );
+
+        state
+            .active_state_streams
+            .lock()
+            .unwrap()
+            .insert("stream-1".to_string());
+        let mut refresh_rx = state.state_refresh_tx.subscribe();
+        let Json(response) = state_refresh_handler(
+            State(state),
+            origin_headers("127.0.0.1:8787", Some("http://127.0.0.1:8787")),
+            Json(StateRefreshRequest {
+                stream_id: "stream-1".to_string(),
+                reason: StateRefreshReason::Manual,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let event = tokio::time::timeout(Duration::from_secs(1), refresh_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.target_stream_id.as_deref(), Some("stream-1"));
+        assert_eq!(
+            event.refresh_id.as_deref(),
+            Some(response.refresh_id.as_str())
+        );
+    }
+
+    #[test]
+    fn command_structure_refresh_classification_is_pinned() {
+        assert!(command_may_change_structure(&Method::WorkspaceFocus(
+            WorkspaceTarget {
+                workspace_id: "w1".to_string(),
+            },
+        )));
+        assert!(command_may_change_structure(&Method::PaneRename(
+            herdr_compat::api::schema::PaneRenameParams {
+                pane_id: "p1".to_string(),
+                label: Some("editor".to_string()),
+            },
+        )));
+        assert!(command_may_change_structure(&Method::AgentStart(
+            herdr_compat::api::schema::AgentStartParams {
+                name: "codex".to_string(),
+                cwd: None,
+                workspace_id: None,
+                tab_id: None,
+                split: None,
+                focus: true,
+                argv: vec!["codex".to_string()],
+                env: HashMap::new(),
+            },
+        )));
+        assert!(!command_may_change_structure(&Method::PaneList(
+            PaneListParams::default(),
+        )));
+        assert!(!command_may_change_structure(&Method::PaneLayout(
+            PaneLayoutParams::default(),
+        )));
+    }
+
+    #[test]
+    fn state_snapshot_message_carries_stream_and_refresh_ids() {
+        let mut projection = BridgeProjection::new(test_snapshot());
+
+        let message = projection.snapshot_message("stream-1", Some(vec!["refresh-1".to_string()]));
+
+        match message {
+            StateMessage::Snapshot {
+                generation,
+                sequence,
+                stream_id,
+                refresh_ids,
+                ..
+            } => {
+                assert_eq!(generation, 1);
+                assert_eq!(sequence, 1);
+                assert_eq!(stream_id, "stream-1");
+                assert_eq!(refresh_ids, Some(vec!["refresh-1".to_string()]));
+            }
+            other => panic!("unexpected state message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quiescent_projection_suppresses_upstream_patches_but_allows_known_selection() {
+        let mut projection = BridgeProjection::new(test_snapshot());
+        assert!(projection.accepts_upstream_patch());
+        assert!(projection.accepts_selection_change("missing"));
+
+        projection.quiescent = true;
+
+        assert!(!projection.accepts_upstream_patch());
+        assert!(projection.accepts_selection_change("p1"));
+        assert!(!projection.accepts_selection_change("missing"));
     }
 
     #[test]
@@ -3336,7 +3338,8 @@ mod tests {
             selected_pane_id: None,
         });
 
-        let message = projection.patch_failed(BridgeError::Protocol("unknown pane p1".to_string()));
+        let message =
+            projection.patch_failed(BridgeError::Protocol("unknown pane p1".to_string()), None);
 
         match message {
             StateMessage::ResyncRequired { reason, .. } => {

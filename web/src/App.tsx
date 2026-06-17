@@ -7,7 +7,7 @@ import {
   SplitSquareHorizontal,
   SplitSquareVertical,
 } from "lucide-react";
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { AgentIcon, agentIconKind } from "./AgentIcon";
 import { BackendSettingsDialog } from "./BackendSettingsDialog";
@@ -55,9 +55,11 @@ import {
 import {
   applyStateMessage,
   emptyStateStreamModel,
+  isSequencedStateEnvelope,
   isStateMessage,
   type StateStreamModel,
 } from "./stateStream";
+import { createStateRefreshScheduler, type StateRefreshReason } from "./stateRefreshScheduler";
 import type { AgentStatus, PaneInfo, Snapshot, StateMessage, TabInfo, WorkspaceInfo } from "./types";
 
 type LoadState = "loading" | "ready" | "error";
@@ -248,15 +250,33 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [refitToken, setRefitToken] = useState(0);
   const [terminalFocusToken, setTerminalFocusToken] = useState(0);
-  const [stateStreamResetToken, setStateStreamResetToken] = useState(0);
   const isCompactLayout = useIsCompactLayout();
   const isTouchInput = useIsTouchInput();
   const showMobileKeyboardHideRefit = isNativeAndroid();
   const snapshotRef = useRef<Snapshot | null>(null);
   const stateStreamModelRef = useRef<StateStreamModel>(emptyStateStreamModel);
+  const connectionKeyRef = useRef(bridge.connectionKey);
+  const bridgeRef = useRef(bridge);
+  bridgeRef.current = bridge;
+  const stateRefreshSchedulerRef = useRef<ReturnType<typeof createStateRefreshScheduler> | null>(
+    null,
+  );
+  if (stateRefreshSchedulerRef.current === null) {
+    stateRefreshSchedulerRef.current = createStateRefreshScheduler({
+      enabled: () => Boolean(bridgeRef.current.capabilities?.state_stream),
+      currentStreamId: () => stateStreamModelRef.current.streamId,
+      hasCurrentSnapshot: () =>
+        connectionKeyRef.current === bridgeRef.current.connectionKey &&
+        stateStreamModelRef.current.snapshot !== null,
+      postRefresh: (streamId, reason) =>
+        postStateRefresh(bridgeRef.current.httpUrl, streamId, reason),
+      delay,
+      setTimeout: (handler, ms) => window.setTimeout(handler, ms),
+      clearTimeout: (timer) => window.clearTimeout(timer),
+    });
+  }
   const isCompactLayoutRef = useRef(isCompactLayout);
   const showDetailRef = useRef(showDetail);
-  const connectionKeyRef = useRef(bridge.connectionKey);
   const mobileSidebarHistoryRef = useRef(false);
   const mobileDetailHistoryRef = useRef(false);
   const sidebarResizePressRef = useRef<{
@@ -299,6 +319,22 @@ export function App() {
   const splitSupported = supportedCommands.includes("pane.split");
   const paneFocusSupported = supportedCommands.includes("pane.focus_direction");
   const paneMoveSupported = supportedCommands.includes("pane.move");
+
+  const settleStateRefresh = (refreshIds: string[] | undefined, error?: Error) => {
+    stateRefreshSchedulerRef.current?.settle(refreshIds, error);
+  };
+
+  const clearStateRefreshWaiters = (message: string) => {
+    stateRefreshSchedulerRef.current?.clear(message);
+  };
+
+  const requestStateRefresh = useCallback(
+    async (reason: StateRefreshReason) => {
+      await stateRefreshSchedulerRef.current?.request(reason);
+    },
+    [],
+  );
+
 
   const ensureMobileSidebarHistory = () => {
     if (!isCompactLayoutRef.current || isMobileDetailHistoryState(window.history.state)) {
@@ -487,14 +523,33 @@ export function App() {
         if (disposed || connectionKeyRef.current !== bridge.connectionKey) {
           return "ignore";
         }
+        if (message.type === "snapshot") {
+          settleStateRefresh(message.refresh_ids);
+        } else if (message.type === "resync_required") {
+          settleStateRefresh(message.refresh_ids, new Error(message.reason));
+        }
+        if (message.type === "error") {
+          clearStateRefreshWaiters(message.message);
+          setLoadState("loading");
+          return "reconnect";
+        }
         const hadSnapshot = stateStreamModelRef.current.snapshot !== null;
         const result = applyStateMessage(stateStreamModelRef.current, message);
         stateStreamModelRef.current = result.model;
         if (result.status === "resync") {
-          stateStreamModelRef.current = emptyStateStreamModel;
-          setSnapshot(null);
-          setLoadState("loading");
-          return "reconnect";
+          if (message.type === "resync_required" && message.refresh_ids?.length) {
+            return "continue";
+          }
+          void requestStateRefresh("resync_required").catch(() => {
+            if (
+              !disposed &&
+              connectionKeyRef.current === bridge.connectionKey &&
+              stateStreamModelRef.current.snapshot === null
+            ) {
+              setLoadState("error");
+            }
+          });
+          return "continue";
         }
         setSnapshot(result.model.snapshot);
         setSnapshotConnectionKey(bridge.connectionKey);
@@ -525,6 +580,7 @@ export function App() {
       });
       return () => {
         disposed = true;
+        clearStateRefreshWaiters("state stream closed");
         stateSocket.close();
       };
     }
@@ -564,8 +620,8 @@ export function App() {
     bridge.capabilities?.state_stream,
     bridge.connectionKey,
     bridge.httpUrl,
+    requestStateRefresh,
     bridge.resumeToken,
-    stateStreamResetToken,
     bridge.wsUrl,
   ]);
 
@@ -585,15 +641,28 @@ export function App() {
       if (document.visibilityState !== "visible") {
         return;
       }
-      stateStreamModelRef.current = emptyStateStreamModel;
-      setSnapshot(null);
-      setSnapshotConnectionKey(bridge.connectionKey);
-      setLoadState("loading");
-      setStateStreamResetToken((token) => token + 1);
+      void requestStateRefresh("visibility").catch(() => {});
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => document.removeEventListener("visibilitychange", onVisibilityChange);
-  }, [bridge.canConnect, bridge.capabilities?.state_stream, bridge.connectionKey]);
+  }, [
+    bridge.canConnect,
+    bridge.capabilities?.state_stream,
+    bridge.connectionKey,
+    requestStateRefresh,
+  ]);
+
+  useEffect(() => {
+    if (!bridge.capabilities?.state_stream || !bridge.canConnect) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void requestStateRefresh("safety").catch(() => {});
+      }
+    }, 60000);
+    return () => window.clearInterval(timer);
+  }, [bridge.canConnect, bridge.capabilities?.state_stream, requestStateRefresh]);
 
   useEffect(() => {
     const onPopState = (event: PopStateEvent) => {
@@ -970,11 +1039,11 @@ export function App() {
       return;
     }
     if (bridge.capabilities?.state_stream) {
-      stateStreamModelRef.current = emptyStateStreamModel;
-      setSnapshot(null);
-      setSnapshotConnectionKey(bridge.connectionKey);
-      setLoadState("loading");
-      setStateStreamResetToken((token) => token + 1);
+      void requestStateRefresh("manual").catch(() => {
+        if (connectionKeyRef.current === bridge.connectionKey && stateStreamModelRef.current.snapshot === null) {
+          setLoadState("error");
+        }
+      });
       return;
     }
     const requestConnectionKey = bridge.connectionKey;
@@ -1005,15 +1074,9 @@ export function App() {
     try {
       const result = await action();
       if (bridge.capabilities?.state_stream) {
-        const next = await fetchSnapshot(bridge.httpUrl);
         if (!isConnectionResultCurrent(connectionKeyRef.current, requestConnectionKey)) {
           return false;
         }
-        stateStreamModelRef.current = {
-          ...stateStreamModelRef.current,
-          snapshot: next,
-        };
-        setSnapshot(next);
         setSnapshotConnectionKey(requestConnectionKey);
         setLoadState("ready");
         const paneId = selectCreated ? createdPaneId(result) : null;
@@ -2519,6 +2582,22 @@ async function fetchSnapshot(httpUrl: (path: string, query?: URLSearchParams) =>
   return (await response.json()) as Snapshot;
 }
 
+async function postStateRefresh(
+  httpUrl: (path: string, query?: URLSearchParams) => string,
+  streamId: string,
+  reason: StateRefreshReason,
+) {
+  const response = await fetch(httpUrl("/api/state/refresh"), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ stream_id: streamId, reason }),
+  });
+  if (!response.ok) {
+    throw new Error(`state refresh failed: ${response.status}`);
+  }
+  return (await response.json()) as { refresh_id: string };
+}
+
 async function syncSelectedPane(
   httpUrl: (path: string, query?: URLSearchParams) => string,
   paneId: string,
@@ -2531,6 +2610,10 @@ async function syncSelectedPane(
   if (!response.ok) {
     throw new Error(`selection failed: ${response.status}`);
   }
+}
+
+function delay(ms: number) {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 }
 
 async function refreshSnapshot(
@@ -2636,6 +2719,7 @@ function openStateSocket(
   let socket: WebSocket | null = null;
   let closed = false;
   let reconnectTimer: number | null = null;
+  let stableTimer: number | null = null;
   let attempts = 0;
 
   const scheduleReconnect = () => {
@@ -2656,9 +2740,6 @@ function openStateSocket(
     }
     const next = new WebSocket(url);
     socket = next;
-    next.addEventListener("open", () => {
-      attempts = 0;
-    });
     next.addEventListener("message", (event) => {
       if (typeof event.data !== "string" || socket !== next) {
         return;
@@ -2666,7 +2747,30 @@ function openStateSocket(
       try {
         const parsed = JSON.parse(event.data) as unknown;
         if (!isStateMessage(parsed)) {
+          if (isSequencedStateEnvelope(parsed)) {
+            const action = onMessage({
+              type: "resync_required",
+              generation: parsed.generation,
+              sequence: parsed.sequence,
+              reason: `unknown state message: ${parsed.type}`,
+            });
+            if (action === "reconnect") {
+              socket = null;
+              next.close();
+              scheduleReconnect();
+            }
+          }
           return;
+        }
+        if (parsed.type === "snapshot") {
+          if (stableTimer !== null) {
+            window.clearTimeout(stableTimer);
+          }
+          stableTimer = window.setTimeout(() => {
+            if (!closed && socket === next) {
+              attempts = 0;
+            }
+          }, 1500);
         }
         if (onMessage(parsed) === "reconnect") {
           socket = null;
@@ -2680,6 +2784,10 @@ function openStateSocket(
       }
     });
     next.addEventListener("close", () => {
+      if (stableTimer !== null) {
+        window.clearTimeout(stableTimer);
+        stableTimer = null;
+      }
       if (closed || socket !== next) {
         return;
       }
@@ -2695,6 +2803,10 @@ function openStateSocket(
       if (reconnectTimer !== null) {
         window.clearTimeout(reconnectTimer);
         reconnectTimer = null;
+      }
+      if (stableTimer !== null) {
+        window.clearTimeout(stableTimer);
+        stableTimer = null;
       }
       socket?.close();
       socket = null;

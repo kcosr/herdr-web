@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyStateMessage, emptyStateStreamModel } from "./stateStream";
+import { applyStateMessage, emptyStateStreamModel, isStateMessage } from "./stateStream";
 import type { LayoutSnapshot, PaneInfo, Snapshot, TabInfo, WorkspaceInfo } from "./types";
 
 const workspace = (overrides: Partial<WorkspaceInfo> = {}): WorkspaceInfo => ({
@@ -63,12 +63,14 @@ describe("state stream reducer", () => {
       type: "snapshot",
       generation: 7,
       sequence: 12,
+      stream_id: "stream-1",
       snapshot: snapshot(),
     });
 
     expect(result.status).toBe("applied");
     expect(result.model.generation).toBe(7);
     expect(result.model.nextSequence).toBe(13);
+    expect(result.model.streamId).toBe("stream-1");
   });
 
   it("patches pane status and preserves snapshot wrapper fields", () => {
@@ -93,7 +95,7 @@ describe("state stream reducer", () => {
     expect(result.model.snapshot?.tabs[0].can_clear_name).toBe(true);
   });
 
-  it("removes dependent records when a workspace is removed", () => {
+  it("triggers resync instead of upserting unknown panes from agent deltas", () => {
     const initial = applyStateMessage(emptyStateStreamModel, {
       type: "snapshot",
       generation: 1,
@@ -101,16 +103,19 @@ describe("state stream reducer", () => {
       snapshot: snapshot(),
     });
     const result = applyStateMessage(initial.model, {
-      type: "workspace.removed",
+      type: "pane.agent_detected",
       generation: 1,
       sequence: 2,
-      workspace_id: "w1",
+      pane: pane({ pane_id: "p2" }),
+      workspace: workspace(),
+      tab: tab(),
     });
 
-    expect(result.model.snapshot?.workspaces).toEqual([]);
-    expect(result.model.snapshot?.tabs).toEqual([]);
-    expect(result.model.snapshot?.panes).toEqual([]);
-    expect(result.model.snapshot?.selected_pane_id).toBeNull();
+    expect(result.status).toBe("resync");
+    if (result.status === "resync") {
+      expect(result.reason).toContain("unknown pane p2");
+    }
+    expect(result.model.snapshot?.panes).toHaveLength(1);
   });
 
   it("triggers resync on sequence gaps and generation mismatches", () => {
@@ -139,6 +144,47 @@ describe("state stream reducer", () => {
     ).toBe("resync");
   });
 
+  it("applies valid selection changes and clears absent selected panes", () => {
+    const initial = applyStateMessage(emptyStateStreamModel, {
+      type: "snapshot",
+      generation: 1,
+      sequence: 1,
+      snapshot: {
+        ...snapshot(),
+        panes: [pane(), pane({ pane_id: "p2", focused: false })],
+        selected_pane_id: "p1",
+      },
+    });
+
+    const selected = applyStateMessage(initial.model, {
+      type: "selection.changed",
+      generation: 1,
+      sequence: 2,
+      pane_id: "p2",
+    });
+
+    expect(selected.status).toBe("applied");
+    if (selected.status !== "applied") {
+      throw new Error("selection change should apply");
+    }
+    expect(selected.selectedPaneId).toBe("p2");
+    expect(selected.model.snapshot?.selected_pane_id).toBe("p2");
+
+    const missing = applyStateMessage(selected.model, {
+      type: "selection.changed",
+      generation: 1,
+      sequence: 3,
+      pane_id: "missing",
+    });
+
+    expect(missing.status).toBe("applied");
+    if (missing.status !== "applied") {
+      throw new Error("missing selection change should apply");
+    }
+    expect(missing.selectedPaneId).toBeNull();
+    expect(missing.model.snapshot?.selected_pane_id).toBeNull();
+  });
+
   it("triggers resync on bridge resync frames without applying partial state", () => {
     const initial = applyStateMessage(emptyStateStreamModel, {
       type: "snapshot",
@@ -156,7 +202,45 @@ describe("state stream reducer", () => {
 
     expect(result.status).toBe("resync");
     expect(result.model.nextSequence).toBe(3);
+    expect(result.model.resyncPending).toBe(true);
     expect(result.model.snapshot?.panes).toHaveLength(1);
+  });
+
+  it("quarantines non-snapshot deltas while resync is pending", () => {
+    const initial = applyStateMessage(emptyStateStreamModel, {
+      type: "snapshot",
+      generation: 1,
+      sequence: 1,
+      snapshot: snapshot(),
+    });
+    const resync = applyStateMessage(initial.model, {
+      type: "resync_required",
+      generation: 1,
+      sequence: 2,
+      reason: "refresh needed",
+    });
+    const result = applyStateMessage(resync.model, {
+      type: "pane.agent_status_changed",
+      generation: 1,
+      sequence: 3,
+      pane: pane({ agent_status: "working" }),
+      workspace: workspace({ agent_status: "working" }),
+      tab: tab({ agent_status: "working" }),
+    });
+
+    expect(result.status).toBe("resync");
+    expect(result.model.snapshot?.panes[0].agent_status).toBe("idle");
+  });
+
+  it("rejects unknown sequenced message types at runtime", () => {
+    expect(
+      isStateMessage({
+        type: "pane.removed",
+        generation: 1,
+        sequence: 2,
+        pane_id: "p1",
+      }),
+    ).toBe(false);
   });
 
   it("triggers resync on bridge setup errors before the first snapshot", () => {

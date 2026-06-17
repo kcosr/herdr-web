@@ -1075,8 +1075,7 @@ button {
   display: none;
   flex: 0 0 auto;
   gap: 5px;
-  padding: 6px max(8px, env(safe-area-inset-right)) max(7px, env(safe-area-inset-bottom))
-    max(8px, env(safe-area-inset-left));
+  padding: 6px max(8px, env(safe-area-inset-right)) 7px max(8px, env(safe-area-inset-left));
   border-top: 1px solid var(--line);
   background: color-mix(in srgb, var(--mantle) 94%, black);
 }

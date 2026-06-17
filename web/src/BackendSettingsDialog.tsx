@@ -14,6 +14,9 @@ type Props = {
   onMobileTerminalTapTarget: (target: MobileTerminalTapTarget) => void;
   mobileTouchSelection: boolean;
   onMobileTouchSelection: (enabled: boolean) => void;
+  showMobileKeyboardHideRefit: boolean;
+  mobileKeyboardHideRefit: boolean;
+  onMobileKeyboardHideRefit: (enabled: boolean) => void;
   onClose: () => void;
 };
 
@@ -37,6 +40,9 @@ export function BackendSettingsDialog({
   onMobileTerminalTapTarget,
   mobileTouchSelection,
   onMobileTouchSelection,
+  showMobileKeyboardHideRefit,
+  mobileKeyboardHideRefit,
+  onMobileKeyboardHideRefit,
   onClose,
 }: Props) {
   const bridge = useBridge();
@@ -347,6 +353,33 @@ export function BackendSettingsDialog({
                     </button>
                   </div>
                 </div>
+                {showMobileKeyboardHideRefit ? (
+                  <div className="settings-row">
+                    <span>Resize after keyboard closes</span>
+                    <div
+                      className="segmented-control"
+                      role="group"
+                      aria-label="Resize after keyboard closes"
+                    >
+                      <button
+                        type="button"
+                        data-on={!mobileKeyboardHideRefit}
+                        aria-pressed={!mobileKeyboardHideRefit}
+                        onClick={() => onMobileKeyboardHideRefit(false)}
+                      >
+                        Off
+                      </button>
+                      <button
+                        type="button"
+                        data-on={mobileKeyboardHideRefit}
+                        aria-pressed={mobileKeyboardHideRefit}
+                        onClick={() => onMobileKeyboardHideRefit(true)}
+                      >
+                        On
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             ) : null}
           </div>

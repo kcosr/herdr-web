@@ -6,6 +6,8 @@
 
 ### Added
 
+- Added a native Android setting, on by default, to refit and resize the terminal after the
+  keyboard closes.
 - Added an opt-in mobile terminal long-press selection setting with drag-to-copy selection, selected
   URL actions, and touch hit-testing for Ghostty-detected links.
 

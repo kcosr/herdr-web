@@ -1,8 +1,10 @@
 import { App } from "@capacitor/app";
 import { Capacitor } from "@capacitor/core";
+import { Keyboard } from "@capacitor/keyboard";
 
 type NativeBackHandler = () => boolean;
 type NativeResumeHandler = () => void;
+type NativeKeyboardHideHandler = () => void;
 
 let nativeControlsStarted = false;
 let lastNativeResumeAt = 0;
@@ -52,6 +54,36 @@ export function addNativeBackHandler(handler: NativeBackHandler) {
     if (index >= 0) {
       nativeBackHandlers.splice(index, 1);
     }
+  };
+}
+
+export function isNativeAndroid() {
+  return Capacitor.isNativePlatform() && Capacitor.getPlatform() === "android";
+}
+
+export function addNativeKeyboardHideHandler(handler: NativeKeyboardHideHandler) {
+  if (!isNativeAndroid() || !Capacitor.isPluginAvailable("Keyboard")) {
+    return () => {};
+  }
+
+  let disposed = false;
+  let removeListener: (() => void) | null = null;
+  void Keyboard.addListener("keyboardDidHide", handler)
+    .then((handle) => {
+      removeListener = () => {
+        void handle.remove();
+      };
+      if (disposed) {
+        removeListener();
+      }
+    })
+    .catch((error) => {
+      console.warn("keyboard hide listener unavailable", error);
+    });
+
+  return () => {
+    disposed = true;
+    removeListener?.();
   };
 }
 

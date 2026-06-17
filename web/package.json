@@ -13,6 +13,7 @@
   "dependencies": {
     "@capacitor/app": "^8.1.0",
     "@capacitor/core": "^8.4.0",
+    "@capacitor/keyboard": "^8.0.5",
     "@capacitor/preferences": "^8.0.1",
     "@fontsource-variable/geist": "^5.2.9",
     "ghostty-web": "^0.4.0",

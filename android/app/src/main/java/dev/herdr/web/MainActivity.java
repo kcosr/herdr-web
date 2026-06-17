@@ -7,6 +7,7 @@ import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 import com.getcapacitor.BridgeActivity;
 
 public class MainActivity extends BridgeActivity {
@@ -17,9 +18,7 @@ public class MainActivity extends BridgeActivity {
         super.onCreate(savedInstanceState);
 
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
-        getWindow().setStatusBarColor(APP_BACKGROUND_COLOR);
-        getWindow().setNavigationBarColor(APP_BACKGROUND_COLOR);
-        getWindow().getDecorView().setBackgroundColor(APP_BACKGROUND_COLOR);
+        applySystemBarStyle();
 
         View content = findViewById(android.R.id.content);
         content.setBackgroundColor(APP_BACKGROUND_COLOR);
@@ -33,5 +32,24 @@ public class MainActivity extends BridgeActivity {
             return windowInsets;
         });
         ViewCompat.requestApplyInsets(content);
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        applySystemBarStyle();
+    }
+
+    private void applySystemBarStyle() {
+        getWindow().setStatusBarColor(APP_BACKGROUND_COLOR);
+        getWindow().setNavigationBarColor(APP_BACKGROUND_COLOR);
+        getWindow().getDecorView().setBackgroundColor(APP_BACKGROUND_COLOR);
+
+        WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(
+            getWindow(),
+            getWindow().getDecorView()
+        );
+        controller.setAppearanceLightStatusBars(false);
+        controller.setAppearanceLightNavigationBars(false);
     }
 }

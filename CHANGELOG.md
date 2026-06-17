@@ -18,6 +18,7 @@
 
 - Removed explicit mobile terminal tap-to-deselect handling so Android/browser selection clearing can
   handle existing selections without an extra terminal click path.
+- Forced light Android status/navigation bar icons against the app's dark system bar background.
 
 ### Removed
 

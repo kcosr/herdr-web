@@ -371,6 +371,7 @@ export function App() {
 
     const requestRefit = () => setRefitToken((token) => token + 1);
     return addNativeKeyboardHideHandler(() => {
+      blurActiveTextInput();
       requestRefit();
       const frame = window.requestAnimationFrame(requestRefit);
       const timers = [80, 280].map((delay) => window.setTimeout(requestRefit, delay));
@@ -2420,6 +2421,21 @@ function selectionPaneId(event: MessageEvent) {
       : null;
   } catch {
     return null;
+  }
+}
+
+function blurActiveTextInput() {
+  const element = document.activeElement;
+  if (!(element instanceof HTMLElement)) {
+    return;
+  }
+  if (
+    element instanceof HTMLInputElement ||
+    element instanceof HTMLTextAreaElement ||
+    element instanceof HTMLSelectElement ||
+    element.isContentEditable
+  ) {
+    element.blur();
   }
 }
 

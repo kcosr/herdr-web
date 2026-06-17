@@ -26,9 +26,13 @@ navigation, multi-client viewing, mobile input controls, and synchronized pane s
 
 ## Screenshots
 
-| Desktop | Mobile switcher | Mobile terminal |
-|:--:|:--:|:--:|
-| <img src="docs/images/desktop.png" alt="herdr-web desktop terminal workspace" width="720"> | <img src="docs/images/mobile-sidebar.jpeg" alt="herdr-web mobile switcher" width="220"> | <img src="docs/images/mobile-terminal.jpeg" alt="herdr-web mobile terminal" width="220"> |
+| Desktop | Android tablet |
+|:--:|:--:|
+| <img src="docs/images/desktop.png" alt="herdr-web desktop terminal workspace" width="640"> | <img src="docs/images/android-tablet.png" alt="herdr-web Android tablet terminal workspace" width="640"> |
+
+| Android phone switcher | Android phone terminal |
+|:--:|:--:|
+| <img src="docs/images/android-phone-switcher.png" alt="herdr-web Android phone switcher" width="260"> | <img src="docs/images/android-phone-terminal.png" alt="herdr-web Android phone terminal" width="260"> |
 
 ## Layout
 

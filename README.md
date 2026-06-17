@@ -239,6 +239,9 @@ authentication.
 Pane selection is bridge-owned. Selecting a pane in one browser updates `/api/selection`, and the
 bridge publishes the change over `/ws/state` so other browsers switch to the same pane.
 
+See [docs/live-state-stream-design.md](docs/live-state-stream-design.md) for the state stream
+design, Herdr API adaptation model, and recovery behavior.
+
 ## Vendoring Strategy
 
 The repository intentionally vendors only the Herdr compatibility pieces the bridge builds against,

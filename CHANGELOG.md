@@ -8,6 +8,7 @@
 
 - Added bridge state-stream admission control, per-stream refresh rate limiting, and opaque stream
   and refresh IDs.
+- Added live state stream design documentation covering Herdr API adaptation and recovery behavior.
 
 ### Changed
 

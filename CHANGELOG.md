@@ -15,9 +15,6 @@
 
 ### Fixed
 
-- Fixed mobile drag selection text and highlight mapping when the terminal has scrollback.
-- Fixed mobile drag selection release so Android compatibility mouse events do not focus the
-  terminal input and open the keyboard.
 - Forced and reapplied Android dark system bar styling with light status/navigation bar icons.
 - Removed duplicate bottom safe-area padding inside the mobile terminal controls.
 

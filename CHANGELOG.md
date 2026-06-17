@@ -11,6 +11,9 @@
 
 ### Changed
 
+- Changed bridge URL validation so users can save HTTP bridge URLs at any valid host or IP address,
+  including Tailscale/CGNAT `100.64.0.0/10` addresses.
+
 ### Fixed
 
 ### Removed

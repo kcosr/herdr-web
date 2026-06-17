@@ -25,6 +25,8 @@ describe("bridge URL normalization", () => {
     expect(normalizeBridgeBaseUrl("http://[fd00::1234]:4000")).toBe(
       "http://[fd00::1234]:4000",
     );
+    expect(normalizeBridgeBaseUrl("http://100.64.0.1:4000")).toBe("http://100.64.0.1:4000");
+    expect(normalizeBridgeBaseUrl("http://8.8.8.8:4000")).toBe("http://8.8.8.8:4000");
   });
 
   it("rejects unsupported URL shapes", () => {
@@ -35,7 +37,6 @@ describe("bridge URL normalization", () => {
     expect(() => normalizeBridgeBaseUrl("http://192.168.1.20:4000/api")).toThrow(
       /path/iu,
     );
-    expect(() => normalizeBridgeBaseUrl("http://8.8.8.8:4000")).toThrow(/private/iu);
   });
 });
 
@@ -69,13 +70,20 @@ describe("backend store parsing", () => {
         activeBackendId: "missing",
         backends: [
           { id: "one", name: "Home", baseUrl: "http://192.168.1.20:4000" },
-          { id: "bad", name: "Bad", baseUrl: "http://8.8.8.8:4000" },
+          { id: "bad", name: "Bad", baseUrl: "http://192.168.1.20:4000/api" },
         ],
       }),
     ).toEqual({
       version: 1,
       activeBackendId: null,
-      backends: [{ id: "one", name: "Home", baseUrl: "http://192.168.1.20:4000" }],
+      backends: [
+        {
+          id: "one",
+          name: "Home",
+          baseUrl: "http://192.168.1.20:4000",
+          lastConnectedAt: undefined,
+        },
+      ],
     });
   });
 

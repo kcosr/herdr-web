@@ -75,11 +75,11 @@ server: {
 },
 ```
 
-This is intentional for the current Herdr bridge workflow because local/LAN bridge URLs are usually
-plain `http://host:port`. The app does not enable mixed-content mode because its WebView origin is
-also HTTP. Treat this as a local-network trust boundary: only point the app at Herdr bridges on
-networks you trust. For a public or store-distributed build, prefer HTTPS bridge URLs and revisit
-whether cleartext should remain enabled.
+This is intentional for the current Herdr bridge workflow because user-managed bridge URLs are often
+plain `http://host:port`, including LAN and mesh-network addresses. The app does not enable
+mixed-content mode because its WebView origin is also HTTP. Treat cleartext bridge URLs as a user
+trust decision: only point the app at Herdr bridges on networks you trust. For a public or
+store-distributed build, prefer HTTPS bridge URLs and revisit whether cleartext should remain enabled.
 
 Android cloud auto-backup is disabled for the shell, so saved bridge profiles are not copied into
 device backup storage.

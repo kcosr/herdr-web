@@ -423,26 +423,19 @@ export function normalizeBridgeBaseUrl(input: string): string {
   if ((url.pathname && url.pathname !== "/") || url.search || url.hash) {
     throw new Error("Bridge URL must not include a path, query, or fragment");
   }
-  validateBridgeHost(url.hostname, url.protocol);
+  validateBridgeHost(url.hostname);
   return url.origin;
 }
 
-function validateBridgeHost(hostname: string, protocol: string) {
+function validateBridgeHost(hostname: string) {
   const host = stripIpv6Brackets(hostname).toLowerCase();
   if (!host) {
     throw new Error("Bridge URL must include a host");
   }
-  const ipv4 = parseIpv4(host);
-  if (ipv4) {
-    if (protocol === "http:" && !isPrivateIpv4(ipv4)) {
-      throw new Error("HTTP bridge URLs must use a private or local address");
-    }
+  if (parseIpv4(host)) {
     return;
   }
   if (isIpv6Literal(host)) {
-    if (protocol === "http:" && !isPrivateIpv6(host)) {
-      throw new Error("HTTP bridge URLs must use a private or local address");
-    }
     return;
   }
   if (!isValidHostname(host)) {
@@ -640,26 +633,12 @@ function parseIpv4(host: string): [number, number, number, number] | null {
   return bytes.some(Number.isNaN) ? null : (bytes as [number, number, number, number]);
 }
 
-function isPrivateIpv4([a, b]: [number, number, number, number]) {
-  return (
-    a === 10 ||
-    a === 127 ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 169 && b === 254)
-  );
-}
-
 function stripIpv6Brackets(host: string) {
   return host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
 }
 
 function isIpv6Literal(host: string) {
   return host.includes(":");
-}
-
-function isPrivateIpv6(host: string) {
-  return host === "::1" || host.startsWith("fe80:") || /^[fu][cd][0-9a-f]{0,2}:/iu.test(host);
 }
 
 function isValidHostname(host: string) {

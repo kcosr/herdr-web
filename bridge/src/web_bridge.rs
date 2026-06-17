@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -53,9 +53,12 @@ const STATE_STREAM_READ_TIMEOUT: Duration = Duration::from_millis(250);
 const STATE_STREAM_REBUILD_DEBOUNCE: Duration = Duration::from_millis(100);
 const STATE_STREAM_STARTUP_DRAIN: Duration = Duration::from_millis(50);
 const STATE_STREAM_STARTUP_CONVERGENCE_LIMIT: usize = 3;
+const SNAPSHOT_CACHE_MAX_AGE: Duration = Duration::from_millis(250);
+const SNAPSHOT_CACHE_REBUILD_ATTEMPTS: usize = 3;
 static UPLOAD_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static STATE_STREAM_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static STATE_REFRESH_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static SNAPSHOT_REBUILD_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone)]
 struct BridgeOptions {
@@ -77,6 +80,10 @@ struct BridgeState {
     ui_event_tx: tokio::sync::broadcast::Sender<String>,
     state_refresh_tx: tokio::sync::broadcast::Sender<StateRefreshEvent>,
     active_state_streams: Arc<Mutex<HashSet<String>>>,
+    snapshot_cache: Arc<Mutex<SnapshotCache>>,
+    snapshot_rebuild_lock: Arc<Mutex<()>>,
+    snapshot_required_epoch: Arc<AtomicUsize>,
+    structural_refresh_ready: Arc<AtomicBool>,
     upload_dir: PathBuf,
 }
 
@@ -125,10 +132,30 @@ struct BridgeProjection {
     quiescent: bool,
 }
 
+#[derive(Debug, Default)]
+struct SnapshotCache {
+    snapshot: Option<SnapshotCacheEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct SnapshotCacheEntry {
+    snapshot: Snapshot,
+    built_at: Instant,
+    built_started_at: Instant,
+    rebuild_epoch: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SnapshotCachePolicy {
+    MaxAge(Duration),
+    RebuildAfter { epoch: usize, not_before: Instant },
+}
+
 #[derive(Debug, Clone)]
 struct StateRefreshEvent {
     target_stream_id: Option<String>,
     refresh_id: Option<String>,
+    rebuild_epoch: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -532,8 +559,13 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         ui_event_tx: tokio::sync::broadcast::channel(256).0,
         state_refresh_tx: tokio::sync::broadcast::channel(256).0,
         active_state_streams: Arc::new(Mutex::new(HashSet::new())),
+        snapshot_cache: Arc::new(Mutex::new(SnapshotCache::default())),
+        snapshot_rebuild_lock: Arc::new(Mutex::new(())),
+        snapshot_required_epoch: Arc::new(AtomicUsize::new(0)),
+        structural_refresh_ready: Arc::new(AtomicBool::new(false)),
         upload_dir: options.upload_dir.clone(),
     };
+    spawn_structural_refresh_loop(state.clone());
     let app = Router::new()
         .route(
             "/api/snapshot",
@@ -1224,7 +1256,10 @@ async fn command_handler(
     validate_web_command(&request.method)?;
     fill_clear_rename_labels(&state.api, &mut request.method)?;
     let should_prune_terminal_sessions = command_may_close_terminal_session(&request.method);
-    let should_refresh_state_streams = command_may_change_structure(&request.method);
+    let should_refresh_state_streams = command_requires_local_snapshot_refresh(
+        &request.method,
+        state.structural_refresh_ready.load(Ordering::Acquire),
+    );
 
     let api = state.api.clone();
     let response = tokio::task::spawn_blocking(move || api.request(request))
@@ -1237,15 +1272,7 @@ async fn command_handler(
         tokio::task::spawn_blocking(move || prune_detached_terminal_sessions(&prune_state));
     }
     if should_refresh_state_streams {
-        let state_refresh_tx = state.state_refresh_tx.clone();
-        let event = StateRefreshEvent {
-            target_stream_id: None,
-            refresh_id: None,
-        };
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            let _ = state_refresh_tx.send(event);
-        });
+        broadcast_state_snapshot_refresh(&state);
     }
     Ok(Json(value))
 }
@@ -1272,10 +1299,12 @@ async fn state_refresh_handler(
     }
     let refresh_id = next_state_refresh_id();
     let _ = &body.reason;
+    let rebuild_epoch = mark_snapshot_dirty(&state);
     let state_refresh_tx = state.state_refresh_tx.clone();
     let event = StateRefreshEvent {
         target_stream_id: Some(body.stream_id),
         refresh_id: Some(refresh_id.clone()),
+        rebuild_epoch,
     };
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1291,6 +1320,27 @@ fn command_may_close_terminal_session(method: &Method) -> bool {
             | Method::TabClose(_)
             | Method::PaneClose(_)
             | Method::PaneMove(_)
+    )
+}
+
+fn command_requires_local_snapshot_refresh(
+    method: &Method,
+    structural_refresh_ready: bool,
+) -> bool {
+    if !structural_refresh_ready {
+        return command_may_change_structure(method);
+    }
+    command_has_no_structural_subscription(method)
+}
+
+fn command_has_no_structural_subscription(method: &Method) -> bool {
+    matches!(
+        method,
+        Method::PaneRename(_)
+            | Method::PaneResize(_)
+            | Method::PaneSwap(_)
+            | Method::PaneZoom(_)
+            | Method::LayoutApply(_)
     )
 }
 
@@ -1332,6 +1382,31 @@ fn next_state_refresh_id() -> String {
         "refresh-{}",
         STATE_REFRESH_COUNTER.fetch_add(1, Ordering::Relaxed) + 1
     )
+}
+
+fn next_snapshot_rebuild_epoch() -> usize {
+    SNAPSHOT_REBUILD_COUNTER.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+fn mark_snapshot_dirty(state: &BridgeState) -> usize {
+    let epoch = next_snapshot_rebuild_epoch();
+    state
+        .snapshot_required_epoch
+        .fetch_max(epoch, Ordering::Release);
+    epoch
+}
+
+fn required_snapshot_epoch(state: &BridgeState) -> usize {
+    state.snapshot_required_epoch.load(Ordering::Acquire)
+}
+
+fn broadcast_state_snapshot_refresh(state: &BridgeState) {
+    let rebuild_epoch = mark_snapshot_dirty(state);
+    let _ = state.state_refresh_tx.send(StateRefreshEvent {
+        target_stream_id: None,
+        refresh_id: None,
+        rebuild_epoch,
+    });
 }
 
 fn fill_clear_rename_labels(api: &ApiClient, method: &mut Method) -> Result<(), BridgeError> {
@@ -1521,10 +1596,119 @@ async fn snapshot_handler(
     headers: HeaderMap,
 ) -> Result<Json<Snapshot>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
-    Ok(Json(build_snapshot(&state)?))
+    let snapshot = tokio::task::spawn_blocking(move || {
+        build_snapshot_cached(&state, SnapshotCachePolicy::MaxAge(SNAPSHOT_CACHE_MAX_AGE))
+    })
+    .await
+    .map_err(|err| BridgeError::Protocol(err.to_string()))??;
+    Ok(Json(snapshot))
 }
 
-fn build_snapshot(state: &BridgeState) -> Result<Snapshot, BridgeError> {
+fn build_snapshot_cached(
+    state: &BridgeState,
+    policy: SnapshotCachePolicy,
+) -> Result<Snapshot, BridgeError> {
+    let target_epoch = snapshot_policy_target_epoch(state, policy);
+    if let Some(snapshot) = cached_snapshot_for_policy(state, policy, target_epoch)? {
+        return Ok(snapshot);
+    }
+
+    let mut attempts = 0;
+    loop {
+        let _rebuild_guard = state
+            .snapshot_rebuild_lock
+            .lock()
+            .map_err(|_| BridgeError::Protocol("snapshot rebuild lock poisoned".to_string()))?;
+        let target_epoch = snapshot_policy_target_epoch(state, policy);
+        if let Some(snapshot) = cached_snapshot_for_policy(state, policy, target_epoch)? {
+            return Ok(snapshot);
+        }
+        let rebuild_epoch = target_epoch.max(next_snapshot_rebuild_epoch());
+        let built_started_at = Instant::now();
+        let mut snapshot = build_snapshot_uncached(state)?;
+        snapshot.selected_pane_id = None;
+        let entry_stale = required_snapshot_epoch(state) > rebuild_epoch;
+        attempts += 1;
+        if entry_stale && attempts < SNAPSHOT_CACHE_REBUILD_ATTEMPTS {
+            continue;
+        }
+        let entry = SnapshotCacheEntry {
+            snapshot,
+            built_at: Instant::now(),
+            built_started_at,
+            rebuild_epoch,
+        };
+        if !entry_stale {
+            let mut cache = state
+                .snapshot_cache
+                .lock()
+                .map_err(|_| BridgeError::Protocol("snapshot cache lock poisoned".to_string()))?;
+            let replace = cache
+                .snapshot
+                .as_ref()
+                .map_or(true, |current| current.rebuild_epoch <= entry.rebuild_epoch);
+            if replace {
+                cache.snapshot = Some(entry.clone());
+            }
+        }
+        return snapshot_with_current_selection(state, entry.snapshot);
+    }
+}
+
+fn snapshot_policy_target_epoch(state: &BridgeState, policy: SnapshotCachePolicy) -> usize {
+    let required_epoch = required_snapshot_epoch(state);
+    match policy {
+        SnapshotCachePolicy::MaxAge(_) => required_epoch,
+        SnapshotCachePolicy::RebuildAfter { epoch, .. } => required_epoch.max(epoch),
+    }
+}
+
+fn cached_snapshot_for_policy(
+    state: &BridgeState,
+    policy: SnapshotCachePolicy,
+    target_epoch: usize,
+) -> Result<Option<Snapshot>, BridgeError> {
+    let cached = {
+        let cache = state
+            .snapshot_cache
+            .lock()
+            .map_err(|_| BridgeError::Protocol("snapshot cache lock poisoned".to_string()))?;
+        cache.snapshot.clone()
+    };
+    let Some(entry) = cached else {
+        return Ok(None);
+    };
+    if !snapshot_cache_entry_usable(&entry, policy, target_epoch) {
+        return Ok(None);
+    }
+    snapshot_with_current_selection(state, entry.snapshot).map(Some)
+}
+
+fn snapshot_cache_entry_usable(
+    entry: &SnapshotCacheEntry,
+    policy: SnapshotCachePolicy,
+    target_epoch: usize,
+) -> bool {
+    let epoch_current = entry.rebuild_epoch >= target_epoch;
+    match policy {
+        SnapshotCachePolicy::MaxAge(max_age) => {
+            epoch_current && entry.built_at.elapsed() <= max_age
+        }
+        SnapshotCachePolicy::RebuildAfter { not_before, .. } => {
+            epoch_current && entry.built_started_at >= not_before
+        }
+    }
+}
+
+fn snapshot_with_current_selection(
+    state: &BridgeState,
+    mut snapshot: Snapshot,
+) -> Result<Snapshot, BridgeError> {
+    snapshot.selected_pane_id = shared_selected_pane(state, &snapshot.panes)?;
+    Ok(snapshot)
+}
+
+fn build_snapshot_uncached(state: &BridgeState) -> Result<Snapshot, BridgeError> {
     let workspaces = match api_request(
         &state.api,
         "herdr-web:workspace-list",
@@ -1551,7 +1735,6 @@ fn build_snapshot(state: &BridgeState) -> Result<Snapshot, BridgeError> {
     };
     let panes = current_panes(&state.api)?;
     let layouts = collect_tab_layouts(&state.api, &tabs, &panes);
-    let selected_pane_id = shared_selected_pane(&state, &panes)?;
     let workspaces = workspaces
         .into_iter()
         .map(|workspace| wrap_workspace(workspace, &panes))
@@ -1563,7 +1746,7 @@ fn build_snapshot(state: &BridgeState) -> Result<Snapshot, BridgeError> {
         tabs,
         panes,
         layouts,
-        selected_pane_id,
+        selected_pane_id: None,
     })
 }
 
@@ -1690,21 +1873,38 @@ fn collect_tab_layouts(
     tabs: &[TabInfo],
     panes: &[PaneInfo],
 ) -> Vec<PaneLayoutSnapshot> {
-    tabs.iter()
+    let requests = tabs
+        .iter()
         .filter_map(|tab| {
             let pane = panes.iter().find(|pane| pane.tab_id == tab.tab_id)?;
-            match api_request(
-                api,
-                &format!("herdr-web:layout:{}", tab.tab_id),
-                Method::PaneLayout(PaneLayoutParams {
-                    pane_id: Some(pane.pane_id.clone()),
-                }),
-            ) {
-                Ok(ResponseResult::PaneLayout { layout }) => Some(layout),
-                Ok(_) | Err(_) => None,
-            }
+            Some((tab.tab_id.clone(), pane.pane_id.clone()))
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    thread::scope(|scope| {
+        let handles = requests
+            .into_iter()
+            .map(|(tab_id, pane_id)| {
+                let api = api.clone();
+                scope.spawn(move || {
+                    match api_request(
+                        &api,
+                        &format!("herdr-web:layout:{tab_id}"),
+                        Method::PaneLayout(PaneLayoutParams {
+                            pane_id: Some(pane_id),
+                        }),
+                    ) {
+                        Ok(ResponseResult::PaneLayout { layout }) => Some(layout),
+                        Ok(_) | Err(_) => None,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .filter_map(|handle| handle.join().ok().flatten())
+            .collect()
+    })
 }
 
 async fn terminal_ws_handler(
@@ -1815,8 +2015,12 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
         active_state_streams: state.active_state_streams.clone(),
     };
     let (mut ws_sender, mut ws_receiver) = socket.split();
+    let mut refresh_rx = state.state_refresh_tx.subscribe();
     let setup_state = state.clone();
-    let setup = tokio::task::spawn_blocking(move || open_state_projection(setup_state)).await;
+    let setup = tokio::task::spawn_blocking(move || {
+        open_state_projection(setup_state, next_snapshot_rebuild_epoch())
+    })
+    .await;
     let (mut projection, mut upstream) = match setup {
         Ok(Ok(result)) => result,
         Ok(Err(err)) => {
@@ -1846,7 +2050,6 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
     };
 
     let mut ui_event_rx = state.ui_event_tx.subscribe();
-    let mut refresh_rx = state.state_refresh_tx.subscribe();
     let snapshot_message = projection.snapshot_message(&stream_id, None);
     let Ok(text) = serde_json::to_string(&snapshot_message) else {
         return;
@@ -1885,6 +2088,7 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
                                     &mut projection,
                                     &mut upstream,
                                     Vec::new(),
+                                    next_snapshot_rebuild_epoch(),
                                 ).await;
                                 match refresh_result {
                                     Ok(message) => {
@@ -1933,6 +2137,7 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
                                     &mut projection,
                                     &mut upstream,
                                     Vec::new(),
+                                    next_snapshot_rebuild_epoch(),
                                 ).await {
                                     Ok(message) => {
                                         let Ok(text) = serde_json::to_string(&message) else {
@@ -2020,11 +2225,13 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
                             continue;
                         }
                         let mut refresh_ids = event.refresh_id.into_iter().collect::<Vec<_>>();
+                        let mut rebuild_epoch = event.rebuild_epoch;
                         tokio::time::sleep(STATE_STREAM_REBUILD_DEBOUNCE).await;
                         while let Ok(event) = refresh_rx.try_recv() {
                             if event.target_stream_id.as_deref().is_some_and(|target| target != stream_id) {
                                 continue;
                             }
+                            rebuild_epoch = rebuild_epoch.max(event.rebuild_epoch);
                             refresh_ids.extend(event.refresh_id);
                         }
                         match refresh_state_projection(
@@ -2033,6 +2240,7 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
                             &mut projection,
                             &mut upstream,
                             refresh_ids.clone(),
+                            rebuild_epoch,
                         ).await {
                             Ok(message) => {
                                 let Ok(text) = serde_json::to_string(&message) else {
@@ -2086,11 +2294,13 @@ async fn refresh_state_projection(
     projection: &mut BridgeProjection,
     upstream: &mut StateSubscription,
     refresh_ids: Vec<String>,
+    rebuild_epoch: usize,
 ) -> Result<StateMessage, BridgeError> {
     let rebuild_state = state.clone();
-    let rebuilt = tokio::task::spawn_blocking(move || open_state_projection(rebuild_state))
-        .await
-        .map_err(|err| BridgeError::Protocol(err.to_string()))??;
+    let rebuilt =
+        tokio::task::spawn_blocking(move || open_state_projection(rebuild_state, rebuild_epoch))
+            .await
+            .map_err(|err| BridgeError::Protocol(err.to_string()))??;
     let (mut next_projection, next_upstream) = rebuilt;
     next_projection.generation = projection.generation + 1;
     next_projection.next_sequence = projection.next_sequence;
@@ -2571,27 +2781,11 @@ fn close_message(reason: &str) -> String {
 fn open_event_subscription(
     api: ApiClient,
 ) -> Result<tokio::sync::mpsc::UnboundedReceiver<String>, BridgeError> {
+    let mut subscriptions = structural_refresh_subscriptions();
+    subscriptions.push(Subscription::PaneAgentDetected {});
     let request = Request {
         id: "herdr-web:events".to_string(),
-        method: Method::EventsSubscribe(EventsSubscribeParams {
-            subscriptions: vec![
-                Subscription::WorkspaceCreated {},
-                Subscription::WorkspaceUpdated {},
-                Subscription::WorkspaceRenamed {},
-                Subscription::WorkspaceClosed {},
-                Subscription::WorkspaceFocused {},
-                Subscription::TabCreated {},
-                Subscription::TabClosed {},
-                Subscription::TabFocused {},
-                Subscription::TabRenamed {},
-                Subscription::PaneCreated {},
-                Subscription::PaneClosed {},
-                Subscription::PaneFocused {},
-                Subscription::PaneMoved {},
-                Subscription::PaneExited {},
-                Subscription::PaneAgentDetected {},
-            ],
-        }),
+        method: Method::EventsSubscribe(EventsSubscribeParams { subscriptions }),
     };
     let (ack, mut stream) = api.subscribe_value(&request, None)?;
     let response = herdr_compat::api::client::parse_response_value(ack)?;
@@ -2627,8 +2821,96 @@ fn open_event_subscription(
     Ok(event_rx)
 }
 
+fn spawn_structural_refresh_loop(state: BridgeState) {
+    let spawn_result = thread::Builder::new()
+        .name("herdr-web-structural-refresh".to_string())
+        .spawn(move || loop {
+            match open_structural_refresh_subscription(state.api.clone()) {
+                Ok(mut event_rx) => {
+                    drain_structural_refresh_startup_replay(&mut event_rx);
+                    state
+                        .structural_refresh_ready
+                        .store(true, Ordering::Release);
+                    broadcast_state_snapshot_refresh(&state);
+                    while event_rx.blocking_recv().is_some() {
+                        broadcast_structural_refresh_burst(&state, &mut event_rx);
+                    }
+                    state
+                        .structural_refresh_ready
+                        .store(false, Ordering::Release);
+                    warn!("herdr-web bridge structural subscription closed; retrying");
+                    broadcast_state_snapshot_refresh(&state);
+                }
+                Err(err) => {
+                    state
+                        .structural_refresh_ready
+                        .store(false, Ordering::Release);
+                    warn!("herdr-web bridge structural subscription failed: {err}");
+                }
+            }
+            thread::sleep(Duration::from_secs(1));
+        });
+    if let Err(err) = spawn_result {
+        warn!("failed to spawn herdr-web structural refresh loop: {err}");
+    }
+}
+
+fn open_structural_refresh_subscription(
+    api: ApiClient,
+) -> Result<tokio::sync::mpsc::UnboundedReceiver<()>, BridgeError> {
+    let request = Request {
+        id: "herdr-web:structural-refresh".to_string(),
+        method: Method::EventsSubscribe(EventsSubscribeParams {
+            subscriptions: structural_refresh_subscriptions(),
+        }),
+    };
+    let (ack, mut stream) = api.subscribe_value(&request, None)?;
+    let response = herdr_compat::api::client::parse_response_value(ack)?;
+    if !matches!(response.result, ResponseResult::SubscriptionStarted {}) {
+        return Err(BridgeError::Protocol(format!(
+            "unexpected subscription response: {:?}",
+            response.result
+        )));
+    }
+
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+    thread::spawn(move || loop {
+        match stream.next_value() {
+            Ok(Some(_)) => {
+                if event_tx.send(()).is_err() {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(err) => {
+                warn!("herdr-web bridge structural subscription read failed: {err}");
+                break;
+            }
+        }
+    });
+
+    Ok(event_rx)
+}
+
+fn drain_structural_refresh_startup_replay(
+    event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
+) {
+    thread::sleep(STATE_STREAM_STARTUP_DRAIN);
+    while event_rx.try_recv().is_ok() {}
+}
+
+fn broadcast_structural_refresh_burst(
+    state: &BridgeState,
+    event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
+) {
+    thread::sleep(STATE_STREAM_REBUILD_DEBOUNCE);
+    while event_rx.try_recv().is_ok() {}
+    broadcast_state_snapshot_refresh(state);
+}
+
 fn open_state_projection(
     state: BridgeState,
+    rebuild_epoch: usize,
 ) -> Result<(BridgeProjection, StateSubscription), BridgeError> {
     let mut pane_ids = current_panes(&state.api)?
         .into_iter()
@@ -2638,9 +2920,21 @@ fn open_state_projection(
     pane_ids.dedup();
 
     let mut subscription = open_state_subscription(state.api.clone(), pane_ids.clone())?;
-    for _ in 0..STATE_STREAM_STARTUP_CONVERGENCE_LIMIT {
+    for attempt in 0..STATE_STREAM_STARTUP_CONVERGENCE_LIMIT {
         drain_state_subscription_replay(&mut subscription);
-        let snapshot = build_snapshot(&state)?;
+        let subscription_ready_at = Instant::now();
+        let snapshot_epoch = if attempt == 0 {
+            rebuild_epoch
+        } else {
+            next_snapshot_rebuild_epoch()
+        };
+        let snapshot = build_snapshot_cached(
+            &state,
+            SnapshotCachePolicy::RebuildAfter {
+                epoch: snapshot_epoch,
+                not_before: subscription_ready_at,
+            },
+        )?;
         let mut snapshot_pane_ids = snapshot
             .panes
             .iter()
@@ -2709,6 +3003,28 @@ fn state_subscriptions(pane_ids: &[String]) -> Vec<Subscription> {
 
 fn structural_state_subscriptions() -> Vec<Subscription> {
     vec![Subscription::PaneAgentDetected {}]
+}
+
+fn structural_refresh_subscriptions() -> Vec<Subscription> {
+    vec![
+        Subscription::WorkspaceCreated {},
+        Subscription::WorkspaceUpdated {},
+        Subscription::WorkspaceRenamed {},
+        Subscription::WorkspaceClosed {},
+        Subscription::WorkspaceFocused {},
+        Subscription::WorktreeCreated {},
+        Subscription::WorktreeOpened {},
+        Subscription::WorktreeRemoved {},
+        Subscription::TabCreated {},
+        Subscription::TabClosed {},
+        Subscription::TabFocused {},
+        Subscription::TabRenamed {},
+        Subscription::PaneCreated {},
+        Subscription::PaneClosed {},
+        Subscription::PaneFocused {},
+        Subscription::PaneMoved {},
+        Subscription::PaneExited {},
+    ]
 }
 
 fn open_state_subscription_fallback(
@@ -3087,6 +3403,10 @@ mod tests {
             ui_event_tx: tokio::sync::broadcast::channel(16).0,
             state_refresh_tx: tokio::sync::broadcast::channel(16).0,
             active_state_streams: Arc::new(Mutex::new(HashSet::new())),
+            snapshot_cache: Arc::new(Mutex::new(SnapshotCache::default())),
+            snapshot_rebuild_lock: Arc::new(Mutex::new(())),
+            snapshot_required_epoch: Arc::new(AtomicUsize::new(0)),
+            structural_refresh_ready: Arc::new(AtomicBool::new(false)),
             upload_dir: PathBuf::from("/tmp"),
         }
     }
@@ -3176,6 +3496,26 @@ mod tests {
     }
 
     #[test]
+    fn structural_refresh_subscriptions_are_bridge_internal() {
+        let subscriptions = structural_refresh_subscriptions();
+        assert!(subscriptions
+            .iter()
+            .any(|item| matches!(item, Subscription::WorkspaceUpdated {})));
+        assert!(subscriptions
+            .iter()
+            .any(|item| matches!(item, Subscription::WorktreeOpened {})));
+        assert!(subscriptions
+            .iter()
+            .any(|item| matches!(item, Subscription::PaneMoved {})));
+        assert!(!subscriptions
+            .iter()
+            .any(|item| matches!(item, Subscription::PaneAgentDetected {})));
+        assert!(!subscriptions
+            .iter()
+            .any(|item| matches!(item, Subscription::PaneAgentStatusChanged { .. })));
+    }
+
+    #[test]
     fn state_refresh_reasons_are_local_only() {
         assert!(
             serde_json::from_value::<StateRefreshRequest>(serde_json::json!({
@@ -3238,7 +3578,7 @@ mod tests {
             .insert("stream-1".to_string());
         let mut refresh_rx = state.state_refresh_tx.subscribe();
         let Json(response) = state_refresh_handler(
-            State(state),
+            State(state.clone()),
             origin_headers("127.0.0.1:8787", Some("http://127.0.0.1:8787")),
             Json(StateRefreshRequest {
                 stream_id: "stream-1".to_string(),
@@ -3257,39 +3597,8 @@ mod tests {
             event.refresh_id.as_deref(),
             Some(response.refresh_id.as_str())
         );
-    }
-
-    #[test]
-    fn command_structure_refresh_classification_is_pinned() {
-        assert!(command_may_change_structure(&Method::WorkspaceFocus(
-            WorkspaceTarget {
-                workspace_id: "w1".to_string(),
-            },
-        )));
-        assert!(command_may_change_structure(&Method::PaneRename(
-            herdr_compat::api::schema::PaneRenameParams {
-                pane_id: "p1".to_string(),
-                label: Some("editor".to_string()),
-            },
-        )));
-        assert!(command_may_change_structure(&Method::AgentStart(
-            herdr_compat::api::schema::AgentStartParams {
-                name: "codex".to_string(),
-                cwd: None,
-                workspace_id: None,
-                tab_id: None,
-                split: None,
-                focus: true,
-                argv: vec!["codex".to_string()],
-                env: HashMap::new(),
-            },
-        )));
-        assert!(!command_may_change_structure(&Method::PaneList(
-            PaneListParams::default(),
-        )));
-        assert!(!command_may_change_structure(&Method::PaneLayout(
-            PaneLayoutParams::default(),
-        )));
+        assert!(event.rebuild_epoch > 0);
+        assert!(required_snapshot_epoch(&state) >= event.rebuild_epoch);
     }
 
     #[test]
@@ -3313,6 +3622,159 @@ mod tests {
             }
             other => panic!("unexpected state message: {other:?}"),
         }
+    }
+
+    #[test]
+    fn bridge_snapshot_refresh_broadcast_marks_required_epoch() {
+        let state = test_bridge_state();
+        let mut refresh_rx = state.state_refresh_tx.subscribe();
+
+        broadcast_state_snapshot_refresh(&state);
+
+        let event = refresh_rx.try_recv().unwrap();
+        assert!(event.rebuild_epoch > 0);
+        assert_eq!(event.target_stream_id, None);
+        assert_eq!(event.refresh_id, None);
+        assert!(required_snapshot_epoch(&state) >= event.rebuild_epoch);
+    }
+
+    #[test]
+    fn eventless_structure_commands_require_local_snapshot_refresh() {
+        assert!(command_requires_local_snapshot_refresh(
+            &Method::PaneRename(herdr_compat::api::schema::PaneRenameParams {
+                pane_id: "p1".to_string(),
+                label: Some("editor".to_string()),
+            },),
+            true,
+        ));
+        assert!(command_requires_local_snapshot_refresh(
+            &Method::PaneZoom(herdr_compat::api::schema::PaneZoomParams {
+                pane_id: Some("p1".to_string()),
+                mode: Default::default(),
+            },),
+            true
+        ));
+        assert!(command_requires_local_snapshot_refresh(
+            &Method::LayoutApply(herdr_compat::api::schema::LayoutApplyParams {
+                workspace_id: Some("w1".to_string()),
+                tab_id: None,
+                tab_label: Some("dev".to_string()),
+                focus: true,
+                root: herdr_compat::api::schema::LayoutNode::Pane {
+                    pane: herdr_compat::api::schema::LayoutPane::default(),
+                },
+            },),
+            true,
+        ));
+        assert!(!command_requires_local_snapshot_refresh(
+            &Method::PaneMove(herdr_compat::api::schema::PaneMoveParams {
+                pane_id: "p1".to_string(),
+                destination: PaneMoveDestination::NewTab {
+                    workspace_id: Some("w1".to_string()),
+                    label: None,
+                },
+                focus: true,
+            },),
+            true
+        ));
+        assert!(!command_requires_local_snapshot_refresh(
+            &Method::WorkspaceFocus(WorkspaceTarget {
+                workspace_id: "w1".to_string(),
+            },),
+            true,
+        ));
+    }
+
+    #[test]
+    fn structural_commands_refresh_locally_when_structural_subscription_is_down() {
+        assert!(command_requires_local_snapshot_refresh(
+            &Method::PaneMove(herdr_compat::api::schema::PaneMoveParams {
+                pane_id: "p1".to_string(),
+                destination: PaneMoveDestination::NewTab {
+                    workspace_id: Some("w1".to_string()),
+                    label: None,
+                },
+                focus: true,
+            },),
+            false,
+        ));
+        assert!(command_requires_local_snapshot_refresh(
+            &Method::WorkspaceFocus(WorkspaceTarget {
+                workspace_id: "w1".to_string(),
+            },),
+            false,
+        ));
+    }
+
+    #[test]
+    fn structural_refresh_burst_broadcasts_once_after_draining() {
+        let state = test_bridge_state();
+        let mut refresh_rx = state.state_refresh_tx.subscribe();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        event_tx.send(()).unwrap();
+        event_tx.send(()).unwrap();
+
+        broadcast_structural_refresh_burst(&state, &mut event_rx);
+
+        let event = refresh_rx.try_recv().unwrap();
+        assert!(event.rebuild_epoch > 0);
+        assert!(refresh_rx.try_recv().is_err());
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn snapshot_cache_reuses_fresh_entries_and_rebuild_epochs() {
+        let state = test_bridge_state();
+        *state.selected_pane_id.lock().unwrap() = Some("p1".to_string());
+        {
+            let mut cache = state.snapshot_cache.lock().unwrap();
+            cache.snapshot = Some(SnapshotCacheEntry {
+                snapshot: test_snapshot(),
+                built_at: Instant::now(),
+                built_started_at: Instant::now(),
+                rebuild_epoch: 10,
+            });
+        }
+
+        let fresh =
+            build_snapshot_cached(&state, SnapshotCachePolicy::MaxAge(Duration::from_secs(1)))
+                .unwrap();
+        assert_eq!(fresh.panes[0].pane_id, "p1");
+        assert_eq!(fresh.selected_pane_id.as_deref(), Some("p1"));
+
+        state.snapshot_required_epoch.store(11, Ordering::Release);
+        let stale =
+            build_snapshot_cached(&state, SnapshotCachePolicy::MaxAge(Duration::from_secs(1)));
+        assert!(stale.is_err());
+    }
+
+    #[test]
+    fn snapshot_cache_rebuild_after_requires_subscription_ready_snapshot() {
+        let snapshot = test_snapshot();
+        let entry = SnapshotCacheEntry {
+            snapshot,
+            built_at: Instant::now(),
+            built_started_at: Instant::now(),
+            rebuild_epoch: 20,
+        };
+        let ready_after_build = entry.built_started_at + Duration::from_millis(1);
+
+        assert!(snapshot_cache_entry_usable(
+            &entry,
+            SnapshotCachePolicy::RebuildAfter {
+                epoch: 20,
+                not_before: entry.built_started_at
+            },
+            20
+        ));
+        assert!(!snapshot_cache_entry_usable(
+            &entry,
+            SnapshotCachePolicy::RebuildAfter {
+                epoch: 20,
+                not_before: ready_after_build
+            },
+            20
+        ));
     }
 
     #[test]

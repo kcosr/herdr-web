@@ -33,6 +33,7 @@ import type { MobileTerminalTapTarget } from "./mobileTerminalPrefs";
 import { addNativeBackHandler, addNativeKeyboardHideHandler, isNativeAndroid } from "./native";
 import { ActionMenu, ConfirmDialog, RenameDialog, useLongPress } from "./overlays";
 import type { MenuItem } from "./overlays";
+import { resumeRefreshMode } from "./resumeRefresh";
 import { TerminalView } from "./TerminalView";
 import {
   aggregateStatus,
@@ -250,12 +251,14 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [refitToken, setRefitToken] = useState(0);
   const [terminalFocusToken, setTerminalFocusToken] = useState(0);
+  const [stateStreamReconnectToken, setStateStreamReconnectToken] = useState(0);
   const isCompactLayout = useIsCompactLayout();
   const isTouchInput = useIsTouchInput();
   const showMobileKeyboardHideRefit = isNativeAndroid();
   const snapshotRef = useRef<Snapshot | null>(null);
   const stateStreamModelRef = useRef<StateStreamModel>(emptyStateStreamModel);
   const connectionKeyRef = useRef(bridge.connectionKey);
+  const stateStreamResumeTokenRef = useRef(bridge.resumeToken);
   const bridgeRef = useRef(bridge);
   bridgeRef.current = bridge;
   const stateRefreshSchedulerRef = useRef<ReturnType<typeof createStateRefreshScheduler> | null>(
@@ -270,6 +273,8 @@ export function App() {
         stateStreamModelRef.current.snapshot !== null,
       postRefresh: (streamId, reason) =>
         postStateRefresh(bridgeRef.current.httpUrl, streamId, reason),
+      isTerminalError: isTerminalStateRefreshError,
+      onTerminalError: () => setStateStreamReconnectToken((token) => token + 1),
       delay,
       setTimeout: (handler, ms) => window.setTimeout(handler, ms),
       clearTimeout: (timer) => window.clearTimeout(timer),
@@ -621,8 +626,50 @@ export function App() {
     bridge.connectionKey,
     bridge.httpUrl,
     requestStateRefresh,
-    bridge.resumeToken,
+    stateStreamReconnectToken,
     bridge.wsUrl,
+  ]);
+
+  useEffect(() => {
+    const mode = resumeRefreshMode({
+      canConnect: bridge.canConnect,
+      hasCapabilities: bridge.capabilities !== null,
+      stateStream: Boolean(bridge.capabilities?.state_stream),
+      previousToken: stateStreamResumeTokenRef.current,
+      currentToken: bridge.resumeToken,
+    });
+    if (mode === "none") {
+      stateStreamResumeTokenRef.current = bridge.resumeToken;
+      return;
+    }
+    stateStreamResumeTokenRef.current = bridge.resumeToken;
+    if (mode === "state_stream") {
+      void requestStateRefresh("android_resume").catch(() => {});
+      return;
+    }
+    const requestConnectionKey = bridge.connectionKey;
+    void fetchSnapshot(bridge.httpUrl)
+      .then((next) => {
+        if (!isConnectionResultCurrent(connectionKeyRef.current, requestConnectionKey)) {
+          return;
+        }
+        setSnapshot(next);
+        setSnapshotConnectionKey(requestConnectionKey);
+        setLoadState("ready");
+      })
+      .catch(() => {
+        if (isConnectionResultCurrent(connectionKeyRef.current, requestConnectionKey)) {
+          setLoadState("error");
+        }
+      });
+  }, [
+    bridge.canConnect,
+    bridge.capabilities,
+    bridge.capabilities?.state_stream,
+    bridge.connectionKey,
+    bridge.httpUrl,
+    bridge.resumeToken,
+    requestStateRefresh,
   ]);
 
   useEffect(() => {
@@ -2582,6 +2629,15 @@ async function fetchSnapshot(httpUrl: (path: string, query?: URLSearchParams) =>
   return (await response.json()) as Snapshot;
 }
 
+class StateRefreshHttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly body: string,
+  ) {
+    super(`state refresh failed: ${status}`);
+  }
+}
+
 async function postStateRefresh(
   httpUrl: (path: string, query?: URLSearchParams) => string,
   streamId: string,
@@ -2593,9 +2649,17 @@ async function postStateRefresh(
     body: JSON.stringify({ stream_id: streamId, reason }),
   });
   if (!response.ok) {
-    throw new Error(`state refresh failed: ${response.status}`);
+    throw new StateRefreshHttpError(response.status, await response.text());
   }
   return (await response.json()) as { refresh_id: string };
+}
+
+function isTerminalStateRefreshError(error: Error) {
+  return (
+    error instanceof StateRefreshHttpError &&
+    error.status === 400 &&
+    error.body.includes("unknown stream_id")
+  );
 }
 
 async function syncSelectedPane(

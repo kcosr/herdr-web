@@ -14,6 +14,8 @@ type StateRefreshSchedulerOptions = {
   currentStreamId: () => string | null;
   hasCurrentSnapshot: () => boolean;
   postRefresh: (streamId: string, reason: StateRefreshReason) => Promise<RefreshResponse>;
+  isTerminalError?: (error: Error) => boolean;
+  onTerminalError?: (error: Error) => void;
   delay?: (ms: number) => Promise<void>;
   setTimeout?: (handler: () => void, ms: number) => number;
   clearTimeout?: (timer: number) => void;
@@ -96,6 +98,13 @@ export function createStateRefreshScheduler(options: StateRefreshSchedulerOption
             return;
           }
           lastError = err instanceof Error ? err : new Error(String(err));
+          if (options.isTerminalError?.(lastError)) {
+            options.onTerminalError?.(lastError);
+            if (options.hasCurrentSnapshot()) {
+              return;
+            }
+            throw lastError;
+          }
           if (attempt + 1 < maxAttempts) {
             await delay(Math.min(250 * 2 ** attempt, 1000));
           }

@@ -136,7 +136,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     setCapabilityRetry(0);
-  }, [connectionKey, resumeToken]);
+  }, [connectionKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -181,7 +181,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
         window.clearTimeout(retryTimer);
       }
     };
-  }, [canProbe, capabilityRetry, connectionKey, httpUrl, resumeToken]);
+  }, [canProbe, capabilityRetry, connectionKey, httpUrl]);
 
   const addBackend = useCallback(async (input: BackendInput, activate = true) => {
     const baseUrl = normalizeBridgeBaseUrl(input.baseUrl);

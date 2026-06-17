@@ -113,6 +113,56 @@ describe("state refresh scheduler", () => {
     expect(posts).toEqual(["refresh-1", "refresh-2"]);
   });
 
+  it("does not retry terminal stale-stream refresh errors when a snapshot exists", async () => {
+    const posts: string[] = [];
+    const terminalErrors: string[] = [];
+    const scheduler = createStateRefreshScheduler({
+      enabled: () => true,
+      currentStreamId: () => "stream-1",
+      hasCurrentSnapshot: () => true,
+      postRefresh: async (streamId) => {
+        posts.push(streamId);
+        throw new Error("unknown stream_id");
+      },
+      isTerminalError: (error) => error.message.includes("unknown stream_id"),
+      onTerminalError: (error) => terminalErrors.push(error.message),
+      delay: async () => {
+        throw new Error("unexpected retry delay");
+      },
+      setTimeout: () => 1,
+      clearTimeout: () => {},
+    });
+
+    await expect(scheduler.request("android_resume")).resolves.toBeUndefined();
+    expect(posts).toEqual(["stream-1"]);
+    expect(terminalErrors).toEqual(["unknown stream_id"]);
+  });
+
+  it("fails terminal stale-stream refresh errors without retrying when no snapshot exists", async () => {
+    const posts: string[] = [];
+    const terminalErrors: string[] = [];
+    const scheduler = createStateRefreshScheduler({
+      enabled: () => true,
+      currentStreamId: () => "stream-1",
+      hasCurrentSnapshot: () => false,
+      postRefresh: async (streamId) => {
+        posts.push(streamId);
+        throw new Error("unknown stream_id");
+      },
+      isTerminalError: (error) => error.message.includes("unknown stream_id"),
+      onTerminalError: (error) => terminalErrors.push(error.message),
+      delay: async () => {
+        throw new Error("unexpected retry delay");
+      },
+      setTimeout: () => 1,
+      clearTimeout: () => {},
+    });
+
+    await expect(scheduler.request("android_resume")).rejects.toThrow("unknown stream_id");
+    expect(posts).toEqual(["stream-1"]);
+    expect(terminalErrors).toEqual(["unknown stream_id"]);
+  });
+
   it("cancels stale requests without swallowing a new stream refresh", async () => {
     let streamId = "stream-1";
     let hasSnapshot = false;

@@ -15,7 +15,7 @@
 
 ### Fixed
 
-- Forced light Android status/navigation bar icons against the app's dark system bar background.
+- Forced the Android shell into dark mode with light status/navigation bar icons.
 - Removed duplicate bottom safe-area padding inside the mobile terminal controls.
 
 ### Removed

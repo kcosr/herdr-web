@@ -6,9 +6,20 @@
 
 ### Added
 
+- Added bridge state-stream admission control, per-stream refresh rate limiting, and opaque stream
+  and refresh IDs.
+
 ### Changed
 
+- Changed browser commands that can affect workspace structure to explicitly refresh state streams
+  after success instead of relying on structural subscription replay.
+- Moved state-stream pane/workspace/tab enrichment off the async WebSocket loop and tightened
+  frontend state refresh scheduling around reconnects, timeouts, and queued refresh triggers.
+
 ### Fixed
+
+- Reduced structural refresh subscription reconnect noise with capped backoff and fewer redundant
+  broadcasts.
 
 ### Removed
 

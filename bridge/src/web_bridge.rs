@@ -26,6 +26,7 @@ use herdr_compat::TryClone as _;
 use serde::{Deserialize, Serialize};
 use tower_http::services::ServeDir;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use herdr_compat::api::client::{ApiClient, ApiClientError};
 use herdr_compat::api::schema::{
@@ -53,10 +54,16 @@ const STATE_STREAM_READ_TIMEOUT: Duration = Duration::from_millis(250);
 const STATE_STREAM_REBUILD_DEBOUNCE: Duration = Duration::from_millis(100);
 const STATE_STREAM_STARTUP_DRAIN: Duration = Duration::from_millis(50);
 const STATE_STREAM_STARTUP_CONVERGENCE_LIMIT: usize = 3;
+const STATE_STREAM_PATCH_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_STATE_PATCH_BLOCKING_TASKS: usize = 4;
+const MAX_STATE_STREAMS: usize = 16;
+const STATE_REFRESH_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(10);
+const STATE_REFRESH_RATE_LIMIT_MAX: usize = 20;
+const STRUCTURAL_REFRESH_RETRY_INITIAL: Duration = Duration::from_secs(1);
+const STRUCTURAL_REFRESH_RETRY_MAX: Duration = Duration::from_secs(30);
+const STRUCTURAL_REFRESH_RETRY_STABLE_AFTER: Duration = Duration::from_secs(10);
 const SNAPSHOT_CACHE_REBUILD_ATTEMPTS: usize = 3;
 static UPLOAD_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
-static STATE_STREAM_COUNTER: AtomicUsize = AtomicUsize::new(0);
-static STATE_REFRESH_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static SNAPSHOT_REBUILD_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone)]
@@ -79,10 +86,11 @@ struct BridgeState {
     ui_event_tx: tokio::sync::broadcast::Sender<String>,
     state_refresh_tx: tokio::sync::broadcast::Sender<StateRefreshEvent>,
     active_state_streams: Arc<Mutex<HashSet<String>>>,
+    state_refresh_limits: Arc<Mutex<HashMap<String, StateRefreshRateLimit>>>,
+    state_patch_permits: Arc<tokio::sync::Semaphore>,
     snapshot_cache: Arc<Mutex<SnapshotCache>>,
     snapshot_rebuild_lock: Arc<Mutex<()>>,
     snapshot_required_epoch: Arc<AtomicUsize>,
-    structural_refresh_ready: Arc<AtomicBool>,
     upload_dir: PathBuf,
 }
 
@@ -175,9 +183,11 @@ struct StateRefreshResponse {
     refresh_id: String,
 }
 
+#[derive(Debug)]
 struct ActiveStateStreamGuard {
     stream_id: String,
     active_state_streams: Arc<Mutex<HashSet<String>>>,
+    state_refresh_limits: Arc<Mutex<HashMap<String, StateRefreshRateLimit>>>,
 }
 
 impl Drop for ActiveStateStreamGuard {
@@ -185,7 +195,16 @@ impl Drop for ActiveStateStreamGuard {
         if let Ok(mut active_state_streams) = self.active_state_streams.lock() {
             active_state_streams.remove(&self.stream_id);
         }
+        if let Ok(mut limits) = self.state_refresh_limits.lock() {
+            limits.remove(&self.stream_id);
+        }
     }
+}
+
+#[derive(Debug, Clone)]
+struct StateRefreshRateLimit {
+    window_started_at: Instant,
+    count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -300,6 +319,7 @@ enum BridgeError {
     BadRequest(String),
     Forbidden(String),
     Protocol(String),
+    TooManyRequests(String),
 }
 
 #[derive(Debug)]
@@ -319,6 +339,7 @@ impl fmt::Display for BridgeError {
             Self::BadRequest(message) => write!(f, "{message}"),
             Self::Forbidden(message) => write!(f, "{message}"),
             Self::Protocol(message) => write!(f, "{message}"),
+            Self::TooManyRequests(message) => write!(f, "{message}"),
         }
     }
 }
@@ -334,6 +355,7 @@ impl IntoResponse for BridgeError {
         let status = match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
+            Self::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             Self::Api(_) | Self::Io(_) | Self::Protocol(_) => StatusCode::BAD_GATEWAY,
         };
         let body = Json(serde_json::json!({
@@ -555,10 +577,11 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         ui_event_tx: tokio::sync::broadcast::channel(256).0,
         state_refresh_tx: tokio::sync::broadcast::channel(256).0,
         active_state_streams: Arc::new(Mutex::new(HashSet::new())),
+        state_refresh_limits: Arc::new(Mutex::new(HashMap::new())),
+        state_patch_permits: Arc::new(tokio::sync::Semaphore::new(MAX_STATE_PATCH_BLOCKING_TASKS)),
         snapshot_cache: Arc::new(Mutex::new(SnapshotCache::default())),
         snapshot_rebuild_lock: Arc::new(Mutex::new(())),
         snapshot_required_epoch: Arc::new(AtomicUsize::new(0)),
-        structural_refresh_ready: Arc::new(AtomicBool::new(false)),
         upload_dir: options.upload_dir.clone(),
     };
     spawn_structural_refresh_loop(state.clone());
@@ -1246,10 +1269,7 @@ async fn command_handler(
     validate_web_command(&request.method)?;
     fill_clear_rename_labels(&state.api, &mut request.method)?;
     let should_prune_terminal_sessions = command_may_close_terminal_session(&request.method);
-    let should_refresh_state_streams = command_requires_local_snapshot_refresh(
-        &request.method,
-        state.structural_refresh_ready.load(Ordering::Acquire),
-    );
+    let should_refresh_state_streams = command_requires_local_snapshot_refresh(&request.method);
 
     let api = state.api.clone();
     let response = tokio::task::spawn_blocking(move || api.request(request))
@@ -1276,30 +1296,16 @@ async fn state_refresh_handler(
     if body.stream_id.trim().is_empty() {
         return Err(BridgeError::BadRequest("missing stream_id".to_string()));
     }
-    {
-        let active_state_streams = state.active_state_streams.lock().map_err(|_| {
-            BridgeError::Protocol("state stream registry lock poisoned".to_string())
-        })?;
-        if !active_state_streams.contains(&body.stream_id) {
-            return Err(BridgeError::BadRequest(format!(
-                "unknown stream_id: {}",
-                body.stream_id
-            )));
-        }
-    }
+    check_state_refresh_allowed(&state, &body.stream_id)?;
     let refresh_id = next_state_refresh_id();
     let _ = &body.reason;
     let rebuild_epoch = mark_snapshot_dirty(&state);
-    let state_refresh_tx = state.state_refresh_tx.clone();
     let event = StateRefreshEvent {
         target_stream_id: Some(body.stream_id),
         refresh_id: Some(refresh_id.clone()),
         rebuild_epoch,
     };
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        let _ = state_refresh_tx.send(event);
-    });
+    let _ = state.state_refresh_tx.send(event);
     Ok(Json(StateRefreshResponse { refresh_id }))
 }
 
@@ -1313,25 +1319,8 @@ fn command_may_close_terminal_session(method: &Method) -> bool {
     )
 }
 
-fn command_requires_local_snapshot_refresh(
-    method: &Method,
-    structural_refresh_ready: bool,
-) -> bool {
-    if !structural_refresh_ready {
-        return command_may_change_structure(method);
-    }
-    command_has_no_structural_subscription(method)
-}
-
-fn command_has_no_structural_subscription(method: &Method) -> bool {
-    matches!(
-        method,
-        Method::PaneRename(_)
-            | Method::PaneResize(_)
-            | Method::PaneSwap(_)
-            | Method::PaneZoom(_)
-            | Method::LayoutApply(_)
-    )
+fn command_requires_local_snapshot_refresh(method: &Method) -> bool {
+    command_may_change_structure(method)
 }
 
 fn command_may_change_structure(method: &Method) -> bool {
@@ -1361,17 +1350,11 @@ fn command_may_change_structure(method: &Method) -> bool {
 }
 
 fn next_state_stream_id() -> String {
-    format!(
-        "stream-{}",
-        STATE_STREAM_COUNTER.fetch_add(1, Ordering::Relaxed) + 1
-    )
+    format!("stream-{}", Uuid::new_v4())
 }
 
 fn next_state_refresh_id() -> String {
-    format!(
-        "refresh-{}",
-        STATE_REFRESH_COUNTER.fetch_add(1, Ordering::Relaxed) + 1
-    )
+    format!("refresh-{}", Uuid::new_v4())
 }
 
 fn next_snapshot_rebuild_epoch() -> usize {
@@ -1397,6 +1380,63 @@ fn broadcast_state_snapshot_refresh(state: &BridgeState) {
         refresh_id: None,
         rebuild_epoch,
     });
+}
+
+fn reserve_state_stream(
+    state: &BridgeState,
+) -> Result<(String, ActiveStateStreamGuard), BridgeError> {
+    let stream_id = next_state_stream_id();
+    {
+        let mut active_state_streams = state.active_state_streams.lock().map_err(|_| {
+            BridgeError::Protocol("state stream registry lock poisoned".to_string())
+        })?;
+        if active_state_streams.len() >= MAX_STATE_STREAMS {
+            return Err(BridgeError::TooManyRequests(
+                "too many active state streams".to_string(),
+            ));
+        }
+        active_state_streams.insert(stream_id.clone());
+    }
+    let guard = ActiveStateStreamGuard {
+        stream_id: stream_id.clone(),
+        active_state_streams: state.active_state_streams.clone(),
+        state_refresh_limits: state.state_refresh_limits.clone(),
+    };
+    Ok((stream_id, guard))
+}
+
+fn check_state_refresh_allowed(state: &BridgeState, stream_id: &str) -> Result<(), BridgeError> {
+    let now = Instant::now();
+    let active_state_streams = state
+        .active_state_streams
+        .lock()
+        .map_err(|_| BridgeError::Protocol("state stream registry lock poisoned".to_string()))?;
+    if !active_state_streams.contains(stream_id) {
+        return Err(BridgeError::BadRequest(format!(
+            "unknown stream_id: {stream_id}"
+        )));
+    }
+    let mut limits = state
+        .state_refresh_limits
+        .lock()
+        .map_err(|_| BridgeError::Protocol("state refresh limit lock poisoned".to_string()))?;
+    let limit = limits
+        .entry(stream_id.to_string())
+        .or_insert(StateRefreshRateLimit {
+            window_started_at: now,
+            count: 0,
+        });
+    if now.duration_since(limit.window_started_at) >= STATE_REFRESH_RATE_LIMIT_WINDOW {
+        limit.window_started_at = now;
+        limit.count = 0;
+    }
+    if limit.count >= STATE_REFRESH_RATE_LIMIT_MAX {
+        return Err(BridgeError::TooManyRequests(
+            "state refresh rate limit exceeded".to_string(),
+        ));
+    }
+    limit.count += 1;
+    Ok(())
 }
 
 fn fill_clear_rename_labels(api: &ApiClient, method: &mut Method) -> Result<(), BridgeError> {
@@ -1608,6 +1648,11 @@ fn build_snapshot_cached(
         attempts += 1;
         if entry_stale && attempts < SNAPSHOT_CACHE_REBUILD_ATTEMPTS {
             continue;
+        }
+        if entry_stale {
+            return Err(BridgeError::Protocol(
+                "snapshot rebuild did not reach required epoch".to_string(),
+            ));
         }
         let entry = SnapshotCacheEntry {
             snapshot,
@@ -1899,23 +1944,20 @@ async fn state_ws_handler(
     if let Err(err) = ensure_allowed_request(&headers, &state.request_policy) {
         return err.into_response();
     }
-    ws.on_upgrade(move |socket| handle_state_socket(socket, state))
+    let (stream_id, stream_guard) = match reserve_state_stream(&state) {
+        Ok(reserved) => reserved,
+        Err(err) => return err.into_response(),
+    };
+    ws.on_upgrade(move |socket| handle_state_socket(socket, state, stream_id, stream_guard))
         .into_response()
 }
 
-async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
-    let stream_id = next_state_stream_id();
-    {
-        let mut active_state_streams = match state.active_state_streams.lock() {
-            Ok(active_state_streams) => active_state_streams,
-            Err(_) => return,
-        };
-        active_state_streams.insert(stream_id.clone());
-    }
-    let _stream_guard = ActiveStateStreamGuard {
-        stream_id: stream_id.clone(),
-        active_state_streams: state.active_state_streams.clone(),
-    };
+async fn handle_state_socket(
+    socket: WebSocket,
+    state: BridgeState,
+    stream_id: String,
+    _stream_guard: ActiveStateStreamGuard,
+) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let mut refresh_rx = state.state_refresh_tx.subscribe();
     let setup_state = state.clone();
@@ -1980,7 +2022,7 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
                         if !projection.accepts_upstream_patch() {
                             continue;
                         }
-                        let event = match projection.apply_event(&state, envelope) {
+                        let event = match apply_state_event(&state, &mut projection, envelope).await {
                             Ok(Some(message)) => Some(message),
                             Ok(None) => None,
                             Err(err) if err.is_unknown_pane() => {
@@ -2008,7 +2050,10 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
                                     }
                                 }
                             }
-                            Err(err) => Some(projection.patch_failed(err, None)),
+                            Err(err) => {
+                                projection.quiescent = true;
+                                Some(projection.patch_failed(err, None))
+                            }
                         };
                         if let Some(message) = event {
                             let Ok(text) = serde_json::to_string(&message) else {
@@ -2023,10 +2068,10 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
                         if !projection.accepts_upstream_patch() {
                             continue;
                         }
-                        match projection.apply_status(&state, status, false) {
+                        match apply_state_status(&state, &mut projection, status, false).await {
                             Ok(message) => {
                                 let Ok(text) = serde_json::to_string(&message) else {
-                                    continue;
+                                    return;
                                 };
                                 if ws_sender.send(Message::Text(text.into())).await.is_err() {
                                     return;
@@ -2062,6 +2107,7 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
                                 }
                             }
                             Err(err) => {
+                                projection.quiescent = true;
                                 let message = projection.patch_failed(err, None);
                                 let Ok(text) = serde_json::to_string(&message) else {
                                     return;
@@ -2073,6 +2119,7 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
                         }
                     }
                     UpstreamStateEvent::ResyncRequired(reason) => {
+                        projection.quiescent = true;
                         let message = projection.resync_required(reason, None);
                         let Ok(text) = serde_json::to_string(&message) else {
                             return;
@@ -2101,7 +2148,7 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
                             projection.snapshot.selected_pane_id = Some(pane_id.clone());
                             let message = projection.selection_changed(pane_id);
                             let Ok(text) = serde_json::to_string(&message) else {
-                                continue;
+                                return;
                             };
                             if ws_sender.send(Message::Text(text.into())).await.is_err() {
                                 return;
@@ -2109,6 +2156,7 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        projection.quiescent = true;
                         let message = projection.resync_required("selection event stream lagged", None);
                         let Ok(text) = serde_json::to_string(&message) else {
                             return;
@@ -2127,6 +2175,9 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
                             continue;
                         }
                         let mut refresh_ids = event.refresh_id.into_iter().collect::<Vec<_>>();
+                        if projection.quiescent && refresh_ids.is_empty() {
+                            continue;
+                        }
                         let mut rebuild_epoch = event.rebuild_epoch;
                         tokio::time::sleep(STATE_STREAM_REBUILD_DEBOUNCE).await;
                         while let Ok(event) = refresh_rx.try_recv() {
@@ -2165,6 +2216,7 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        projection.quiescent = true;
                         let message = projection.resync_required("state refresh stream lagged", None);
                         let Ok(text) = serde_json::to_string(&message) else {
                             return;
@@ -2187,6 +2239,114 @@ async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
             }
             else => return,
         }
+    }
+}
+
+async fn apply_state_event(
+    state: &BridgeState,
+    projection: &mut BridgeProjection,
+    envelope: EventEnvelope,
+) -> Result<Option<StateMessage>, BridgeError> {
+    match envelope.data {
+        EventData::PaneAgentDetected { pane_id, .. } => {
+            let index = projection
+                .snapshot
+                .panes
+                .iter()
+                .position(|pane| pane.pane_id == pane_id)
+                .ok_or_else(|| BridgeError::Protocol(format!("unknown pane {pane_id}")))?;
+            let api = state.api.clone();
+            let snapshot_panes = projection.snapshot.panes.clone();
+            let context = run_state_patch_blocking(state, move || {
+                let pane = pane_info(&api, &pane_id)?;
+                let panes = snapshot_panes_with(&snapshot_panes, index, pane.clone());
+                let workspace = wrap_workspace(workspace_info(&api, &pane.workspace_id)?, &panes);
+                let tab = wrap_tab(tab_info(&api, &pane.tab_id)?);
+                Ok((pane, workspace, tab))
+            })
+            .await?;
+            let (pane, workspace, tab) = context;
+            Ok(Some(
+                projection.apply_status_context(index, pane, workspace, tab, true),
+            ))
+        }
+        EventData::PaneOutputChanged { .. } | EventData::PaneAgentStatusChanged { .. } => Ok(None),
+        _ => Ok(None),
+    }
+}
+
+async fn apply_state_status(
+    state: &BridgeState,
+    projection: &mut BridgeProjection,
+    event: PaneAgentStatusChangedEvent,
+    detected: bool,
+) -> Result<StateMessage, BridgeError> {
+    let index = projection
+        .snapshot
+        .panes
+        .iter()
+        .position(|pane| pane.pane_id == event.pane_id)
+        .ok_or_else(|| BridgeError::Protocol(format!("unknown pane {}", event.pane_id)))?;
+    let mut pane = projection.snapshot.panes[index].clone();
+    pane.agent_status = event.agent_status;
+    pane.agent = event.agent;
+    pane.custom_status = event.custom_status;
+    pane.title = event.title;
+    pane.display_agent = event.display_agent;
+    pane.state_labels = event.state_labels;
+    let api = state.api.clone();
+    let workspace_id = pane.workspace_id.clone();
+    let tab_id = pane.tab_id.clone();
+    let panes = snapshot_panes_with(&projection.snapshot.panes, index, pane.clone());
+    let (workspace, tab) = run_state_patch_blocking(state, move || {
+        let workspace = wrap_workspace(workspace_info(&api, &workspace_id)?, &panes);
+        let tab = wrap_tab(tab_info(&api, &tab_id)?);
+        Ok((workspace, tab))
+    })
+    .await?;
+    Ok(projection.apply_status_context(index, pane, workspace, tab, detected))
+}
+
+fn snapshot_panes_with(panes: &[PaneInfo], index: usize, pane: PaneInfo) -> Vec<PaneInfo> {
+    let mut panes = panes.to_vec();
+    if let Some(slot) = panes.get_mut(index) {
+        *slot = pane;
+    }
+    panes
+}
+
+async fn run_state_patch_blocking<T>(
+    state: &BridgeState,
+    operation: impl FnOnce() -> Result<T, BridgeError> + Send + 'static,
+) -> Result<T, BridgeError>
+where
+    T: Send + 'static,
+{
+    run_state_patch_blocking_with_timeout(state, STATE_STREAM_PATCH_TIMEOUT, operation).await
+}
+
+async fn run_state_patch_blocking_with_timeout<T>(
+    state: &BridgeState,
+    timeout: Duration,
+    operation: impl FnOnce() -> Result<T, BridgeError> + Send + 'static,
+) -> Result<T, BridgeError>
+where
+    T: Send + 'static,
+{
+    let permit = state
+        .state_patch_permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| BridgeError::Protocol("state stream patch workers exhausted".to_string()))?;
+    let task = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        operation()
+    });
+    match tokio::time::timeout(timeout, task).await {
+        Ok(result) => result.map_err(|err| BridgeError::Protocol(err.to_string()))?,
+        Err(_) => Err(BridgeError::Protocol(
+            "state stream patch timed out".to_string(),
+        )),
     }
 }
 
@@ -2330,106 +2490,40 @@ impl BridgeProjection {
         }
     }
 
-    fn apply_status(
+    fn apply_status_context(
         &mut self,
-        state: &BridgeState,
-        event: PaneAgentStatusChangedEvent,
+        index: usize,
+        pane: PaneInfo,
+        workspace: SnapshotWorkspaceInfo,
+        tab: SnapshotTabInfo,
         detected: bool,
-    ) -> Result<StateMessage, BridgeError> {
-        let index = self
-            .snapshot
-            .panes
-            .iter()
-            .position(|pane| pane.pane_id == event.pane_id)
-            .ok_or_else(|| BridgeError::Protocol(format!("unknown pane {}", event.pane_id)))?;
-        self.snapshot.panes[index].agent_status = event.agent_status;
-        self.snapshot.panes[index].agent = event.agent;
-        self.snapshot.panes[index].custom_status = event.custom_status;
-        self.snapshot.panes[index].title = event.title;
-        self.snapshot.panes[index].display_agent = event.display_agent;
-        self.snapshot.panes[index].state_labels = event.state_labels;
-        let pane = self.snapshot.panes[index].clone();
-        let workspace = self.refresh_workspace(&state.api, &pane.workspace_id)?;
-        let tab = self.refresh_tab(&state.api, &pane.tab_id)?;
+    ) -> StateMessage {
+        self.snapshot.panes[index] = pane.clone();
+        upsert_by(&mut self.snapshot.workspaces, workspace.clone(), |item| {
+            item.info.workspace_id.as_str()
+        });
+        upsert_by(&mut self.snapshot.tabs, tab.clone(), |item| {
+            item.info.tab_id.as_str()
+        });
         let generation = self.generation;
         let sequence = self.next_sequence();
         if detected {
-            Ok(StateMessage::PaneAgentDetected {
+            StateMessage::PaneAgentDetected {
                 generation,
                 sequence,
                 pane,
                 workspace,
                 tab,
-            })
-        } else {
-            Ok(StateMessage::PaneAgentStatusChanged {
-                generation,
-                sequence,
-                pane,
-                workspace,
-                tab,
-            })
-        }
-    }
-
-    fn apply_event(
-        &mut self,
-        state: &BridgeState,
-        envelope: EventEnvelope,
-    ) -> Result<Option<StateMessage>, BridgeError> {
-        match envelope.data {
-            EventData::PaneAgentDetected { pane_id, .. } => {
-                let pane = pane_info(&state.api, &pane_id)?;
-                let status = PaneAgentStatusChangedEvent {
-                    pane_id: pane.pane_id.clone(),
-                    workspace_id: pane.workspace_id.clone(),
-                    agent_status: pane.agent_status,
-                    agent: pane.agent.clone(),
-                    custom_status: pane.custom_status.clone(),
-                    title: pane.title.clone(),
-                    display_agent: pane.display_agent.clone(),
-                    state_labels: pane.state_labels.clone(),
-                };
-                return Ok(Some(self.apply_status(state, status, true)?));
             }
-            EventData::PaneOutputChanged { .. } | EventData::PaneAgentStatusChanged { .. } => {}
-            _ => {}
+        } else {
+            StateMessage::PaneAgentStatusChanged {
+                generation,
+                sequence,
+                pane,
+                workspace,
+                tab,
+            }
         }
-        Ok(None)
-    }
-
-    fn refresh_workspace(
-        &mut self,
-        api: &ApiClient,
-        workspace_id: &str,
-    ) -> Result<SnapshotWorkspaceInfo, BridgeError> {
-        let workspace = workspace_info(api, workspace_id)?;
-        Ok(self.upsert_workspace(workspace))
-    }
-
-    fn refresh_tab(
-        &mut self,
-        api: &ApiClient,
-        tab_id: &str,
-    ) -> Result<SnapshotTabInfo, BridgeError> {
-        let tab = tab_info(api, tab_id)?;
-        Ok(self.upsert_tab(tab))
-    }
-
-    fn upsert_workspace(&mut self, workspace: WorkspaceInfo) -> SnapshotWorkspaceInfo {
-        let wrapped = wrap_workspace(workspace, &self.snapshot.panes);
-        upsert_by(&mut self.snapshot.workspaces, wrapped.clone(), |item| {
-            item.info.workspace_id.as_str()
-        });
-        wrapped
-    }
-
-    fn upsert_tab(&mut self, tab: TabInfo) -> SnapshotTabInfo {
-        let wrapped = wrap_tab(tab);
-        upsert_by(&mut self.snapshot.tabs, wrapped.clone(), |item| {
-            item.info.tab_id.as_str()
-        });
-        wrapped
     }
 }
 
@@ -2647,35 +2741,45 @@ fn close_message(reason: &str) -> String {
 fn spawn_structural_refresh_loop(state: BridgeState) {
     let spawn_result = thread::Builder::new()
         .name("herdr-web-structural-refresh".to_string())
-        .spawn(move || loop {
-            match open_structural_refresh_subscription(state.api.clone()) {
-                Ok(mut event_rx) => {
-                    drain_structural_refresh_startup_replay(&mut event_rx);
-                    state
-                        .structural_refresh_ready
-                        .store(true, Ordering::Release);
-                    broadcast_state_snapshot_refresh(&state);
-                    while event_rx.blocking_recv().is_some() {
-                        broadcast_structural_refresh_burst(&state, &mut event_rx);
+        .spawn(move || {
+            let mut retry_delay = STRUCTURAL_REFRESH_RETRY_INITIAL;
+            loop {
+                match open_structural_refresh_subscription(state.api.clone()) {
+                    Ok(mut event_rx) => {
+                        let opened_at = Instant::now();
+                        drain_structural_refresh_startup_replay(&mut event_rx);
+                        broadcast_state_snapshot_refresh(&state);
+                        while event_rx.blocking_recv().is_some() {
+                            broadcast_structural_refresh_burst(&state, &mut event_rx);
+                        }
+                        warn!("herdr-web bridge structural subscription closed; retrying");
+                        if structural_refresh_run_was_stable(opened_at) {
+                            retry_delay = STRUCTURAL_REFRESH_RETRY_INITIAL;
+                            broadcast_state_snapshot_refresh(&state);
+                        }
                     }
-                    state
-                        .structural_refresh_ready
-                        .store(false, Ordering::Release);
-                    warn!("herdr-web bridge structural subscription closed; retrying");
-                    broadcast_state_snapshot_refresh(&state);
+                    Err(err) => {
+                        warn!("herdr-web bridge structural subscription failed: {err}");
+                    }
                 }
-                Err(err) => {
-                    state
-                        .structural_refresh_ready
-                        .store(false, Ordering::Release);
-                    warn!("herdr-web bridge structural subscription failed: {err}");
-                }
+                thread::sleep(retry_delay);
+                retry_delay = next_structural_refresh_retry_delay(retry_delay);
             }
-            thread::sleep(Duration::from_secs(1));
         });
     if let Err(err) = spawn_result {
         warn!("failed to spawn herdr-web structural refresh loop: {err}");
     }
+}
+
+fn next_structural_refresh_retry_delay(current: Duration) -> Duration {
+    current
+        .checked_mul(2)
+        .unwrap_or(STRUCTURAL_REFRESH_RETRY_MAX)
+        .min(STRUCTURAL_REFRESH_RETRY_MAX)
+}
+
+fn structural_refresh_run_was_stable(opened_at: Instant) -> bool {
+    opened_at.elapsed() >= STRUCTURAL_REFRESH_RETRY_STABLE_AFTER
 }
 
 fn open_structural_refresh_subscription(
@@ -3226,10 +3330,13 @@ mod tests {
             ui_event_tx: tokio::sync::broadcast::channel(16).0,
             state_refresh_tx: tokio::sync::broadcast::channel(16).0,
             active_state_streams: Arc::new(Mutex::new(HashSet::new())),
+            state_refresh_limits: Arc::new(Mutex::new(HashMap::new())),
+            state_patch_permits: Arc::new(tokio::sync::Semaphore::new(
+                MAX_STATE_PATCH_BLOCKING_TASKS,
+            )),
             snapshot_cache: Arc::new(Mutex::new(SnapshotCache::default())),
             snapshot_rebuild_lock: Arc::new(Mutex::new(())),
             snapshot_required_epoch: Arc::new(AtomicUsize::new(0)),
-            structural_refresh_ready: Arc::new(AtomicBool::new(false)),
             upload_dir: PathBuf::from("/tmp"),
         }
     }
@@ -3424,6 +3531,114 @@ mod tests {
         assert!(required_snapshot_epoch(&state) >= event.rebuild_epoch);
     }
 
+    #[tokio::test]
+    async fn state_refresh_handler_rate_limits_active_streams() {
+        let state = test_bridge_state();
+        state
+            .active_state_streams
+            .lock()
+            .unwrap()
+            .insert("stream-1".to_string());
+
+        for _ in 0..STATE_REFRESH_RATE_LIMIT_MAX {
+            let _ = state_refresh_handler(
+                State(state.clone()),
+                origin_headers("127.0.0.1:8787", Some("http://127.0.0.1:8787")),
+                Json(StateRefreshRequest {
+                    stream_id: "stream-1".to_string(),
+                    reason: StateRefreshReason::Manual,
+                }),
+            )
+            .await
+            .unwrap();
+        }
+
+        let limited = state_refresh_handler(
+            State(state),
+            origin_headers("127.0.0.1:8787", Some("http://127.0.0.1:8787")),
+            Json(StateRefreshRequest {
+                stream_id: "stream-1".to_string(),
+                reason: StateRefreshReason::Manual,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(limited, BridgeError::TooManyRequests(_)));
+    }
+
+    #[test]
+    fn reserve_state_stream_enforces_client_limit_and_cleans_up() {
+        let state = test_bridge_state();
+        let mut guards = Vec::new();
+        for _ in 0..MAX_STATE_STREAMS {
+            let (stream_id, guard) = reserve_state_stream(&state).unwrap();
+            assert!(stream_id.starts_with("stream-"));
+            guards.push(guard);
+        }
+
+        let limited = reserve_state_stream(&state).unwrap_err();
+        assert!(matches!(limited, BridgeError::TooManyRequests(_)));
+        drop(guards.pop());
+        assert!(reserve_state_stream(&state).is_ok());
+    }
+
+    #[test]
+    fn state_refresh_guard_removes_rate_limit_entries() {
+        let state = test_bridge_state();
+        let (stream_id, guard) = reserve_state_stream(&state).unwrap();
+
+        check_state_refresh_allowed(&state, &stream_id).unwrap();
+        assert!(state
+            .state_refresh_limits
+            .lock()
+            .unwrap()
+            .contains_key(&stream_id));
+
+        drop(guard);
+        assert!(!state
+            .state_refresh_limits
+            .lock()
+            .unwrap()
+            .contains_key(&stream_id));
+    }
+
+    #[tokio::test]
+    async fn state_patch_blocking_tasks_are_bounded_after_timeout() {
+        let state = test_bridge_state();
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+
+        for _ in 0..MAX_STATE_PATCH_BLOCKING_TASKS {
+            let started_tx = started_tx.clone();
+            let release_rx = release_rx.clone();
+            let result = run_state_patch_blocking_with_timeout(
+                &state,
+                Duration::from_millis(1),
+                move || {
+                    let _ = started_tx.send(());
+                    let _ = release_rx.lock().unwrap().recv();
+                    Ok(())
+                },
+            )
+            .await;
+            assert!(
+                matches!(result, Err(BridgeError::Protocol(message)) if message.contains("timed out"))
+            );
+        }
+        for _ in 0..MAX_STATE_PATCH_BLOCKING_TASKS {
+            started_rx.recv().await.unwrap();
+        }
+
+        let limited = run_state_patch_blocking(&state, || Ok(())).await;
+        assert!(
+            matches!(limited, Err(BridgeError::Protocol(message)) if message.contains("workers exhausted"))
+        );
+        for _ in 0..MAX_STATE_PATCH_BLOCKING_TASKS {
+            release_tx.send(()).unwrap();
+        }
+    }
+
     #[test]
     fn state_snapshot_message_carries_stream_and_refresh_ids() {
         let mut projection = BridgeProjection::new(test_snapshot());
@@ -3462,21 +3677,19 @@ mod tests {
     }
 
     #[test]
-    fn eventless_structure_commands_require_local_snapshot_refresh() {
+    fn structure_commands_require_local_snapshot_refresh() {
         assert!(command_requires_local_snapshot_refresh(
             &Method::PaneRename(herdr_compat::api::schema::PaneRenameParams {
                 pane_id: "p1".to_string(),
                 label: Some("editor".to_string()),
             },),
-            true,
         ));
-        assert!(command_requires_local_snapshot_refresh(
-            &Method::PaneZoom(herdr_compat::api::schema::PaneZoomParams {
+        assert!(command_requires_local_snapshot_refresh(&Method::PaneZoom(
+            herdr_compat::api::schema::PaneZoomParams {
                 pane_id: Some("p1".to_string()),
                 mode: Default::default(),
-            },),
-            true
-        ));
+            },
+        ),));
         assert!(command_requires_local_snapshot_refresh(
             &Method::LayoutApply(herdr_compat::api::schema::LayoutApplyParams {
                 workspace_id: Some("w1".to_string()),
@@ -3487,45 +3700,30 @@ mod tests {
                     pane: herdr_compat::api::schema::LayoutPane::default(),
                 },
             },),
-            true,
         ));
-        assert!(!command_requires_local_snapshot_refresh(
-            &Method::PaneMove(herdr_compat::api::schema::PaneMoveParams {
+        assert!(command_requires_local_snapshot_refresh(&Method::PaneMove(
+            herdr_compat::api::schema::PaneMoveParams {
                 pane_id: "p1".to_string(),
                 destination: PaneMoveDestination::NewTab {
                     workspace_id: Some("w1".to_string()),
                     label: None,
                 },
                 focus: true,
-            },),
-            true
-        ));
-        assert!(!command_requires_local_snapshot_refresh(
+            },
+        ),));
+        assert!(command_requires_local_snapshot_refresh(
             &Method::WorkspaceFocus(WorkspaceTarget {
                 workspace_id: "w1".to_string(),
             },),
-            true,
         ));
     }
 
     #[test]
-    fn structural_commands_refresh_locally_when_structural_subscription_is_down() {
-        assert!(command_requires_local_snapshot_refresh(
-            &Method::PaneMove(herdr_compat::api::schema::PaneMoveParams {
-                pane_id: "p1".to_string(),
-                destination: PaneMoveDestination::NewTab {
-                    workspace_id: Some("w1".to_string()),
-                    label: None,
-                },
-                focus: true,
-            },),
-            false,
-        ));
-        assert!(command_requires_local_snapshot_refresh(
-            &Method::WorkspaceFocus(WorkspaceTarget {
-                workspace_id: "w1".to_string(),
-            },),
-            false,
+    fn non_structure_commands_do_not_require_local_snapshot_refresh() {
+        assert!(!command_requires_local_snapshot_refresh(
+            &Method::PaneLayout(PaneLayoutParams {
+                pane_id: Some("p1".to_string()),
+            },)
         ));
     }
 
@@ -3543,6 +3741,37 @@ mod tests {
         assert!(event.rebuild_epoch > 0);
         assert!(refresh_rx.try_recv().is_err());
         assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn structural_refresh_retry_delay_backs_off_to_cap() {
+        assert_eq!(
+            next_structural_refresh_retry_delay(Duration::from_secs(1)),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            next_structural_refresh_retry_delay(Duration::from_secs(20)),
+            STRUCTURAL_REFRESH_RETRY_MAX
+        );
+    }
+
+    #[test]
+    fn structural_refresh_run_stability_uses_threshold() {
+        assert!(!structural_refresh_run_was_stable(Instant::now()));
+        assert!(structural_refresh_run_was_stable(
+            Instant::now() - STRUCTURAL_REFRESH_RETRY_STABLE_AFTER - Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn selection_event_round_trips_pane_id() {
+        let event = serde_json::json!({
+            "type": "herdr_web.selection_changed",
+            "pane_id": "p1",
+        })
+        .to_string();
+
+        assert_eq!(selection_event_pane_id(&event).as_deref(), Some("p1"));
     }
 
     #[test]

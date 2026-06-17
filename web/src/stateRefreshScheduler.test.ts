@@ -30,15 +30,16 @@ describe("state refresh scheduler", () => {
     await expect(request).resolves.toBeUndefined();
   });
 
-  it("coalesces concurrent requests onto one in-flight refresh", async () => {
+  it("runs one queued follow-up for requests made during an in-flight refresh", async () => {
     const posts: string[] = [];
+    const refreshIds = ["refresh-1", "refresh-2"];
     const scheduler = createStateRefreshScheduler({
       enabled: () => true,
       currentStreamId: () => "stream-1",
       hasCurrentSnapshot: () => false,
       postRefresh: async (streamId) => {
         posts.push(streamId);
-        return { refresh_id: "refresh-1" };
+        return { refresh_id: refreshIds[posts.length - 1] };
       },
       delay: async () => {},
       setTimeout: () => 1,
@@ -51,6 +52,9 @@ describe("state refresh scheduler", () => {
 
     expect(posts).toEqual(["stream-1"]);
     scheduler.settle(["refresh-1"]);
+    await flush();
+    expect(posts).toEqual(["stream-1", "stream-1"]);
+    scheduler.settle(["refresh-2"]);
 
     await Promise.all([first, second]);
   });
@@ -136,6 +140,39 @@ describe("state refresh scheduler", () => {
     await expect(scheduler.request("android_resume")).resolves.toBeUndefined();
     expect(posts).toEqual(["stream-1"]);
     expect(terminalErrors).toEqual(["unknown stream_id"]);
+  });
+
+  it("does not post redundant retries after a refresh timeout when a snapshot exists", async () => {
+    const posts: string[] = [];
+    let timeoutHandler: () => void = () => {
+      throw new Error("timeout handler was not registered");
+    };
+    const scheduler = createStateRefreshScheduler({
+      enabled: () => true,
+      currentStreamId: () => "stream-1",
+      hasCurrentSnapshot: () => true,
+      postRefresh: async () => {
+        const refreshId = `refresh-${posts.length + 1}`;
+        posts.push(refreshId);
+        return { refresh_id: refreshId };
+      },
+      delay: async () => {
+        throw new Error("unexpected retry delay");
+      },
+      setTimeout: (handler) => {
+        timeoutHandler = handler;
+        return 1;
+      },
+      clearTimeout: () => {},
+    });
+
+    const request = scheduler.request("manual");
+    await flush();
+    expect(posts).toEqual(["refresh-1"]);
+    timeoutHandler?.();
+
+    await expect(request).resolves.toBeUndefined();
+    expect(posts).toEqual(["refresh-1"]);
   });
 
   it("fails terminal stale-stream refresh errors without retrying when no snapshot exists", async () => {

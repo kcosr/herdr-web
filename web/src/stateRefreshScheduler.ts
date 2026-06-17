@@ -21,6 +21,7 @@ type StateRefreshSchedulerOptions = {
   clearTimeout?: (timer: number) => void;
   timeoutMs?: number;
   maxAttempts?: number;
+  maxSettledRefreshIds?: number;
 };
 
 type RefreshWaiter = {
@@ -31,6 +32,8 @@ type RefreshWaiter = {
 
 export type StateRefreshScheduler = ReturnType<typeof createStateRefreshScheduler>;
 
+class StateRefreshTimeoutError extends Error {}
+
 export function createStateRefreshScheduler(options: StateRefreshSchedulerOptions) {
   const waiters = new Map<string, RefreshWaiter>();
   const completed = new Set<string>();
@@ -40,7 +43,10 @@ export function createStateRefreshScheduler(options: StateRefreshSchedulerOption
   const clearTimer = options.clearTimeout ?? ((timer) => window.clearTimeout(timer));
   const timeoutMs = options.timeoutMs ?? 5000;
   const maxAttempts = options.maxAttempts ?? 3;
+  const maxSettledRefreshIds = options.maxSettledRefreshIds ?? 128;
   let inFlight: Promise<void> | null = null;
+  let queuedReason: StateRefreshReason | null = null;
+  let drainToken = 0;
   let epoch = 0;
 
   const hasFreshSnapshotAfterCancel = (requestEpoch: number) =>
@@ -60,70 +66,108 @@ export function createStateRefreshScheduler(options: StateRefreshSchedulerOption
       }
       const timer = setTimer(() => {
         waiters.delete(refreshId);
-        reject(new Error(`state refresh timed out: ${refreshId}`));
+        reject(new StateRefreshTimeoutError(`state refresh timed out: ${refreshId}`));
       }, timeoutMs);
       waiters.set(refreshId, { resolve, reject, timer });
     });
+
+  const runRefresh = async (reason: StateRefreshReason) => {
+    const requestEpoch = epoch;
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      if (hasFreshSnapshotAfterCancel(requestEpoch)) {
+        return;
+      }
+      if (requestEpoch !== epoch) {
+        throw new Error("state refresh cancelled");
+      }
+      const streamId = options.currentStreamId();
+      if (!streamId) {
+        if (options.hasCurrentSnapshot()) {
+          return;
+        }
+        throw new Error("state stream is not ready");
+      }
+      try {
+        const { refresh_id: refreshId } = await options.postRefresh(streamId, reason);
+        await waitForRefresh(refreshId);
+        return;
+      } catch (err) {
+        if (hasFreshSnapshotAfterCancel(requestEpoch)) {
+          return;
+        }
+        lastError = err instanceof Error ? err : new Error(String(err));
+        if (lastError instanceof StateRefreshTimeoutError && options.hasCurrentSnapshot()) {
+          return;
+        }
+        if (options.isTerminalError?.(lastError)) {
+          options.onTerminalError?.(lastError);
+          if (options.hasCurrentSnapshot()) {
+            return;
+          }
+          throw lastError;
+        }
+        if (attempt + 1 < maxAttempts) {
+          await delay(Math.min(250 * 2 ** attempt, 1000));
+        }
+      }
+    }
+    if (options.hasCurrentSnapshot()) {
+      return;
+    }
+    throw lastError ?? new Error("state refresh failed");
+  };
+
+  const startDrain = () => {
+    const token = (drainToken += 1);
+    inFlight = (async () => {
+      try {
+        while (token === drainToken && queuedReason !== null) {
+          const reason = queuedReason;
+          queuedReason = null;
+          await runRefresh(reason);
+        }
+      } finally {
+        if (token === drainToken) {
+          inFlight = null;
+        }
+      }
+    })();
+    return inFlight;
+  };
 
   const request = async (reason: StateRefreshReason) => {
     if (!options.enabled()) {
       return;
     }
-    if (inFlight) {
-      return inFlight;
-    }
-    const requestEpoch = epoch;
-    const activeRequest = (async () => {
-      let lastError: Error | null = null;
-      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-        if (hasFreshSnapshotAfterCancel(requestEpoch)) {
-          return;
-        }
-        if (requestEpoch !== epoch) {
-          throw new Error("state refresh cancelled");
-        }
-        const streamId = options.currentStreamId();
-        if (!streamId) {
-          if (options.hasCurrentSnapshot()) {
-            return;
-          }
-          throw new Error("state stream is not ready");
-        }
-        try {
-          const { refresh_id: refreshId } = await options.postRefresh(streamId, reason);
-          await waitForRefresh(refreshId);
-          return;
-        } catch (err) {
-          if (hasFreshSnapshotAfterCancel(requestEpoch)) {
-            return;
-          }
-          lastError = err instanceof Error ? err : new Error(String(err));
-          if (options.isTerminalError?.(lastError)) {
-            options.onTerminalError?.(lastError);
-            if (options.hasCurrentSnapshot()) {
-              return;
-            }
-            throw lastError;
-          }
-          if (attempt + 1 < maxAttempts) {
-            await delay(Math.min(250 * 2 ** attempt, 1000));
-          }
-        }
+    queuedReason = reason;
+    return inFlight ?? startDrain();
+  };
+
+  const trimSettledRefreshIds = () => {
+    while (completed.size + failed.size > maxSettledRefreshIds) {
+      const completedRefreshId = completed.values().next().value as string | undefined;
+      if (completedRefreshId) {
+        completed.delete(completedRefreshId);
+        continue;
       }
-      if (options.hasCurrentSnapshot()) {
+      const failedRefreshId = failed.keys().next().value as string | undefined;
+      if (!failedRefreshId) {
         return;
       }
-      throw lastError ?? new Error("state refresh failed");
-    })();
-
-    inFlight = activeRequest;
-    try {
-      await activeRequest;
-    } finally {
-      if (inFlight === activeRequest) {
-        inFlight = null;
-      }
+      failed.delete(failedRefreshId);
     }
+  };
+
+  const rememberSettledRefreshId = (refreshId: string, error?: Error) => {
+    if (error) {
+      completed.delete(refreshId);
+      failed.set(refreshId, error);
+    } else {
+      failed.delete(refreshId);
+      completed.add(refreshId);
+    }
+    trimSettledRefreshIds();
   };
 
   const settle = (refreshIds: string[] | undefined, error?: Error) => {
@@ -133,11 +177,7 @@ export function createStateRefreshScheduler(options: StateRefreshSchedulerOption
     for (const refreshId of refreshIds) {
       const waiter = waiters.get(refreshId);
       if (!waiter) {
-        if (error) {
-          failed.set(refreshId, error);
-        } else {
-          completed.add(refreshId);
-        }
+        rememberSettledRefreshId(refreshId, error);
         continue;
       }
       clearTimer(waiter.timer);
@@ -159,6 +199,8 @@ export function createStateRefreshScheduler(options: StateRefreshSchedulerOption
     waiters.clear();
     completed.clear();
     failed.clear();
+    queuedReason = null;
+    drainToken += 1;
     inFlight = null;
   };
 

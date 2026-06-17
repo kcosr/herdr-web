@@ -55,12 +55,11 @@ import {
 import {
   applyStateMessage,
   emptyStateStreamModel,
-  isSequencedStateEnvelope,
-  isStateMessage,
   type StateStreamModel,
 } from "./stateStream";
 import { createStateRefreshScheduler, type StateRefreshReason } from "./stateRefreshScheduler";
-import type { AgentStatus, PaneInfo, Snapshot, StateMessage, TabInfo, WorkspaceInfo } from "./types";
+import { openStateSocket } from "./stateSocket";
+import type { AgentStatus, PaneInfo, Snapshot, TabInfo, WorkspaceInfo } from "./types";
 
 type LoadState = "loading" | "ready" | "error";
 type Scope = "space" | "all";
@@ -250,7 +249,6 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [refitToken, setRefitToken] = useState(0);
   const [terminalFocusToken, setTerminalFocusToken] = useState(0);
-  const [stateStreamReconnectToken, setStateStreamReconnectToken] = useState(0);
   const isCompactLayout = useIsCompactLayout();
   const isTouchInput = useIsTouchInput();
   const showMobileKeyboardHideRefit = isNativeAndroid();
@@ -260,6 +258,7 @@ export function App() {
   const stateStreamResumeTokenRef = useRef(bridge.resumeToken);
   const bridgeRef = useRef(bridge);
   bridgeRef.current = bridge;
+  const stateSocketRef = useRef<ReturnType<typeof openStateSocket> | null>(null);
   const stateRefreshSchedulerRef = useRef<ReturnType<typeof createStateRefreshScheduler> | null>(
     null,
   );
@@ -273,7 +272,7 @@ export function App() {
       postRefresh: (streamId, reason) =>
         postStateRefresh(bridgeRef.current.httpUrl, streamId, reason),
       isTerminalError: isTerminalStateRefreshError,
-      onTerminalError: () => setStateStreamReconnectToken((token) => token + 1),
+      onTerminalError: () => stateSocketRef.current?.reconnect(),
       delay,
       setTimeout: (handler, ms) => window.setTimeout(handler, ms),
       clearTimeout: (timer) => window.clearTimeout(timer),
@@ -581,9 +580,13 @@ export function App() {
       }
       return "continue";
     });
+    stateSocketRef.current = stateSocket;
     return () => {
       disposed = true;
       clearStateRefreshWaiters("state stream closed");
+      if (stateSocketRef.current === stateSocket) {
+        stateSocketRef.current = null;
+      }
       stateSocket.close();
     };
   }, [
@@ -591,7 +594,6 @@ export function App() {
     bridge.capabilities,
     bridge.connectionKey,
     requestStateRefresh,
-    stateStreamReconnectToken,
     bridge.wsUrl,
   ]);
 
@@ -2577,107 +2579,4 @@ function blurActiveTextInput() {
   ) {
     element.blur();
   }
-}
-
-function openStateSocket(
-  wsUrl: (path: string, query?: URLSearchParams) => string,
-  onMessage: (message: StateMessage) => "continue" | "ignore" | "reconnect",
-) {
-  const url = wsUrl("/ws/state");
-  let socket: WebSocket | null = null;
-  let closed = false;
-  let reconnectTimer: number | null = null;
-  let stableTimer: number | null = null;
-  let attempts = 0;
-
-  const scheduleReconnect = () => {
-    if (closed || reconnectTimer !== null) {
-      return;
-    }
-    const delay = Math.min(500 * 2 ** attempts, 5000);
-    attempts += 1;
-    reconnectTimer = window.setTimeout(() => {
-      reconnectTimer = null;
-      connect();
-    }, delay);
-  };
-
-  const connect = () => {
-    if (closed) {
-      return;
-    }
-    const next = new WebSocket(url);
-    socket = next;
-    next.addEventListener("message", (event) => {
-      if (typeof event.data !== "string" || socket !== next) {
-        return;
-      }
-      try {
-        const parsed = JSON.parse(event.data) as unknown;
-        if (!isStateMessage(parsed)) {
-          if (isSequencedStateEnvelope(parsed)) {
-            const action = onMessage({
-              type: "resync_required",
-              generation: parsed.generation,
-              sequence: parsed.sequence,
-              reason: `unknown state message: ${parsed.type}`,
-            });
-            if (action === "reconnect") {
-              socket = null;
-              next.close();
-              scheduleReconnect();
-            }
-          }
-          return;
-        }
-        if (parsed.type === "snapshot") {
-          if (stableTimer !== null) {
-            window.clearTimeout(stableTimer);
-          }
-          stableTimer = window.setTimeout(() => {
-            if (!closed && socket === next) {
-              attempts = 0;
-            }
-          }, 1500);
-        }
-        if (onMessage(parsed) === "reconnect") {
-          socket = null;
-          next.close();
-          scheduleReconnect();
-        }
-      } catch {
-        socket = null;
-        next.close();
-        scheduleReconnect();
-      }
-    });
-    next.addEventListener("close", () => {
-      if (stableTimer !== null) {
-        window.clearTimeout(stableTimer);
-        stableTimer = null;
-      }
-      if (closed || socket !== next) {
-        return;
-      }
-      scheduleReconnect();
-    });
-  };
-
-  connect();
-
-  return {
-    close() {
-      closed = true;
-      if (reconnectTimer !== null) {
-        window.clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-      if (stableTimer !== null) {
-        window.clearTimeout(stableTimer);
-        stableTimer = null;
-      }
-      socket?.close();
-      socket = null;
-    },
-  };
 }

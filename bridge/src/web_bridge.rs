@@ -4,7 +4,7 @@ use std::fmt;
 use std::io::{self, ErrorKind, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -29,9 +29,11 @@ use tracing::{debug, info, warn};
 
 use herdr_compat::api::client::{ApiClient, ApiClientError};
 use herdr_compat::api::schema::{
-    EmptyParams, EventsSubscribeParams, Method, PaneInfo, PaneLayoutParams, PaneLayoutSnapshot,
-    PaneListParams, PaneMoveDestination, Request, ResponseResult, SplitDirection, Subscription,
-    TabInfo, TabListParams, WorkspaceInfo,
+    EmptyParams, EventData, EventEnvelope, EventsSubscribeParams, Method,
+    PaneAgentStatusChangedEvent, PaneInfo, PaneLayoutParams, PaneLayoutSnapshot, PaneListParams,
+    PaneMoveDestination, PaneTarget, Request, ResponseResult, SplitDirection, Subscription,
+    SubscriptionEventData, SubscriptionEventEnvelope, TabInfo, TabListParams, TabTarget,
+    WorkspaceInfo, WorkspaceTarget,
 };
 use herdr_compat::protocol::{
     self, AttachScrollDirection, AttachScrollSource, ClientKeybindings, ClientLaunchMode,
@@ -47,6 +49,10 @@ const DEFAULT_STATIC_DIR: &str = "web/dist";
 const MIN_TERMINAL_ATTACH_PROTOCOL: u32 = 13;
 const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 const DAEMON_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
+const STATE_STREAM_READ_TIMEOUT: Duration = Duration::from_millis(250);
+const STATE_STREAM_REBUILD_DEBOUNCE: Duration = Duration::from_millis(100);
+const STATE_STREAM_STARTUP_DRAIN: Duration = Duration::from_millis(50);
+const STATE_STREAM_STARTUP_CONVERGENCE_LIMIT: usize = 3;
 static UPLOAD_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone)]
@@ -78,7 +84,7 @@ struct RequestPolicy {
     allowed_origins: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct Snapshot {
     workspaces: Vec<SnapshotWorkspaceInfo>,
     tabs: Vec<SnapshotTabInfo>,
@@ -87,14 +93,14 @@ struct Snapshot {
     selected_pane_id: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct SnapshotWorkspaceInfo {
     #[serde(flatten)]
     info: WorkspaceInfo,
     can_clear_name: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct SnapshotTabInfo {
     #[serde(flatten)]
     info: TabInfo,
@@ -104,6 +110,113 @@ struct SnapshotTabInfo {
 #[derive(Debug, Serialize)]
 struct Capabilities {
     commands: &'static [&'static str],
+    state_stream: bool,
+}
+
+#[derive(Debug)]
+struct BridgeProjection {
+    snapshot: Snapshot,
+    generation: u64,
+    next_sequence: u64,
+    subscriptions_stale: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+enum StateMessage {
+    #[serde(rename = "snapshot")]
+    Snapshot {
+        generation: u64,
+        sequence: u64,
+        snapshot: Snapshot,
+    },
+    #[serde(rename = "pane.agent_status_changed")]
+    PaneAgentStatusChanged {
+        generation: u64,
+        sequence: u64,
+        pane: PaneInfo,
+        workspace: SnapshotWorkspaceInfo,
+        tab: SnapshotTabInfo,
+    },
+    #[serde(rename = "pane.agent_detected")]
+    PaneAgentDetected {
+        generation: u64,
+        sequence: u64,
+        pane: PaneInfo,
+        workspace: SnapshotWorkspaceInfo,
+        tab: SnapshotTabInfo,
+    },
+    #[serde(rename = "selection.changed")]
+    SelectionChanged {
+        generation: u64,
+        sequence: u64,
+        pane_id: String,
+    },
+    #[serde(rename = "workspace.upserted")]
+    WorkspaceUpserted {
+        generation: u64,
+        sequence: u64,
+        workspace: SnapshotWorkspaceInfo,
+    },
+    #[serde(rename = "workspace.removed")]
+    WorkspaceRemoved {
+        generation: u64,
+        sequence: u64,
+        workspace_id: String,
+    },
+    #[serde(rename = "tab.upserted")]
+    TabUpserted {
+        generation: u64,
+        sequence: u64,
+        tab: SnapshotTabInfo,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        layout: Option<PaneLayoutSnapshot>,
+    },
+    #[serde(rename = "tab.removed")]
+    TabRemoved {
+        generation: u64,
+        sequence: u64,
+        tab_id: String,
+        workspace_id: String,
+    },
+    #[serde(rename = "pane.upserted")]
+    PaneUpserted {
+        generation: u64,
+        sequence: u64,
+        pane: PaneInfo,
+        workspace: SnapshotWorkspaceInfo,
+        tab: SnapshotTabInfo,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        layout: Option<PaneLayoutSnapshot>,
+    },
+    #[serde(rename = "pane.removed")]
+    PaneRemoved {
+        generation: u64,
+        sequence: u64,
+        pane_id: String,
+        workspace_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tab_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        workspace: Option<SnapshotWorkspaceInfo>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tab: Option<SnapshotTabInfo>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        layout: Option<PaneLayoutSnapshot>,
+    },
+    #[serde(rename = "resync_required")]
+    ResyncRequired {
+        generation: u64,
+        sequence: u64,
+        reason: String,
+    },
+    #[serde(rename = "error")]
+    Error {
+        generation: u64,
+        sequence: u64,
+        code: &'static str,
+        message: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -438,6 +551,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
             post(upload_handler).options(preflight_handler),
         )
         .route("/ws/events", get(events_ws_handler))
+        .route("/ws/state", get(state_ws_handler))
         .route("/ws/ui-events", get(ui_events_ws_handler))
         .route("/ws/terminal", get(terminal_ws_handler))
         .fallback_service(ServeDir::new(options.static_dir))
@@ -1312,6 +1426,10 @@ async fn snapshot_handler(
     headers: HeaderMap,
 ) -> Result<Json<Snapshot>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
+    Ok(Json(build_snapshot(&state)?))
+}
+
+fn build_snapshot(state: &BridgeState) -> Result<Snapshot, BridgeError> {
     let workspaces = match api_request(
         &state.api,
         "herdr-web:workspace-list",
@@ -1341,33 +1459,17 @@ async fn snapshot_handler(
     let selected_pane_id = shared_selected_pane(&state, &panes)?;
     let workspaces = workspaces
         .into_iter()
-        .map(|workspace| {
-            let can_clear_name = workspace.label
-                != default_workspace_label_from_panes(&workspace.workspace_id, panes.iter());
-            SnapshotWorkspaceInfo {
-                info: workspace,
-                can_clear_name,
-            }
-        })
+        .map(|workspace| wrap_workspace(workspace, &panes))
         .collect();
-    let tabs = tabs
-        .into_iter()
-        .map(|tab| {
-            let can_clear_name = !is_default_tab_label(&tab.label);
-            SnapshotTabInfo {
-                info: tab,
-                can_clear_name,
-            }
-        })
-        .collect();
+    let tabs = tabs.into_iter().map(wrap_tab).collect();
 
-    Ok(Json(Snapshot {
+    Ok(Snapshot {
         workspaces,
         tabs,
         panes,
         layouts,
         selected_pane_id,
-    }))
+    })
 }
 
 fn is_default_tab_label(label: &str) -> bool {
@@ -1382,7 +1484,70 @@ async fn capabilities_handler(
     ensure_allowed_request(&headers, &state.request_policy)?;
     Ok(Json(Capabilities {
         commands: ALLOWED_COMMANDS,
+        state_stream: true,
     }))
+}
+
+fn workspace_info(api: &ApiClient, workspace_id: &str) -> Result<WorkspaceInfo, BridgeError> {
+    match api_request(
+        api,
+        &format!("herdr-web:workspace-get:{workspace_id}"),
+        Method::WorkspaceGet(WorkspaceTarget {
+            workspace_id: workspace_id.to_string(),
+        }),
+    )? {
+        ResponseResult::WorkspaceInfo { workspace } => Ok(workspace),
+        other => Err(BridgeError::Protocol(format!(
+            "unexpected response: {other:?}"
+        ))),
+    }
+}
+
+fn tab_info(api: &ApiClient, tab_id: &str) -> Result<TabInfo, BridgeError> {
+    match api_request(
+        api,
+        &format!("herdr-web:tab-get:{tab_id}"),
+        Method::TabGet(TabTarget {
+            tab_id: tab_id.to_string(),
+        }),
+    )? {
+        ResponseResult::TabInfo { tab } => Ok(tab),
+        other => Err(BridgeError::Protocol(format!(
+            "unexpected response: {other:?}"
+        ))),
+    }
+}
+
+fn pane_info(api: &ApiClient, pane_id: &str) -> Result<PaneInfo, BridgeError> {
+    match api_request(
+        api,
+        &format!("herdr-web:pane-get:{pane_id}"),
+        Method::PaneGet(PaneTarget {
+            pane_id: pane_id.to_string(),
+        }),
+    )? {
+        ResponseResult::PaneInfo { pane } => Ok(pane),
+        other => Err(BridgeError::Protocol(format!(
+            "unexpected response: {other:?}"
+        ))),
+    }
+}
+
+fn wrap_workspace(workspace: WorkspaceInfo, panes: &[PaneInfo]) -> SnapshotWorkspaceInfo {
+    let can_clear_name = workspace.label
+        != default_workspace_label_from_panes(&workspace.workspace_id, panes.iter());
+    SnapshotWorkspaceInfo {
+        info: workspace,
+        can_clear_name,
+    }
+}
+
+fn wrap_tab(tab: TabInfo) -> SnapshotTabInfo {
+    let can_clear_name = !is_default_tab_label(&tab.label);
+    SnapshotTabInfo {
+        info: tab,
+        can_clear_name,
+    }
 }
 
 fn current_panes(api: &ApiClient) -> Result<Vec<PaneInfo>, BridgeError> {
@@ -1484,6 +1649,18 @@ async fn ui_events_ws_handler(
         .into_response()
 }
 
+async fn state_ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(err) = ensure_allowed_request(&headers, &state.request_policy) {
+        return err.into_response();
+    }
+    ws.on_upgrade(move |socket| handle_state_socket(socket, state))
+        .into_response()
+}
+
 async fn handle_events_socket(socket: WebSocket, state: BridgeState) {
     let api = state.api.clone();
     let mut ui_event_rx = state.ui_event_tx.subscribe();
@@ -1529,6 +1706,196 @@ async fn handle_events_socket(socket: WebSocket, state: BridgeState) {
     }
 }
 
+async fn handle_state_socket(socket: WebSocket, state: BridgeState) {
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+    let setup_state = state.clone();
+    let setup = tokio::task::spawn_blocking(move || open_state_projection(setup_state)).await;
+    let (mut projection, mut upstream) = match setup {
+        Ok(Ok(result)) => result,
+        Ok(Err(err)) => {
+            let message = StateMessage::Error {
+                generation: 0,
+                sequence: 0,
+                code: "state_setup_failed",
+                message: err.to_string(),
+            };
+            if let Ok(text) = serde_json::to_string(&message) {
+                let _ = ws_sender.send(Message::Text(text.into())).await;
+            }
+            return;
+        }
+        Err(err) => {
+            let message = StateMessage::Error {
+                generation: 0,
+                sequence: 0,
+                code: "state_setup_failed",
+                message: err.to_string(),
+            };
+            if let Ok(text) = serde_json::to_string(&message) {
+                let _ = ws_sender.send(Message::Text(text.into())).await;
+            }
+            return;
+        }
+    };
+
+    let mut ui_event_rx = state.ui_event_tx.subscribe();
+    let snapshot_message = projection.snapshot_message();
+    let Ok(text) = serde_json::to_string(&snapshot_message) else {
+        return;
+    };
+    if ws_sender.send(Message::Text(text.into())).await.is_err() {
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            event = upstream.rx.recv() => {
+                let Some(event) = event else {
+                    let message = projection.resync_required("Herdr subscription stream closed");
+                    let Ok(text) = serde_json::to_string(&message) else {
+                        return;
+                    };
+                    let _ = ws_sender.send(Message::Text(text.into())).await;
+                    return;
+                };
+                match event {
+                    UpstreamStateEvent::Envelope(envelope) => {
+                        if event_closes_terminal_session(&envelope) {
+                            let prune_state = state.clone();
+                            tokio::task::spawn_blocking(move || prune_detached_terminal_sessions(&prune_state));
+                        }
+                        match projection.apply_event(&state, envelope) {
+                            Ok(messages) => {
+                                for message in messages {
+                                    let Ok(text) = serde_json::to_string(&message) else {
+                                        continue;
+                                    };
+                                    if ws_sender.send(Message::Text(text.into())).await.is_err() {
+                                        return;
+                                    }
+                                }
+                                if projection.subscriptions_stale {
+                                    tokio::time::sleep(STATE_STREAM_REBUILD_DEBOUNCE).await;
+                                    let rebuild_state = state.clone();
+                                    let rebuilt = tokio::task::spawn_blocking(move || open_state_projection(rebuild_state)).await;
+                                    match rebuilt {
+                                        Ok(Ok((mut next_projection, next_upstream))) => {
+                                            next_projection.generation = projection.generation + 1;
+                                            next_projection.next_sequence = projection.next_sequence;
+                                            upstream.cancel();
+                                            upstream = next_upstream;
+                                            projection = next_projection;
+                                            let message = projection.snapshot_message();
+                                            let Ok(text) = serde_json::to_string(&message) else {
+                                                return;
+                                            };
+                                            if ws_sender.send(Message::Text(text.into())).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                        _ => {
+                                            let message = projection.resync_required("failed to rebuild Herdr subscriptions");
+                                            let Ok(text) = serde_json::to_string(&message) else {
+                                                return;
+                                            };
+                                            if ws_sender.send(Message::Text(text.into())).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                let message = projection.patch_failed(err);
+                                let Ok(text) = serde_json::to_string(&message) else {
+                                    return;
+                                };
+                                if ws_sender.send(Message::Text(text.into())).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    UpstreamStateEvent::Status(status) => {
+                        match projection.apply_status(&state, status, false) {
+                            Ok(message) => {
+                                let Ok(text) = serde_json::to_string(&message) else {
+                                    continue;
+                                };
+                                if ws_sender.send(Message::Text(text.into())).await.is_err() {
+                                    return;
+                                }
+                            }
+                            Err(err) => {
+                                let message = projection.patch_failed(err);
+                                let Ok(text) = serde_json::to_string(&message) else {
+                                    return;
+                                };
+                                if ws_sender.send(Message::Text(text.into())).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    UpstreamStateEvent::ResyncRequired(reason) => {
+                        let message = projection.resync_required(reason);
+                        let Ok(text) = serde_json::to_string(&message) else {
+                            return;
+                        };
+                        if ws_sender.send(Message::Text(text.into())).await.is_err() {
+                            return;
+                        }
+                    }
+                    UpstreamStateEvent::Error(error) => {
+                        let message = projection.error("subscription_failed", error);
+                        let Ok(text) = serde_json::to_string(&message) else {
+                            return;
+                        };
+                        let _ = ws_sender.send(Message::Text(text.into())).await;
+                        return;
+                    }
+                }
+            }
+            event = ui_event_rx.recv() => {
+                match event {
+                    Ok(event) => {
+                        if let Some(pane_id) = selection_event_pane_id(&event) {
+                            projection.snapshot.selected_pane_id = Some(pane_id.clone());
+                            let message = projection.selection_changed(pane_id);
+                            let Ok(text) = serde_json::to_string(&message) else {
+                                continue;
+                            };
+                            if ws_sender.send(Message::Text(text.into())).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let message = projection.resync_required("selection event stream lagged");
+                        let Ok(text) = serde_json::to_string(&message) else {
+                            return;
+                        };
+                        if ws_sender.send(Message::Text(text.into())).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+            Some(message) = ws_receiver.next() => {
+                match message {
+                    Ok(Message::Close(_)) | Err(_) => return,
+                    Ok(Message::Text(_))
+                    | Ok(Message::Binary(_))
+                    | Ok(Message::Ping(_))
+                    | Ok(Message::Pong(_)) => {}
+                }
+            }
+            else => return,
+        }
+    }
+}
+
 async fn handle_ui_events_socket(socket: WebSocket, state: BridgeState) {
     let mut ui_event_rx = state.ui_event_tx.subscribe();
     let (mut ws_sender, mut ws_receiver) = socket.split();
@@ -1556,6 +1923,660 @@ async fn handle_ui_events_socket(socket: WebSocket, state: BridgeState) {
             }
             else => break,
         }
+    }
+}
+
+#[derive(Debug)]
+enum UpstreamStateEvent {
+    Envelope(EventEnvelope),
+    Status(PaneAgentStatusChangedEvent),
+    ResyncRequired(String),
+    Error(String),
+}
+
+struct StateSubscription {
+    rx: tokio::sync::mpsc::UnboundedReceiver<UpstreamStateEvent>,
+    cancellations: Vec<Arc<AtomicBool>>,
+}
+
+impl StateSubscription {
+    fn cancel(&self) {
+        for cancelled in &self.cancellations {
+            cancelled.store(true, Ordering::Release);
+        }
+    }
+}
+
+impl Drop for StateSubscription {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+impl BridgeProjection {
+    fn new(snapshot: Snapshot) -> Self {
+        Self {
+            snapshot,
+            generation: 1,
+            next_sequence: 1,
+            subscriptions_stale: false,
+        }
+    }
+
+    fn next_sequence(&mut self) -> u64 {
+        let sequence = self.next_sequence;
+        self.next_sequence += 1;
+        sequence
+    }
+
+    fn snapshot_message(&mut self) -> StateMessage {
+        StateMessage::Snapshot {
+            generation: self.generation,
+            sequence: self.next_sequence(),
+            snapshot: self.snapshot.clone(),
+        }
+    }
+
+    fn resync_required(&mut self, reason: impl Into<String>) -> StateMessage {
+        StateMessage::ResyncRequired {
+            generation: self.generation,
+            sequence: self.next_sequence(),
+            reason: reason.into(),
+        }
+    }
+
+    fn error(&mut self, code: &'static str, message: impl Into<String>) -> StateMessage {
+        StateMessage::Error {
+            generation: self.generation,
+            sequence: self.next_sequence(),
+            code,
+            message: message.into(),
+        }
+    }
+
+    fn patch_failed(&mut self, err: BridgeError) -> StateMessage {
+        self.resync_required(format!("state patch failed: {err}"))
+    }
+
+    fn selection_changed(&mut self, pane_id: String) -> StateMessage {
+        StateMessage::SelectionChanged {
+            generation: self.generation,
+            sequence: self.next_sequence(),
+            pane_id,
+        }
+    }
+
+    fn apply_status(
+        &mut self,
+        state: &BridgeState,
+        event: PaneAgentStatusChangedEvent,
+        detected: bool,
+    ) -> Result<StateMessage, BridgeError> {
+        let index = self
+            .snapshot
+            .panes
+            .iter()
+            .position(|pane| pane.pane_id == event.pane_id)
+            .ok_or_else(|| BridgeError::Protocol(format!("unknown pane {}", event.pane_id)))?;
+        self.snapshot.panes[index].agent_status = event.agent_status;
+        self.snapshot.panes[index].agent = event.agent;
+        self.snapshot.panes[index].custom_status = event.custom_status;
+        self.snapshot.panes[index].title = event.title;
+        self.snapshot.panes[index].display_agent = event.display_agent;
+        self.snapshot.panes[index].state_labels = event.state_labels;
+        let pane = self.snapshot.panes[index].clone();
+        let workspace = self.refresh_workspace(&state.api, &pane.workspace_id)?;
+        let tab = self.refresh_tab(&state.api, &pane.tab_id)?;
+        let generation = self.generation;
+        let sequence = self.next_sequence();
+        if detected {
+            Ok(StateMessage::PaneAgentDetected {
+                generation,
+                sequence,
+                pane,
+                workspace,
+                tab,
+            })
+        } else {
+            Ok(StateMessage::PaneAgentStatusChanged {
+                generation,
+                sequence,
+                pane,
+                workspace,
+                tab,
+            })
+        }
+    }
+
+    fn apply_event(
+        &mut self,
+        state: &BridgeState,
+        envelope: EventEnvelope,
+    ) -> Result<Vec<StateMessage>, BridgeError> {
+        let mut messages = Vec::new();
+        match envelope.data {
+            EventData::WorkspaceCreated { workspace }
+            | EventData::WorkspaceUpdated { workspace }
+            | EventData::WorktreeCreated { workspace, .. }
+            | EventData::WorktreeOpened { workspace, .. } => {
+                let wrapped = wrap_workspace(workspace.clone(), &self.snapshot.panes);
+                if self
+                    .snapshot
+                    .workspaces
+                    .iter()
+                    .any(|cached| cached == &wrapped)
+                {
+                    return Ok(messages);
+                }
+                let workspace = self.upsert_workspace(workspace);
+                messages.push(self.workspace_upserted(workspace));
+            }
+            EventData::WorkspaceRenamed {
+                workspace_id,
+                label,
+            } => {
+                let mut workspace = match workspace_info(&state.api, &workspace_id) {
+                    Ok(workspace) => workspace,
+                    Err(_) => self
+                        .snapshot
+                        .workspaces
+                        .iter()
+                        .find(|item| item.info.workspace_id == workspace_id)
+                        .map(|item| item.info.clone())
+                        .ok_or_else(|| {
+                            BridgeError::Protocol(format!("unknown workspace {workspace_id}"))
+                        })?,
+                };
+                workspace.label = label;
+                workspace.label = workspace.label.trim().to_string();
+                let wrapped = wrap_workspace(workspace.clone(), &self.snapshot.panes);
+                if self
+                    .snapshot
+                    .workspaces
+                    .iter()
+                    .any(|cached| cached == &wrapped)
+                {
+                    return Ok(messages);
+                }
+                let workspace = self.upsert_workspace(workspace);
+                messages.push(self.workspace_upserted(workspace));
+            }
+            EventData::WorkspaceFocused { workspace_id } => {
+                if self.snapshot.workspaces.iter().all(|workspace| {
+                    workspace.info.focused == (workspace.info.workspace_id == workspace_id)
+                }) {
+                    return Ok(messages);
+                }
+                for workspace in &mut self.snapshot.workspaces {
+                    workspace.info.focused = workspace.info.workspace_id == workspace_id;
+                }
+                let affected = self.snapshot.workspaces.iter().cloned().collect::<Vec<_>>();
+                for workspace in affected {
+                    messages.push(self.workspace_upserted(workspace));
+                }
+            }
+            EventData::WorkspaceClosed { workspace_id, .. } => {
+                if workspace_info(&state.api, &workspace_id).is_ok() {
+                    debug!("ignoring stale workspace.closed for live workspace {workspace_id}");
+                    return Ok(messages);
+                }
+                self.snapshot
+                    .workspaces
+                    .retain(|workspace| workspace.info.workspace_id != workspace_id);
+                self.snapshot
+                    .tabs
+                    .retain(|tab| tab.info.workspace_id != workspace_id);
+                self.snapshot
+                    .panes
+                    .retain(|pane| pane.workspace_id != workspace_id);
+                self.snapshot
+                    .layouts
+                    .retain(|layout| layout.workspace_id != workspace_id);
+                self.clear_missing_selection();
+                self.subscriptions_stale = true;
+                messages.push(self.workspace_removed(workspace_id));
+            }
+            EventData::TabCreated { tab } => {
+                if self
+                    .snapshot
+                    .tabs
+                    .iter()
+                    .any(|cached| cached.info.tab_id == tab.tab_id)
+                {
+                    debug!("ignoring stale tab.created for existing tab {}", tab.tab_id);
+                    return Ok(messages);
+                }
+                let tab = self.upsert_tab(tab);
+                let workspace = self.refresh_workspace(&state.api, &tab.info.workspace_id)?;
+                let layout = self.refresh_layout(&state.api, &tab.info.tab_id);
+                messages.push(self.workspace_upserted(workspace));
+                messages.push(self.tab_upserted(tab, layout));
+            }
+            EventData::TabRenamed { tab_id, label, .. } => {
+                let mut tab = match tab_info(&state.api, &tab_id) {
+                    Ok(tab) => tab,
+                    Err(_) => self
+                        .snapshot
+                        .tabs
+                        .iter()
+                        .find(|item| item.info.tab_id == tab_id)
+                        .map(|item| item.info.clone())
+                        .ok_or_else(|| BridgeError::Protocol(format!("unknown tab {tab_id}")))?,
+                };
+                tab.label = label;
+                tab.label = tab.label.trim().to_string();
+                let wrapped = wrap_tab(tab.clone());
+                if self.snapshot.tabs.iter().any(|cached| cached == &wrapped) {
+                    return Ok(messages);
+                }
+                let tab = self.upsert_tab(tab);
+                messages.push(self.tab_upserted(tab, None));
+            }
+            EventData::TabFocused {
+                tab_id,
+                workspace_id,
+            } => {
+                let workspace = self.refresh_workspace(&state.api, &workspace_id)?;
+                let tabs_already_focused = self
+                    .snapshot
+                    .tabs
+                    .iter()
+                    .filter(|tab| tab.info.workspace_id == workspace_id)
+                    .all(|tab| tab.info.focused == (tab.info.tab_id == tab_id));
+                if tabs_already_focused
+                    && self
+                        .snapshot
+                        .workspaces
+                        .iter()
+                        .any(|cached| cached == &workspace)
+                {
+                    return Ok(messages);
+                }
+                for tab in &mut self.snapshot.tabs {
+                    if tab.info.workspace_id == workspace_id {
+                        tab.info.focused = tab.info.tab_id == tab_id;
+                    }
+                }
+                let affected = self
+                    .snapshot
+                    .tabs
+                    .iter()
+                    .filter(|tab| tab.info.workspace_id == workspace_id)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for tab in affected {
+                    messages.push(self.tab_upserted(tab, None));
+                }
+                messages.push(self.workspace_upserted(workspace));
+            }
+            EventData::TabClosed {
+                tab_id,
+                workspace_id,
+            } => {
+                if tab_info(&state.api, &tab_id).is_ok() {
+                    debug!("ignoring stale tab.closed for live tab {tab_id}");
+                    return Ok(messages);
+                }
+                self.remove_tab(&tab_id);
+                self.clear_missing_selection();
+                self.subscriptions_stale = true;
+                let workspace = self.refresh_workspace(&state.api, &workspace_id)?;
+                messages.push(self.tab_removed(tab_id, workspace_id));
+                messages.push(self.workspace_upserted(workspace));
+            }
+            EventData::PaneCreated { pane } => {
+                if self
+                    .snapshot
+                    .panes
+                    .iter()
+                    .any(|cached| cached.pane_id == pane.pane_id)
+                {
+                    debug!(
+                        "ignoring stale pane.created for existing pane {}",
+                        pane.pane_id
+                    );
+                    return Ok(messages);
+                }
+                messages.push(self.refresh_and_upsert_pane(state, pane)?);
+                self.subscriptions_stale = true;
+            }
+            EventData::PaneFocused {
+                pane_id,
+                workspace_id: _,
+            } => {
+                let pane = pane_info(&state.api, &pane_id)?;
+                if self
+                    .snapshot
+                    .panes
+                    .iter()
+                    .filter(|cached| cached.tab_id == pane.tab_id)
+                    .all(|cached| cached.focused == (cached.pane_id == pane.pane_id))
+                {
+                    return Ok(messages);
+                }
+                for cached in &mut self.snapshot.panes {
+                    if cached.tab_id == pane.tab_id {
+                        cached.focused = cached.pane_id == pane.pane_id;
+                    }
+                }
+                messages.push(self.refresh_and_upsert_pane(state, pane)?);
+            }
+            EventData::PaneMoved {
+                previous_pane_id,
+                previous_workspace_id,
+                previous_tab_id,
+                pane,
+                created_workspace,
+                created_tab,
+                closed_workspace_id,
+                closed_tab_id,
+            } => {
+                let source_workspace_id = previous_workspace_id.clone();
+                let source_tab_id = previous_tab_id.clone();
+                let source_workspace_closed = closed_workspace_id
+                    .as_ref()
+                    .is_some_and(|workspace_id| workspace_id == &source_workspace_id);
+                let source_tab_closed = closed_tab_id
+                    .as_ref()
+                    .is_some_and(|tab_id| tab_id == &source_tab_id);
+                if let Some(workspace_id) = closed_workspace_id {
+                    self.snapshot
+                        .workspaces
+                        .retain(|workspace| workspace.info.workspace_id != workspace_id);
+                    self.snapshot
+                        .tabs
+                        .retain(|tab| tab.info.workspace_id != workspace_id);
+                    self.snapshot
+                        .panes
+                        .retain(|pane| pane.workspace_id != workspace_id);
+                    self.snapshot
+                        .layouts
+                        .retain(|layout| layout.workspace_id != workspace_id);
+                    messages.push(self.workspace_removed(workspace_id));
+                }
+                if let Some(tab_id) = closed_tab_id {
+                    self.remove_tab(&tab_id);
+                    messages.push(self.tab_removed(tab_id, previous_workspace_id.clone()));
+                }
+                self.remove_pane(&previous_pane_id);
+                if previous_pane_id != pane.pane_id {
+                    messages.push(self.pane_removed(
+                        previous_pane_id,
+                        source_workspace_id.clone(),
+                        Some(source_tab_id.clone()),
+                        None,
+                        None,
+                        None,
+                    ));
+                }
+                if !source_workspace_closed {
+                    let workspace = self.refresh_workspace(&state.api, &source_workspace_id)?;
+                    messages.push(self.workspace_upserted(workspace));
+                }
+                if !source_tab_closed {
+                    let tab = self.refresh_tab(&state.api, &source_tab_id)?;
+                    let layout = self.refresh_layout(&state.api, &source_tab_id);
+                    messages.push(self.tab_upserted(tab, layout));
+                }
+                if let Some(workspace) = created_workspace {
+                    let workspace = self.upsert_workspace(workspace);
+                    messages.push(self.workspace_upserted(workspace));
+                }
+                if let Some(tab) = created_tab {
+                    let tab = self.upsert_tab(tab);
+                    messages.push(self.tab_upserted(tab, None));
+                }
+                messages.push(self.refresh_and_upsert_pane(state, *pane)?);
+                self.subscriptions_stale = true;
+            }
+            EventData::PaneExited { pane_id, .. } => {
+                let pane = pane_info(&state.api, &pane_id)?;
+                messages.push(self.refresh_and_upsert_pane(state, pane)?);
+            }
+            EventData::PaneAgentDetected { pane_id, .. } => {
+                let pane = pane_info(&state.api, &pane_id)?;
+                let status = PaneAgentStatusChangedEvent {
+                    pane_id: pane.pane_id.clone(),
+                    workspace_id: pane.workspace_id.clone(),
+                    agent_status: pane.agent_status,
+                    agent: pane.agent.clone(),
+                    custom_status: pane.custom_status.clone(),
+                    title: pane.title.clone(),
+                    display_agent: pane.display_agent.clone(),
+                    state_labels: pane.state_labels.clone(),
+                };
+                messages.push(self.apply_status(state, status, true)?);
+            }
+            EventData::PaneClosed {
+                pane_id,
+                workspace_id,
+            } => {
+                if pane_info(&state.api, &pane_id).is_ok() {
+                    debug!("ignoring stale pane.closed for live pane {pane_id}");
+                    return Ok(messages);
+                }
+                let tab_id = self
+                    .snapshot
+                    .panes
+                    .iter()
+                    .find(|pane| pane.pane_id == pane_id)
+                    .map(|pane| pane.tab_id.clone())
+                    .ok_or_else(|| BridgeError::Protocol(format!("unknown pane {pane_id}")))?;
+                self.remove_pane(&pane_id);
+                self.clear_missing_selection();
+                let workspace = Some(self.refresh_workspace(&state.api, &workspace_id)?);
+                let tab = Some(self.refresh_tab(&state.api, &tab_id)?);
+                let layout = self.refresh_layout(&state.api, &tab_id);
+                messages.push(self.pane_removed(
+                    pane_id,
+                    workspace_id,
+                    Some(tab_id),
+                    workspace,
+                    tab,
+                    layout,
+                ));
+                self.subscriptions_stale = true;
+            }
+            EventData::WorktreeRemoved { workspace_id, .. } => {
+                let workspace = self.refresh_workspace(&state.api, &workspace_id)?;
+                messages.push(self.workspace_upserted(workspace));
+            }
+            EventData::PaneOutputChanged { .. } | EventData::PaneAgentStatusChanged { .. } => {}
+        }
+        Ok(messages)
+    }
+
+    fn refresh_and_upsert_pane(
+        &mut self,
+        state: &BridgeState,
+        pane: PaneInfo,
+    ) -> Result<StateMessage, BridgeError> {
+        self.upsert_pane(pane.clone());
+        let workspace = self.refresh_workspace(&state.api, &pane.workspace_id)?;
+        let tab = self.refresh_tab(&state.api, &pane.tab_id)?;
+        let layout = self.refresh_layout(&state.api, &pane.tab_id);
+        Ok(self.pane_upserted(pane, workspace, tab, layout))
+    }
+
+    fn refresh_workspace(
+        &mut self,
+        api: &ApiClient,
+        workspace_id: &str,
+    ) -> Result<SnapshotWorkspaceInfo, BridgeError> {
+        let workspace = workspace_info(api, workspace_id)?;
+        Ok(self.upsert_workspace(workspace))
+    }
+
+    fn refresh_tab(
+        &mut self,
+        api: &ApiClient,
+        tab_id: &str,
+    ) -> Result<SnapshotTabInfo, BridgeError> {
+        let tab = tab_info(api, tab_id)?;
+        Ok(self.upsert_tab(tab))
+    }
+
+    fn refresh_layout(&mut self, api: &ApiClient, tab_id: &str) -> Option<PaneLayoutSnapshot> {
+        let pane = self
+            .snapshot
+            .panes
+            .iter()
+            .find(|pane| pane.tab_id == tab_id)?;
+        let layout = match api_request(
+            api,
+            &format!("herdr-web:layout:{tab_id}"),
+            Method::PaneLayout(PaneLayoutParams {
+                pane_id: Some(pane.pane_id.clone()),
+            }),
+        ) {
+            Ok(ResponseResult::PaneLayout { layout }) => layout,
+            Ok(_) | Err(_) => return None,
+        };
+        upsert_layout(&mut self.snapshot.layouts, layout.clone());
+        Some(layout)
+    }
+
+    fn upsert_workspace(&mut self, workspace: WorkspaceInfo) -> SnapshotWorkspaceInfo {
+        let wrapped = wrap_workspace(workspace, &self.snapshot.panes);
+        upsert_by(&mut self.snapshot.workspaces, wrapped.clone(), |item| {
+            item.info.workspace_id.as_str()
+        });
+        wrapped
+    }
+
+    fn upsert_tab(&mut self, tab: TabInfo) -> SnapshotTabInfo {
+        let wrapped = wrap_tab(tab);
+        upsert_by(&mut self.snapshot.tabs, wrapped.clone(), |item| {
+            item.info.tab_id.as_str()
+        });
+        wrapped
+    }
+
+    fn upsert_pane(&mut self, pane: PaneInfo) {
+        upsert_by(&mut self.snapshot.panes, pane, |item| item.pane_id.as_str());
+    }
+
+    fn remove_tab(&mut self, tab_id: &str) {
+        self.snapshot.tabs.retain(|tab| tab.info.tab_id != tab_id);
+        self.snapshot.panes.retain(|pane| pane.tab_id != tab_id);
+        self.snapshot
+            .layouts
+            .retain(|layout| layout.tab_id != tab_id);
+    }
+
+    fn remove_pane(&mut self, pane_id: &str) {
+        self.snapshot.panes.retain(|pane| pane.pane_id != pane_id);
+    }
+
+    fn clear_missing_selection(&mut self) {
+        if self
+            .snapshot
+            .selected_pane_id
+            .as_ref()
+            .is_some_and(|pane_id| {
+                !self
+                    .snapshot
+                    .panes
+                    .iter()
+                    .any(|pane| pane.pane_id == *pane_id)
+            })
+        {
+            self.snapshot.selected_pane_id = None;
+        }
+    }
+
+    fn workspace_upserted(&mut self, workspace: SnapshotWorkspaceInfo) -> StateMessage {
+        StateMessage::WorkspaceUpserted {
+            generation: self.generation,
+            sequence: self.next_sequence(),
+            workspace,
+        }
+    }
+
+    fn workspace_removed(&mut self, workspace_id: String) -> StateMessage {
+        StateMessage::WorkspaceRemoved {
+            generation: self.generation,
+            sequence: self.next_sequence(),
+            workspace_id,
+        }
+    }
+
+    fn tab_upserted(
+        &mut self,
+        tab: SnapshotTabInfo,
+        layout: Option<PaneLayoutSnapshot>,
+    ) -> StateMessage {
+        StateMessage::TabUpserted {
+            generation: self.generation,
+            sequence: self.next_sequence(),
+            tab,
+            layout,
+        }
+    }
+
+    fn tab_removed(&mut self, tab_id: String, workspace_id: String) -> StateMessage {
+        StateMessage::TabRemoved {
+            generation: self.generation,
+            sequence: self.next_sequence(),
+            tab_id,
+            workspace_id,
+        }
+    }
+
+    fn pane_upserted(
+        &mut self,
+        pane: PaneInfo,
+        workspace: SnapshotWorkspaceInfo,
+        tab: SnapshotTabInfo,
+        layout: Option<PaneLayoutSnapshot>,
+    ) -> StateMessage {
+        StateMessage::PaneUpserted {
+            generation: self.generation,
+            sequence: self.next_sequence(),
+            pane,
+            workspace,
+            tab,
+            layout,
+        }
+    }
+
+    fn pane_removed(
+        &mut self,
+        pane_id: String,
+        workspace_id: String,
+        tab_id: Option<String>,
+        workspace: Option<SnapshotWorkspaceInfo>,
+        tab: Option<SnapshotTabInfo>,
+        layout: Option<PaneLayoutSnapshot>,
+    ) -> StateMessage {
+        StateMessage::PaneRemoved {
+            generation: self.generation,
+            sequence: self.next_sequence(),
+            pane_id,
+            workspace_id,
+            tab_id,
+            workspace,
+            tab,
+            layout,
+        }
+    }
+}
+
+fn upsert_by<T>(items: &mut Vec<T>, item: T, key: impl Fn(&T) -> &str) {
+    let id = key(&item).to_string();
+    if let Some(index) = items.iter().position(|candidate| key(candidate) == id) {
+        items[index] = item;
+    } else {
+        items.push(item);
+    }
+}
+
+fn upsert_layout(layouts: &mut Vec<PaneLayoutSnapshot>, layout: PaneLayoutSnapshot) {
+    let tab_id = layout.tab_id.clone();
+    if let Some(index) = layouts.iter().position(|item| item.tab_id == tab_id) {
+        layouts[index] = layout;
+    } else {
+        layouts.push(layout);
     }
 }
 
@@ -1750,6 +2771,16 @@ fn event_may_close_terminal_session(event: &str) -> bool {
         || event.contains("pane.closed")
 }
 
+fn event_closes_terminal_session(event: &EventEnvelope) -> bool {
+    matches!(
+        event.data,
+        EventData::WorkspaceClosed { .. }
+            | EventData::TabClosed { .. }
+            | EventData::PaneClosed { .. }
+            | EventData::PaneMoved { .. }
+    )
+}
+
 fn close_message(reason: &str) -> String {
     format!(
         r#"{{"type":"closed","reason":{}}}"#,
@@ -1814,6 +2845,212 @@ fn open_event_subscription(
     });
 
     Ok(event_rx)
+}
+
+fn open_state_projection(
+    state: BridgeState,
+) -> Result<(BridgeProjection, StateSubscription), BridgeError> {
+    let mut pane_ids = current_panes(&state.api)?
+        .into_iter()
+        .map(|pane| pane.pane_id)
+        .collect::<Vec<_>>();
+    pane_ids.sort();
+    pane_ids.dedup();
+
+    let mut subscription = open_state_subscription(state.api.clone(), pane_ids.clone())?;
+    for _ in 0..STATE_STREAM_STARTUP_CONVERGENCE_LIMIT {
+        drain_state_subscription_replay(&mut subscription);
+        let snapshot = build_snapshot(&state)?;
+        let mut snapshot_pane_ids = snapshot
+            .panes
+            .iter()
+            .map(|pane| pane.pane_id.clone())
+            .collect::<Vec<_>>();
+        snapshot_pane_ids.sort();
+        snapshot_pane_ids.dedup();
+        if snapshot_pane_ids == pane_ids {
+            return Ok((BridgeProjection::new(snapshot), subscription));
+        }
+        subscription.cancel();
+        pane_ids = snapshot_pane_ids;
+        subscription = open_state_subscription(state.api.clone(), pane_ids.clone())?;
+    }
+
+    Err(BridgeError::Protocol(
+        "state stream startup did not converge".to_string(),
+    ))
+}
+
+fn drain_state_subscription_replay(subscription: &mut StateSubscription) {
+    thread::sleep(STATE_STREAM_STARTUP_DRAIN);
+    while subscription.rx.try_recv().is_ok() {}
+}
+
+fn open_state_subscription(
+    api: ApiClient,
+    pane_ids: Vec<String>,
+) -> Result<StateSubscription, BridgeError> {
+    let subscriptions = state_subscriptions(&pane_ids);
+    match open_state_subscription_stream(api.clone(), subscriptions) {
+        Ok(subscription) => Ok(subscription),
+        Err(first_err) => {
+            warn!("state stream batched subscription failed: {first_err}");
+            let pane_ids = current_panes(&api)?
+                .into_iter()
+                .map(|pane| pane.pane_id)
+                .collect::<Vec<_>>();
+            match open_state_subscription_stream(api.clone(), state_subscriptions(&pane_ids)) {
+                Ok(subscription) => Ok(subscription),
+                Err(second_err) => {
+                    warn!("state stream retry subscription failed: {second_err}");
+                    open_state_subscription_fallback(api, pane_ids).map_err(|fallback_err| {
+                        BridgeError::Protocol(format!(
+                            "state stream subscription failed: {second_err}; fallback failed: {fallback_err}"
+                        ))
+                    })
+                }
+            }
+        }
+    }
+}
+
+fn state_subscriptions(pane_ids: &[String]) -> Vec<Subscription> {
+    let mut subscriptions = structural_state_subscriptions();
+    subscriptions.extend(
+        pane_ids
+            .iter()
+            .map(|pane_id| Subscription::PaneAgentStatusChanged {
+                pane_id: pane_id.clone(),
+                agent_status: None,
+            }),
+    );
+    subscriptions
+}
+
+fn structural_state_subscriptions() -> Vec<Subscription> {
+    vec![Subscription::PaneAgentDetected {}]
+}
+
+fn open_state_subscription_fallback(
+    api: ApiClient,
+    pane_ids: Vec<String>,
+) -> Result<StateSubscription, BridgeError> {
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut cancellations = Vec::new();
+    open_state_stream_into(
+        api.clone(),
+        structural_state_subscriptions(),
+        event_tx.clone(),
+        &mut cancellations,
+    )?;
+    for pane_id in pane_ids {
+        if let Err(err) = open_state_stream_into(
+            api.clone(),
+            vec![Subscription::PaneAgentStatusChanged {
+                pane_id: pane_id.clone(),
+                agent_status: None,
+            }],
+            event_tx.clone(),
+            &mut cancellations,
+        ) {
+            warn!("state stream skipped pane status subscription for {pane_id}: {err}");
+            let _ = event_tx.send(UpstreamStateEvent::ResyncRequired(format!(
+                "failed to subscribe to pane {pane_id}: {err}"
+            )));
+        }
+    }
+    Ok(StateSubscription {
+        rx: event_rx,
+        cancellations,
+    })
+}
+
+fn open_state_subscription_stream(
+    api: ApiClient,
+    subscriptions: Vec<Subscription>,
+) -> Result<StateSubscription, BridgeError> {
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut cancellations = Vec::new();
+    open_state_stream_into(api, subscriptions, event_tx, &mut cancellations)?;
+    Ok(StateSubscription {
+        rx: event_rx,
+        cancellations,
+    })
+}
+
+fn open_state_stream_into(
+    api: ApiClient,
+    subscriptions: Vec<Subscription>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<UpstreamStateEvent>,
+    cancellations: &mut Vec<Arc<AtomicBool>>,
+) -> Result<(), BridgeError> {
+    let request = Request {
+        id: "herdr-web:state-events".to_string(),
+        method: Method::EventsSubscribe(EventsSubscribeParams { subscriptions }),
+    };
+    let (ack, mut stream) = api.subscribe_value(&request, Some(STATE_STREAM_READ_TIMEOUT))?;
+    let response = herdr_compat::api::client::parse_response_value(ack)?;
+    if !matches!(response.result, ResponseResult::SubscriptionStarted {}) {
+        return Err(BridgeError::Protocol(format!(
+            "unexpected subscription response: {:?}",
+            response.result
+        )));
+    }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    cancellations.push(cancelled.clone());
+    thread::spawn(move || loop {
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
+        match stream.next_value() {
+            Ok(Some(value)) => match decode_state_event(value) {
+                Ok(event) => {
+                    if event_tx.send(event).is_err() {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    let _ = event_tx.send(UpstreamStateEvent::Error(err.to_string()));
+                    break;
+                }
+            },
+            Ok(None) => {
+                let _ = event_tx.send(UpstreamStateEvent::ResyncRequired(
+                    "Herdr subscription stream closed".to_string(),
+                ));
+                break;
+            }
+            Err(ApiClientError::Io(err)) if is_read_timeout(&err) => continue,
+            Err(err) => {
+                let _ = event_tx.send(UpstreamStateEvent::Error(err.to_string()));
+                break;
+            }
+        }
+    });
+    Ok(())
+}
+
+fn decode_state_event(value: serde_json::Value) -> Result<UpstreamStateEvent, BridgeError> {
+    if let Ok(envelope) = serde_json::from_value::<SubscriptionEventEnvelope>(value.clone()) {
+        if let SubscriptionEventData::PaneAgentStatusChanged(status) = envelope.data {
+            return Ok(UpstreamStateEvent::Status(status));
+        }
+    }
+    let envelope = serde_json::from_value::<EventEnvelope>(value)
+        .map_err(|err| BridgeError::Protocol(err.to_string()))?;
+    Ok(UpstreamStateEvent::Envelope(envelope))
+}
+
+fn is_read_timeout(err: &io::Error) -> bool {
+    matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
+}
+
+fn selection_event_pane_id(event: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(event).ok()?;
+    if value.get("type")?.as_str()? != "herdr_web.selection_changed" {
+        return None;
+    }
+    value.get("pane_id")?.as_str().map(str::to_string)
 }
 
 fn handle_terminal_text_frame(
@@ -2072,6 +3309,154 @@ mod tests {
         assert!(ALLOWED_COMMANDS.contains(&"pane.focus_direction"));
         assert!(ALLOWED_COMMANDS.contains(&"pane.move"));
         assert!(ALLOWED_COMMANDS.contains(&"agent.start"));
+    }
+
+    #[test]
+    fn state_subscriptions_include_per_pane_status() {
+        let subscriptions = state_subscriptions(&["p1".to_string(), "p2".to_string()]);
+        assert!(subscriptions
+            .iter()
+            .any(|item| matches!(item, Subscription::PaneAgentDetected {})));
+        assert_eq!(
+            subscriptions
+                .iter()
+                .filter(|item| matches!(item, Subscription::PaneAgentStatusChanged { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn state_patch_failures_emit_resync_required() {
+        let mut projection = BridgeProjection::new(Snapshot {
+            workspaces: Vec::new(),
+            tabs: Vec::new(),
+            panes: Vec::new(),
+            layouts: Vec::new(),
+            selected_pane_id: None,
+        });
+
+        let message = projection.patch_failed(BridgeError::Protocol("unknown pane p1".to_string()));
+
+        match message {
+            StateMessage::ResyncRequired { reason, .. } => {
+                assert!(reason.contains("unknown pane p1"));
+            }
+            other => panic!("unexpected state message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn state_event_decoder_accepts_subscription_status_envelope() {
+        let event = serde_json::json!({
+            "event": "pane.agent_status_changed",
+            "data": {
+                "pane_id": "p1",
+                "workspace_id": "w1",
+                "agent_status": "working",
+                "agent": "codex",
+                "state_labels": { "working": "Working" }
+            }
+        });
+
+        match decode_state_event(event).unwrap() {
+            UpstreamStateEvent::Status(status) => {
+                assert_eq!(status.pane_id, "p1");
+                assert_eq!(
+                    status.agent_status,
+                    herdr_compat::api::schema::AgentStatus::Working
+                );
+            }
+            other => panic!("unexpected decoded event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn state_event_decoder_accepts_structural_event_envelope() {
+        let event = serde_json::json!({
+            "event": "pane_focused",
+            "data": {
+                "type": "pane_focused",
+                "pane_id": "p1",
+                "workspace_id": "w1"
+            }
+        });
+
+        match decode_state_event(event).unwrap() {
+            UpstreamStateEvent::Envelope(envelope) => {
+                assert!(matches!(envelope.data, EventData::PaneFocused { .. }));
+            }
+            other => panic!("unexpected decoded event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn state_subscription_timeout_errors_are_nonfatal_ticks() {
+        assert!(is_read_timeout(&io::Error::new(
+            ErrorKind::WouldBlock,
+            "idle"
+        )));
+        assert!(is_read_timeout(&io::Error::new(
+            ErrorKind::TimedOut,
+            "idle"
+        )));
+        assert!(!is_read_timeout(&io::Error::new(
+            ErrorKind::ConnectionReset,
+            "closed"
+        )));
+    }
+
+    #[test]
+    fn decoded_close_events_prune_terminal_sessions() {
+        let event = EventEnvelope {
+            event: herdr_compat::api::schema::EventKind::PaneClosed,
+            data: EventData::PaneClosed {
+                pane_id: "p1".to_string(),
+                workspace_id: "w1".to_string(),
+            },
+        };
+        assert!(event_closes_terminal_session(&event));
+
+        let event = EventEnvelope {
+            event: herdr_compat::api::schema::EventKind::PaneFocused,
+            data: EventData::PaneFocused {
+                pane_id: "p1".to_string(),
+                workspace_id: "w1".to_string(),
+            },
+        };
+        assert!(!event_closes_terminal_session(&event));
+
+        let event = EventEnvelope {
+            event: herdr_compat::api::schema::EventKind::PaneMoved,
+            data: EventData::PaneMoved {
+                previous_pane_id: "p1".to_string(),
+                previous_workspace_id: "w1".to_string(),
+                previous_tab_id: "t1".to_string(),
+                pane: Box::new(PaneInfo {
+                    pane_id: "p2".to_string(),
+                    terminal_id: "term-1".to_string(),
+                    workspace_id: "w1".to_string(),
+                    tab_id: "t2".to_string(),
+                    focused: true,
+                    cwd: None,
+                    foreground_cwd: None,
+                    label: None,
+                    agent: None,
+                    agent_session: None,
+                    title: None,
+                    display_agent: None,
+                    agent_status: herdr_compat::api::schema::AgentStatus::Idle,
+                    custom_status: None,
+                    state_labels: HashMap::new(),
+                    revision: 1,
+                }),
+                created_workspace: None,
+                created_tab: None,
+                closed_workspace_id: None,
+                closed_tab_id: None,
+            },
+        };
+        assert!(event_closes_terminal_session(&event));
     }
 
     #[test]

@@ -76,3 +76,76 @@ export type Snapshot = {
   layouts: LayoutSnapshot[];
   selected_pane_id?: string | null;
 };
+
+export type StateMessage =
+  | {
+      type: "snapshot";
+      generation: number;
+      sequence: number;
+      snapshot: Snapshot;
+    }
+  | {
+      type: "pane.agent_status_changed" | "pane.agent_detected" | "pane.upserted";
+      generation: number;
+      sequence: number;
+      pane: PaneInfo;
+      workspace: WorkspaceInfo;
+      tab: TabInfo;
+      layout?: LayoutSnapshot;
+    }
+  | {
+      type: "selection.changed";
+      generation: number;
+      sequence: number;
+      pane_id: string;
+    }
+  | {
+      type: "workspace.upserted";
+      generation: number;
+      sequence: number;
+      workspace: WorkspaceInfo;
+    }
+  | {
+      type: "workspace.removed";
+      generation: number;
+      sequence: number;
+      workspace_id: string;
+    }
+  | {
+      type: "tab.upserted";
+      generation: number;
+      sequence: number;
+      tab: TabInfo;
+      layout?: LayoutSnapshot;
+    }
+  | {
+      type: "tab.removed";
+      generation: number;
+      sequence: number;
+      tab_id: string;
+      workspace_id: string;
+    }
+  | {
+      type: "pane.removed";
+      generation: number;
+      sequence: number;
+      pane_id: string;
+      workspace_id: string;
+      tab_id?: string;
+      workspace?: WorkspaceInfo;
+      tab?: TabInfo;
+      layout?: LayoutSnapshot;
+    }
+  | {
+      type: "resync_required";
+      generation: number;
+      sequence: number;
+      reason: string;
+    }
+  | {
+      type: "error";
+      generation: number;
+      sequence: number;
+      code: string;
+      message: string;
+    };

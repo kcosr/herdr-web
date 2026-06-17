@@ -29,6 +29,7 @@ export type BridgeMode = "same-origin" | "configured" | "disconnected";
 
 export type BridgeCapabilities = {
   commands: string[];
+  state_stream?: boolean;
   bridge_version?: string;
   web_compat?: number;
   min_android_app_compat?: number;
@@ -560,6 +561,7 @@ export function parseCapabilities(value: unknown): BridgeCapabilities {
     commands: Array.isArray(value.commands)
       ? value.commands.filter((command): command is string => typeof command === "string")
       : [],
+    state_stream: value.state_stream === true ? true : undefined,
     bridge_version: typeof value.bridge_version === "string" ? value.bridge_version : undefined,
     web_compat: typeof value.web_compat === "number" ? value.web_compat : undefined,
     min_android_app_compat:

@@ -1,4 +1,6 @@
 import { FitAddon, init, Terminal } from "ghostty-web";
+import { selectedTextFromVisibleRows, terminalSelectionRange } from "./terminalSelection";
+import type { TerminalSelectionPoint } from "./terminalSelection";
 import { terminalTapFocusAction } from "./terminalTapFocus";
 import type { TerminalTapFocusResult } from "./terminalTapFocus";
 
@@ -22,6 +24,20 @@ export type TerminalSize = {
 type TerminalCellPosition = {
   col: number;
   row: number;
+};
+type TerminalSelectionEndpoint = {
+  col: number;
+  absoluteRow: number;
+};
+type GhosttySelectionManagerAccess = {
+  selectionStart: TerminalSelectionEndpoint | null;
+  selectionEnd: TerminalSelectionEndpoint | null;
+  getSelectionCoords(): { startRow: number; endRow: number } | null;
+  getDirtySelectionRows(): Set<number>;
+  requestRender(): void;
+  selectionChangedEmitter?: {
+    fire(): void;
+  };
 };
 type TerminalBufferLine = {
   readonly length: number;
@@ -255,6 +271,7 @@ export class GhosttyRenderer implements TerminalRenderer {
     let selectionTimer: number | null = null;
     let selectingFromTouch = false;
     let selectionStart: TerminalCellPosition | null = null;
+    let selectionEnd: TerminalCellPosition | null = null;
     let selectionClearTimer: number | null = null;
     const clearSelectionTimer = () => {
       if (selectionTimer !== null) {
@@ -272,6 +289,7 @@ export class GhosttyRenderer implements TerminalRenderer {
       clearSelectionTimer();
       selectingFromTouch = false;
       selectionStart = null;
+      selectionEnd = null;
     };
     const preventTouchEvent = (event: TouchEvent) => {
       event.preventDefault();
@@ -287,7 +305,8 @@ export class GhosttyRenderer implements TerminalRenderer {
       }
       const current = positionFromTouch(touch);
       const range = terminalSelectionRange(selectionStart, current, terminal.cols);
-      terminal.select(range.col, range.row, range.length);
+      selectionEnd = current;
+      selectTerminalViewportRange(terminal, range.from, range.to);
     };
     const startTouchSelection = () => {
       selectionTimer = null;
@@ -301,18 +320,22 @@ export class GhosttyRenderer implements TerminalRenderer {
       }
       const position = touchCellPosition(terminal, touchStartX, touchStartY);
       selectionStart = position;
+      selectionEnd = position;
       selectingFromTouch = true;
       touchMoved = true;
       terminal.textarea?.blur();
       terminal.clearSelection();
-      terminal.select(position.col, position.row, 1);
+      selectTerminalViewportRange(terminal, position, position);
       if (navigator.vibrate) {
         navigator.vibrate(35);
       }
     };
     const completeTouchSelection = (event: TouchEvent) => {
       preventTouchEvent(event);
-      const selectedText = terminal.hasSelection() ? terminal.getSelection() : "";
+      const selectedText =
+        selectionStart && selectionEnd
+          ? terminalSelectedTextFromViewportRange(terminal, selectionStart, selectionEnd)
+          : "";
       stopTouchSelection();
       terminal.textarea?.blur();
       if (selectedText.trim()) {
@@ -374,6 +397,7 @@ export class GhosttyRenderer implements TerminalRenderer {
         touchScrolled = false;
         selectingFromTouch = false;
         selectionStart = null;
+        selectionEnd = null;
         if (this.#mobileTouchSelectionEnabled && !mouseTracking) {
           clearSelectionClearTimer();
           selectionTimer = window.setTimeout(startTouchSelection, TOUCH_SELECTION_LONG_PRESS_MS);
@@ -759,6 +783,68 @@ function terminalBufferRow(terminal: Terminal, viewportRow: number) {
   return scrollbackLength + viewportRow - viewportY;
 }
 
+function selectTerminalViewportRange(
+  terminal: Terminal,
+  start: TerminalSelectionPoint,
+  end: TerminalSelectionPoint,
+) {
+  const selectionManager = terminalSelectionManager(terminal);
+  if (!selectionManager) {
+    const range = terminalSelectionRange(start, end, terminal.cols);
+    terminal.select(range.from.col, range.from.row, range.length);
+    return;
+  }
+
+  markSelectionRowsDirty(selectionManager, selectionManager.getSelectionCoords());
+  selectionManager.selectionStart = {
+    col: start.col,
+    absoluteRow: terminalBufferRow(terminal, start.row),
+  };
+  selectionManager.selectionEnd = {
+    col: end.col,
+    absoluteRow: terminalBufferRow(terminal, end.row),
+  };
+  markSelectionRowsDirty(selectionManager, selectionManager.getSelectionCoords());
+  selectionManager.requestRender();
+  selectionManager.selectionChangedEmitter?.fire();
+}
+
+function terminalSelectionManager(terminal: Terminal) {
+  return (terminal as unknown as { selectionManager?: GhosttySelectionManagerAccess }).selectionManager ?? null;
+}
+
+function markSelectionRowsDirty(
+  selectionManager: GhosttySelectionManagerAccess,
+  selection: { startRow: number; endRow: number } | null,
+) {
+  if (!selection) {
+    return;
+  }
+  const dirtyRows = selectionManager.getDirtySelectionRows();
+  for (let row = selection.startRow; row <= selection.endRow; row += 1) {
+    dirtyRows.add(row);
+  }
+}
+
+function terminalSelectedTextFromViewportRange(
+  terminal: Terminal,
+  start: TerminalSelectionPoint,
+  end: TerminalSelectionPoint,
+) {
+  const range = terminalSelectionRange(start, end, terminal.cols);
+  if (range.length <= 1) {
+    return "";
+  }
+
+  const rows: string[] = [];
+  for (let row = range.from.row; row <= range.to.row; row += 1) {
+    const bufferRow = terminalBufferRow(terminal, row);
+    const line = terminal.buffer.active.getLine(bufferRow) as TerminalBufferLine | undefined;
+    rows[row] = line ? terminalBufferLineText(line).text : "";
+  }
+  return selectedTextFromVisibleRows(rows, start, end, terminal.cols);
+}
+
 function terminalLinkAt(terminal: Terminal, position: TerminalCellPosition) {
   const row = terminalBufferRow(terminal, position.row);
   const line = terminal.buffer.active.getLine(row) as TerminalBufferLine | undefined;
@@ -800,22 +886,6 @@ function terminalBufferLineText(line: TerminalBufferLine) {
     }
   }
   return { text, columns };
-}
-
-function terminalSelectionRange(
-  start: TerminalCellPosition,
-  end: TerminalCellPosition,
-  cols: number,
-) {
-  const startIndex = start.row * cols + start.col;
-  const endIndex = end.row * cols + end.col;
-  const from = startIndex <= endIndex ? start : end;
-  const to = startIndex <= endIndex ? end : start;
-  return {
-    col: from.col,
-    row: from.row,
-    length: to.row * cols + to.col - (from.row * cols + from.col) + 1,
-  };
 }
 
 function clampInteger(value: number, min: number, max: number) {

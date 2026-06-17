@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { findFirstUrlInSelection, normalizeSelectionForUrl, openableHttpUrl } from "./terminalSelection";
+import {
+  findFirstUrlInSelection,
+  normalizeSelectionForUrl,
+  openableHttpUrl,
+  selectedTextFromVisibleRows,
+  terminalSelectionRange,
+} from "./terminalSelection";
 
 describe("terminal selection helpers", () => {
   it("finds http URLs in selected terminal text", () => {
@@ -49,5 +55,43 @@ describe("terminal selection helpers", () => {
     expect(openableHttpUrl("data:text/html,hello")).toBeNull();
     expect(openableHttpUrl("mailto:test@example.com")).toBeNull();
     expect(openableHttpUrl("tel:+15555555555")).toBeNull();
+  });
+
+  it("orders forward and backward terminal selection ranges", () => {
+    expect(terminalSelectionRange({ col: 2, row: 1 }, { col: 5, row: 3 }, 10)).toEqual({
+      from: { col: 2, row: 1 },
+      to: { col: 5, row: 3 },
+      length: 24,
+    });
+    expect(terminalSelectionRange({ col: 5, row: 3 }, { col: 2, row: 1 }, 10)).toEqual({
+      from: { col: 2, row: 1 },
+      to: { col: 5, row: 3 },
+      length: 24,
+    });
+  });
+
+  it("extracts selected text from visible terminal rows", () => {
+    const rows = [
+      "scrollback hidden",
+      "alpha visible   ",
+      "bravo visible   ",
+      "charlie visible ",
+    ];
+    expect(selectedTextFromVisibleRows(rows, { col: 6, row: 1 }, { col: 6, row: 3 }, 16)).toBe(
+      "visible\nbravo visible\ncharlie",
+    );
+  });
+
+  it("extracts selected text for backward drags", () => {
+    const rows = ["zero line", "alpha visible", "bravo visible", "charlie visible"];
+    expect(selectedTextFromVisibleRows(rows, { col: 6, row: 3 }, { col: 6, row: 1 }, 16)).toBe(
+      "visible\nbravo visible\ncharlie",
+    );
+  });
+
+  it("ignores single-cell selections to match terminal hasSelection behavior", () => {
+    expect(selectedTextFromVisibleRows(["alpha"], { col: 1, row: 0 }, { col: 1, row: 0 }, 10)).toBe(
+      "",
+    );
   });
 });

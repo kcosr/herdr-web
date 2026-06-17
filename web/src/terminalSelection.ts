@@ -3,6 +3,48 @@ const URL_CONTINUATION_PATTERN = /^[^\s"'<>`]+/u;
 const TRAILING_URL_PUNCTUATION = /[.,;:!?]+$/u;
 const TRAILING_BALANCED_CLOSERS = /[)\]}]+$/u;
 
+export type TerminalSelectionPoint = {
+  col: number;
+  row: number;
+};
+
+export function terminalSelectionRange(
+  start: TerminalSelectionPoint,
+  end: TerminalSelectionPoint,
+  cols: number,
+) {
+  const startIndex = start.row * cols + start.col;
+  const endIndex = end.row * cols + end.col;
+  const from = startIndex <= endIndex ? start : end;
+  const to = startIndex <= endIndex ? end : start;
+  return {
+    from,
+    to,
+    length: to.row * cols + to.col - (from.row * cols + from.col) + 1,
+  };
+}
+
+export function selectedTextFromVisibleRows(
+  rows: readonly string[],
+  start: TerminalSelectionPoint,
+  end: TerminalSelectionPoint,
+  cols: number,
+) {
+  const range = terminalSelectionRange(start, end, cols);
+  if (range.length <= 1) {
+    return "";
+  }
+
+  const selectedLines: string[] = [];
+  for (let row = range.from.row; row <= range.to.row; row += 1) {
+    const line = rows[row] ?? "";
+    const startCol = row === range.from.row ? range.from.col : 0;
+    const endCol = row === range.to.row ? range.to.col : Math.max(0, line.length - 1);
+    selectedLines.push(line.slice(startCol, endCol + 1).trimEnd());
+  }
+  return selectedLines.join("\n");
+}
+
 export function findFirstUrlInSelection(selection: string) {
   const lines = selection
     .replace(/\r\n?/gu, "\n")

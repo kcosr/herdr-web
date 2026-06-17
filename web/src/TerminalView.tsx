@@ -363,6 +363,7 @@ export function TerminalView({
           clearConnectTimer();
           const initialSize = measureTerminal(renderer);
           if (!initialSize) {
+            scheduleReconnect();
             return;
           }
           const nextSocket = new WebSocket(

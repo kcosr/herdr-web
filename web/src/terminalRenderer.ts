@@ -37,7 +37,7 @@ type GhosttySelectionManagerAccess = {
   getDirtySelectionRows(): Set<number>;
   requestRender(): void;
   selectionChangedEmitter?: {
-    fire(): void;
+    fire?: () => void;
   };
 };
 type TerminalBufferLine = {
@@ -45,6 +45,7 @@ type TerminalBufferLine = {
   getCell(x: number):
     | {
         getCodepoint(): number;
+        getWidth(): number;
         getHyperlinkId(): number;
       }
     | undefined;
@@ -831,11 +832,27 @@ function selectTerminalViewportRange(
   };
   markSelectionRowsDirty(selectionManager, selectionManager.getSelectionCoords());
   selectionManager.requestRender();
-  selectionManager.selectionChangedEmitter?.fire();
+  selectionManager.selectionChangedEmitter?.fire?.();
 }
 
 function terminalSelectionManager(terminal: Terminal) {
-  return (terminal as unknown as { selectionManager?: GhosttySelectionManagerAccess }).selectionManager ?? null;
+  const selectionManager = (terminal as unknown as { selectionManager?: unknown }).selectionManager;
+  if (!isGhosttySelectionManager(selectionManager)) {
+    return null;
+  }
+  return selectionManager;
+}
+
+function isGhosttySelectionManager(value: unknown): value is GhosttySelectionManagerAccess {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const candidate = value as Partial<GhosttySelectionManagerAccess>;
+  return (
+    typeof candidate.getSelectionCoords === "function" &&
+    typeof candidate.getDirtySelectionRows === "function" &&
+    typeof candidate.requestRender === "function"
+  );
 }
 
 function markSelectionRowsDirty(
@@ -846,6 +863,9 @@ function markSelectionRowsDirty(
     return;
   }
   const dirtyRows = selectionManager.getDirtySelectionRows();
+  if (!(dirtyRows instanceof Set)) {
+    return;
+  }
   for (let row = selection.startRow; row <= selection.endRow; row += 1) {
     dirtyRows.add(row);
   }
@@ -903,7 +923,11 @@ function terminalBufferLineText(line: TerminalBufferLine) {
   let text = "";
   const columns: number[] = [];
   for (let col = 0; col < line.length; col += 1) {
-    const codepoint = line.getCell(col)?.getCodepoint() ?? 0;
+    const cell = line.getCell(col);
+    const codepoint = cell?.getCodepoint() ?? 0;
+    if (codepoint === 0 && cell?.getWidth() === 0) {
+      continue;
+    }
     const char = codepoint === 0 || codepoint < 32 ? " " : String.fromCodePoint(codepoint);
     text += char;
     for (let index = 0; index < char.length; index += 1) {

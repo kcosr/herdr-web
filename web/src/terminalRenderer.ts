@@ -5,12 +5,32 @@ import type { TerminalTapFocusResult } from "./terminalTapFocus";
 const TERMINAL_FONT_FAMILY =
   'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "DejaVu Sans Mono", monospace';
 const TERMINAL_TEXT_INPUT_TAP_GRACE_MS = 4000;
+const TOUCH_SELECTION_LONG_PRESS_MS = 600;
+const TOUCH_SELECTION_TOLERANCE_PX = 10;
+const TOUCH_SELECTION_SCROLL_INTENT_PX = 5;
+const TOUCH_SELECTION_CLEAR_DELAY_MS = 1200;
+const TAP_URL_PATTERN =
+  /(?:https?:\/\/|mailto:|ftp:\/\/|ssh:\/\/|git:\/\/|tel:|magnet:|gemini:\/\/|gopher:\/\/|news:)[\w\-.~:/?#@!$&*+,;=%]+/giu;
+const TAP_URL_TRAILING_PUNCTUATION = /[.,;!?)\]]+$/u;
 
 const ghosttyReady = init();
 
 export type TerminalSize = {
   cols: number;
   rows: number;
+};
+type TerminalCellPosition = {
+  col: number;
+  row: number;
+};
+type TerminalBufferLine = {
+  readonly length: number;
+  getCell(x: number):
+    | {
+        getCodepoint(): number;
+        getHyperlinkId(): number;
+      }
+    | undefined;
 };
 
 export type TerminalRenderer = {
@@ -19,6 +39,7 @@ export type TerminalRenderer = {
   onInput(callback: (data: string) => void): () => void;
   onScroll(callback: (lines: number) => void): () => void;
   setTapFocusHandler(callback: (() => TerminalTapFocusResult) | null): void;
+  setMobileTouchSelection(enabled: boolean, callback: ((text: string) => void) | null): void;
   fit(): TerminalSize;
   refreshMetrics(): TerminalSize;
   focus(): void;
@@ -36,6 +57,8 @@ export class GhosttyRenderer implements TerminalRenderer {
   #touchCleanup: (() => void) | null = null;
   #mobileInputCleanup: (() => void) | null = null;
   #tapFocusHandler: (() => TerminalTapFocusResult) | null = null;
+  #mobileTouchSelectionEnabled = false;
+  #mobileTouchSelectionHandler: ((text: string) => void) | null = null;
   #textInputTapGraceUntil = 0;
 
   async mount(container: HTMLElement) {
@@ -121,6 +144,15 @@ export class GhosttyRenderer implements TerminalRenderer {
     this.#tapFocusHandler = callback;
   }
 
+  setMobileTouchSelection(enabled: boolean, callback: ((text: string) => void) | null) {
+    const changed = this.#mobileTouchSelectionEnabled !== enabled;
+    this.#mobileTouchSelectionEnabled = enabled;
+    this.#mobileTouchSelectionHandler = callback;
+    if (changed && this.#terminal && this.#container) {
+      this.#installTouchHandlers();
+    }
+  }
+
   fit() {
     const terminal = this.#requireTerminal();
     this.#fitAddon?.fit();
@@ -183,10 +215,6 @@ export class GhosttyRenderer implements TerminalRenderer {
 
   #installScrollHandlers() {
     const terminal = this.#requireTerminal();
-    const container = this.#container;
-    if (!container) {
-      return;
-    }
 
     terminal.attachCustomWheelEventHandler((event) => {
       if (terminal.hasMouseTracking()) {
@@ -205,13 +233,113 @@ export class GhosttyRenderer implements TerminalRenderer {
       }
       return true;
     });
+    this.#installTouchHandlers();
+  }
+
+  #installTouchHandlers() {
+    const terminal = this.#requireTerminal();
+    const container = this.#container;
+    if (!container) {
+      return;
+    }
+
+    this.#touchCleanup?.();
 
     let lastTouchY: number | null = null;
     let touchStartX: number | null = null;
     let touchStartY: number | null = null;
     let touchMoved = false;
     let touchScrolled = false;
+    let touchStartedWithSelection = false;
     let pendingTouchLines = 0;
+    let suppressMouseUntil = 0;
+    let selectionTimer: number | null = null;
+    let selectingFromTouch = false;
+    let selectionStart: TerminalCellPosition | null = null;
+    let selectionClearTimer: number | null = null;
+    const clearSelectionTimer = () => {
+      if (selectionTimer !== null) {
+        window.clearTimeout(selectionTimer);
+        selectionTimer = null;
+      }
+    };
+    const clearSelectionClearTimer = () => {
+      if (selectionClearTimer !== null) {
+        window.clearTimeout(selectionClearTimer);
+        selectionClearTimer = null;
+      }
+    };
+    const stopTouchSelection = () => {
+      clearSelectionTimer();
+      selectingFromTouch = false;
+      selectionStart = null;
+    };
+    const preventTouchEvent = (event: TouchEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (typeof event.stopImmediatePropagation === "function") {
+        event.stopImmediatePropagation();
+      }
+    };
+    const positionFromTouch = (touch: Touch) => touchCellPosition(terminal, touch.clientX, touch.clientY);
+    const updateTouchSelection = (touch: Touch) => {
+      if (!selectionStart) {
+        return;
+      }
+      const current = positionFromTouch(touch);
+      const range = terminalSelectionRange(selectionStart, current, terminal.cols);
+      terminal.select(range.col, range.row, range.length);
+    };
+    const startTouchSelection = () => {
+      selectionTimer = null;
+      if (
+        !this.#mobileTouchSelectionEnabled ||
+        terminal.hasMouseTracking() ||
+        touchStartX === null ||
+        touchStartY === null
+      ) {
+        return;
+      }
+      const position = touchCellPosition(terminal, touchStartX, touchStartY);
+      selectionStart = position;
+      selectingFromTouch = true;
+      touchMoved = true;
+      terminal.textarea?.blur();
+      terminal.clearSelection();
+      terminal.select(position.col, position.row, 1);
+      if (navigator.vibrate) {
+        navigator.vibrate(35);
+      }
+    };
+    const completeTouchSelection = (event: TouchEvent) => {
+      preventTouchEvent(event);
+      const selectedText = terminal.hasSelection() ? terminal.getSelection() : "";
+      stopTouchSelection();
+      terminal.textarea?.blur();
+      if (selectedText.trim()) {
+        this.#mobileTouchSelectionHandler?.(selectedText);
+        clearSelectionClearTimer();
+        selectionClearTimer = window.setTimeout(() => {
+          selectionClearTimer = null;
+          terminal.clearSelection();
+        }, TOUCH_SELECTION_CLEAR_DELAY_MS);
+      }
+    };
+    const touchLinkText = (event: TouchEvent) => {
+      if (
+        !this.#mobileTouchSelectionEnabled ||
+        !this.#mobileTouchSelectionHandler ||
+        event.changedTouches.length === 0
+      ) {
+        return null;
+      }
+      if (terminal.hasMouseTracking()) {
+        return null;
+      }
+      const touch = event.changedTouches[0];
+      const position = positionFromTouch(touch);
+      return terminalLinkAt(terminal, position);
+    };
     const redirectTapFocus = (event: TouchEvent | MouseEvent) => {
       const terminalHadFocusOrGrace =
         document.activeElement === terminal.textarea ||
@@ -232,16 +360,47 @@ export class GhosttyRenderer implements TerminalRenderer {
       return true;
     };
     const onTouchStart = (event: TouchEvent) => {
+      clearSelectionTimer();
       if (event.touches.length === 1) {
+        const mouseTracking = terminal.hasMouseTracking();
+        if (this.#mobileTouchSelectionEnabled && !mouseTracking) {
+          preventTouchEvent(event);
+          suppressMouseUntil = performance.now() + TOUCH_SELECTION_LONG_PRESS_MS + 300;
+        }
         const touch = event.touches[0];
         touchStartX = touch.clientX;
         touchStartY = touch.clientY;
         lastTouchY = touch.clientY;
         touchMoved = false;
         touchScrolled = false;
+        touchStartedWithSelection =
+          this.#mobileTouchSelectionEnabled && !mouseTracking && terminal.hasSelection();
+        selectingFromTouch = false;
+        selectionStart = null;
+        if (this.#mobileTouchSelectionEnabled && !mouseTracking && !touchStartedWithSelection) {
+          clearSelectionClearTimer();
+          selectionTimer = window.setTimeout(startTouchSelection, TOUCH_SELECTION_LONG_PRESS_MS);
+        }
       }
     };
     const onTouchMove = (event: TouchEvent) => {
+      if (event.touches.length === 1 && selectionTimer !== null && touchStartX !== null && touchStartY !== null) {
+        const touch = event.touches[0];
+        const deltaX = touch.clientX - touchStartX;
+        const deltaY = touch.clientY - touchStartY;
+        const threshold =
+          Math.abs(deltaY) > Math.abs(deltaX)
+            ? TOUCH_SELECTION_SCROLL_INTENT_PX
+            : TOUCH_SELECTION_TOLERANCE_PX;
+        if (Math.hypot(deltaX, deltaY) > threshold) {
+          clearSelectionTimer();
+        }
+      }
+      if (selectingFromTouch && event.touches.length === 1) {
+        updateTouchSelection(event.touches[0]);
+        preventTouchEvent(event);
+        return;
+      }
       if (terminal.hasMouseTracking() || event.touches.length !== 1 || lastTouchY === null) {
         return;
       }
@@ -274,6 +433,28 @@ export class GhosttyRenderer implements TerminalRenderer {
       }
     };
     const onTouchEnd = (event: TouchEvent) => {
+      clearSelectionTimer();
+      if (terminal.hasMouseTracking()) {
+        lastTouchY = null;
+        touchStartX = null;
+        touchStartY = null;
+        touchMoved = false;
+        touchScrolled = false;
+        touchStartedWithSelection = false;
+        pendingTouchLines = 0;
+        return;
+      }
+      if (selectingFromTouch) {
+        completeTouchSelection(event);
+        lastTouchY = null;
+        touchStartX = null;
+        touchStartY = null;
+        touchMoved = false;
+        touchScrolled = false;
+        touchStartedWithSelection = false;
+        pendingTouchLines = 0;
+        return;
+      }
       if (touchMoved || touchScrolled) {
         event.preventDefault();
         event.stopPropagation();
@@ -281,32 +462,76 @@ export class GhosttyRenderer implements TerminalRenderer {
           event.stopImmediatePropagation();
         }
         terminal.textarea?.blur();
+      } else if (touchStartedWithSelection) {
+        preventTouchEvent(event);
+        clearSelectionClearTimer();
+        terminal.clearSelection();
+        terminal.textarea?.blur();
       } else {
-        redirectTapFocus(event);
+        const linkText = touchLinkText(event);
+        if (linkText?.trim()) {
+          preventTouchEvent(event);
+          terminal.textarea?.blur();
+          this.#mobileTouchSelectionHandler?.(linkText);
+        } else {
+          redirectTapFocus(event);
+        }
       }
       lastTouchY = null;
       touchStartX = null;
       touchStartY = null;
       touchMoved = false;
       touchScrolled = false;
+      touchStartedWithSelection = false;
       pendingTouchLines = 0;
     };
+    const onTouchCancel = () => {
+      clearSelectionTimer();
+      if (selectingFromTouch) {
+        terminal.clearSelection();
+      }
+      stopTouchSelection();
+      lastTouchY = null;
+      touchStartX = null;
+      touchStartY = null;
+      touchMoved = false;
+      touchScrolled = false;
+      touchStartedWithSelection = false;
+      pendingTouchLines = 0;
+      terminal.textarea?.blur();
+    };
     const onMouseDown = (event: MouseEvent) => {
+      if (terminal.hasMouseTracking()) {
+        return;
+      }
+      if (performance.now() < suppressMouseUntil) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === "function") {
+          event.stopImmediatePropagation();
+        }
+        return;
+      }
       if (event.button === 0) {
         redirectTapFocus(event);
       }
     };
 
-    container.addEventListener("touchstart", onTouchStart, { capture: true, passive: true });
+    container.addEventListener("touchstart", onTouchStart, {
+      capture: true,
+      passive: !this.#mobileTouchSelectionEnabled,
+    });
     container.addEventListener("touchmove", onTouchMove, { capture: true, passive: false });
     container.addEventListener("touchend", onTouchEnd, { capture: true });
-    container.addEventListener("touchcancel", onTouchEnd, { capture: true });
+    container.addEventListener("touchcancel", onTouchCancel, { capture: true });
     container.addEventListener("mousedown", onMouseDown, { capture: true });
     this.#touchCleanup = () => {
+      clearSelectionTimer();
+      clearSelectionClearTimer();
       container.removeEventListener("touchstart", onTouchStart, { capture: true });
       container.removeEventListener("touchmove", onTouchMove, { capture: true });
       container.removeEventListener("touchend", onTouchEnd, { capture: true });
-      container.removeEventListener("touchcancel", onTouchEnd, { capture: true });
+      container.removeEventListener("touchcancel", onTouchCancel, { capture: true });
       container.removeEventListener("mousedown", onMouseDown, { capture: true });
     };
   }
@@ -524,6 +749,89 @@ function textareaKeyboardEventOutput(event: KeyboardEvent) {
     return customKeyboardEventOutput(event);
   }
   return event.shiftKey ? "\x1B[Z" : "\t";
+}
+
+function touchCellPosition(terminal: Terminal, clientX: number, clientY: number): TerminalCellPosition {
+  const canvas = terminal.renderer?.getCanvas();
+  const rect = (canvas ?? terminal.element)?.getBoundingClientRect();
+  const metrics = terminal.renderer?.getMetrics();
+  const cellWidth = metrics?.width ?? 9;
+  const cellHeight = metrics?.height ?? 16;
+  const relativeX = rect ? clientX - rect.left : clientX;
+  const relativeY = rect ? clientY - rect.top : clientY;
+  return {
+    col: clampInteger(Math.floor(relativeX / cellWidth), 0, terminal.cols - 1),
+    row: clampInteger(Math.floor(relativeY / cellHeight), 0, terminal.rows - 1),
+  };
+}
+
+function terminalBufferRow(terminal: Terminal, viewportRow: number) {
+  const scrollbackLength = terminal.getScrollbackLength();
+  const viewportY = Math.max(0, Math.floor(terminal.getViewportY()));
+  return scrollbackLength + viewportRow - viewportY;
+}
+
+function terminalLinkAt(terminal: Terminal, position: TerminalCellPosition) {
+  const row = terminalBufferRow(terminal, position.row);
+  const line = terminal.buffer.active.getLine(row) as TerminalBufferLine | undefined;
+  if (!line || position.col < 0 || position.col >= line.length) {
+    return null;
+  }
+
+  const cell = line.getCell(position.col);
+  const hyperlinkId = cell?.getHyperlinkId() ?? 0;
+  if (hyperlinkId > 0) {
+    return terminal.wasmTerm?.getHyperlinkUri(hyperlinkId) ?? null;
+  }
+
+  const { text, columns } = terminalBufferLineText(line);
+  TAP_URL_PATTERN.lastIndex = 0;
+  let match = TAP_URL_PATTERN.exec(text);
+  while (match) {
+    const rawUrl = match[0];
+    const url = rawUrl.replace(TAP_URL_TRAILING_PUNCTUATION, "");
+    const start = columns[match.index];
+    const end = columns[match.index + url.length - 1];
+    if (url.length > 8 && position.col >= start && position.col <= end) {
+      return url;
+    }
+    match = TAP_URL_PATTERN.exec(text);
+  }
+  return null;
+}
+
+function terminalBufferLineText(line: TerminalBufferLine) {
+  let text = "";
+  const columns: number[] = [];
+  for (let col = 0; col < line.length; col += 1) {
+    const codepoint = line.getCell(col)?.getCodepoint() ?? 0;
+    const char = codepoint === 0 || codepoint < 32 ? " " : String.fromCodePoint(codepoint);
+    text += char;
+    for (let index = 0; index < char.length; index += 1) {
+      columns.push(col);
+    }
+  }
+  return { text, columns };
+}
+
+function terminalSelectionRange(
+  start: TerminalCellPosition,
+  end: TerminalCellPosition,
+  cols: number,
+) {
+  const startIndex = start.row * cols + start.col;
+  const endIndex = end.row * cols + end.col;
+  const from = startIndex <= endIndex ? start : end;
+  const to = startIndex <= endIndex ? end : start;
+  return {
+    col: from.col,
+    row: from.row,
+    length: to.row * cols + to.col - (from.row * cols + from.col) + 1,
+  };
+}
+
+function clampInteger(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
 }
 
 function normalizeWheelLines(event: WheelEvent, rows: number, sensitivity: number) {

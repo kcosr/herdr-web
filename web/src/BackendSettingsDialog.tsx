@@ -12,6 +12,8 @@ type Props = {
   showMobileTerminalSettings: boolean;
   mobileTerminalTapTarget: MobileTerminalTapTarget;
   onMobileTerminalTapTarget: (target: MobileTerminalTapTarget) => void;
+  mobileTouchSelection: boolean;
+  onMobileTouchSelection: (enabled: boolean) => void;
   onClose: () => void;
 };
 
@@ -33,6 +35,8 @@ export function BackendSettingsDialog({
   showMobileTerminalSettings,
   mobileTerminalTapTarget,
   onMobileTerminalTapTarget,
+  mobileTouchSelection,
+  onMobileTouchSelection,
   onClose,
 }: Props) {
   const bridge = useBridge();
@@ -319,6 +323,27 @@ export function BackendSettingsDialog({
                       onClick={() => onMobileTerminalTapTarget("terminal")}
                     >
                       Terminal
+                    </button>
+                  </div>
+                </div>
+                <div className="settings-row">
+                  <span>Long-press selection</span>
+                  <div className="segmented-control" role="group" aria-label="Long-press selection">
+                    <button
+                      type="button"
+                      data-on={!mobileTouchSelection}
+                      aria-pressed={!mobileTouchSelection}
+                      onClick={() => onMobileTouchSelection(false)}
+                    >
+                      Off
+                    </button>
+                    <button
+                      type="button"
+                      data-on={mobileTouchSelection}
+                      aria-pressed={mobileTouchSelection}
+                      onClick={() => onMobileTouchSelection(true)}
+                    >
+                      On
                     </button>
                   </div>
                 </div>

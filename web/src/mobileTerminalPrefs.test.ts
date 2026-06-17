@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_MOBILE_TOUCH_SELECTION,
   DEFAULT_MOBILE_TERMINAL_TAP_TARGET,
+  parseMobileTouchSelection,
   parseMobileTerminalTapTarget,
 } from "./mobileTerminalPrefs";
 
@@ -15,5 +17,11 @@ describe("mobile terminal preferences", () => {
       DEFAULT_MOBILE_TERMINAL_TAP_TARGET,
     );
     expect(parseMobileTerminalTapTarget(null)).toBe(DEFAULT_MOBILE_TERMINAL_TAP_TARGET);
+  });
+
+  it("parses the mobile touch selection flag", () => {
+    expect(parseMobileTouchSelection(true)).toBe(true);
+    expect(parseMobileTouchSelection(false)).toBe(false);
+    expect(parseMobileTouchSelection("true")).toBe(DEFAULT_MOBILE_TOUCH_SELECTION);
   });
 });

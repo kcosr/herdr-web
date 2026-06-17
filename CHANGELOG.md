@@ -6,6 +6,9 @@
 
 ### Added
 
+- Added an opt-in mobile terminal long-press selection setting with drag-to-copy selection, selected
+  URL actions, and touch hit-testing for Ghostty-detected links.
+
 ### Changed
 
 ### Fixed

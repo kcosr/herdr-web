@@ -22,7 +22,9 @@ import { LaunchDialog } from "./LaunchDialog";
 import { resolveLaunchSpec } from "./launch";
 import type { LaunchTarget } from "./launch";
 import {
+  DEFAULT_MOBILE_TOUCH_SELECTION,
   DEFAULT_MOBILE_TERMINAL_TAP_TARGET,
+  parseMobileTouchSelection,
   parseMobileTerminalTapTarget,
 } from "./mobileTerminalPrefs";
 import type { MobileTerminalTapTarget } from "./mobileTerminalPrefs";
@@ -81,6 +83,7 @@ type DisplayPrefs = {
   activeSpaceId: string | null;
   selectedPaneId: string | null;
   mobileTerminalTapTarget: MobileTerminalTapTarget;
+  mobileTouchSelection: boolean;
 };
 
 const COMPACT_LAYOUT_QUERY = "(max-width: 820px)";
@@ -103,6 +106,7 @@ function readDisplayPrefs(): DisplayPrefs {
     activeSpaceId: null,
     selectedPaneId: null,
     mobileTerminalTapTarget: DEFAULT_MOBILE_TERMINAL_TAP_TARGET,
+    mobileTouchSelection: DEFAULT_MOBILE_TOUCH_SELECTION,
   };
   try {
     const raw = window.localStorage.getItem(DISPLAY_PREFS_KEY);
@@ -137,6 +141,7 @@ function readDisplayPrefs(): DisplayPrefs {
       selectedPaneId:
         typeof parsed.selectedPaneId === "string" ? parsed.selectedPaneId : fallback.selectedPaneId,
       mobileTerminalTapTarget: parseMobileTerminalTapTarget(parsed.mobileTerminalTapTarget),
+      mobileTouchSelection: parseMobileTouchSelection(parsed.mobileTouchSelection),
     };
   } catch {
     return fallback;
@@ -220,6 +225,9 @@ export function App() {
   const [backendSettingsOpen, setBackendSettingsOpen] = useState(false);
   const [mobileTerminalTapTarget, setMobileTerminalTapTarget] = useState(
     initialPrefs.mobileTerminalTapTarget,
+  );
+  const [mobileTouchSelection, setMobileTouchSelection] = useState(
+    initialPrefs.mobileTouchSelection,
   );
   const [launchTarget, setLaunchTarget] = useState<LaunchTarget | null>(null);
   const [busy, setBusy] = useState(false);
@@ -330,6 +338,7 @@ export function App() {
       activeSpaceId,
       selectedPaneId,
       mobileTerminalTapTarget,
+      mobileTouchSelection,
     });
   }, [
     scope,
@@ -341,6 +350,7 @@ export function App() {
     activeSpaceId,
     selectedPaneId,
     mobileTerminalTapTarget,
+    mobileTouchSelection,
   ]);
 
   useEffect(() => {
@@ -1156,6 +1166,7 @@ export function App() {
             focusToken={terminalFocusToken}
             touchInput={isTouchInput}
             mobileTapTarget={mobileTerminalTapTarget}
+            mobileTouchSelection={mobileTouchSelection}
             connectionKey={bridge.connectionKey}
             resumeToken={bridge.resumeToken}
             httpUrl={bridge.httpUrl}
@@ -1172,6 +1183,7 @@ export function App() {
             scrollSensitivity={isTouchInput ? 2 : 0.4}
             mobileControls={isTouchInput}
             mobileTapTarget={mobileTerminalTapTarget}
+            mobileTouchSelection={mobileTouchSelection}
             refitToken={refitToken}
             focusToken={terminalFocusToken}
           />
@@ -1228,6 +1240,8 @@ export function App() {
           showMobileTerminalSettings={isTouchInput}
           mobileTerminalTapTarget={mobileTerminalTapTarget}
           onMobileTerminalTapTarget={setMobileTerminalTapTarget}
+          mobileTouchSelection={mobileTouchSelection}
+          onMobileTouchSelection={setMobileTouchSelection}
           onClose={() => setBackendSettingsOpen(false)}
         />
       ) : null}
@@ -1384,6 +1398,7 @@ function SplitGrid({
   focusToken,
   touchInput,
   mobileTapTarget,
+  mobileTouchSelection,
   connectionKey,
   resumeToken,
   httpUrl,
@@ -1396,6 +1411,7 @@ function SplitGrid({
   focusToken: number;
   touchInput: boolean;
   mobileTapTarget: MobileTerminalTapTarget;
+  mobileTouchSelection: boolean;
   connectionKey: string;
   resumeToken: number;
   httpUrl: (path: string, query?: URLSearchParams) => string;
@@ -1423,6 +1439,7 @@ function SplitGrid({
               scrollSensitivity={touchInput ? 2 : 0.4}
               mobileControls={selected && touchInput}
               mobileTapTarget={mobileTapTarget}
+              mobileTouchSelection={mobileTouchSelection}
               refitToken={selected ? refitToken : 0}
               focusToken={selected ? focusToken : 0}
             />

@@ -45,7 +45,7 @@ const workspace = (label: string) =>
     agent_status: "idle",
   }) satisfies WorkspaceInfo;
 
-const snapshot = (panes: PaneInfo[]): Snapshot => ({
+const snapshot = (panes: PaneInfo[], selected_pane_id?: string | null): Snapshot => ({
   workspaces: [
     {
       workspace_id: "1",
@@ -80,6 +80,7 @@ const snapshot = (panes: PaneInfo[]): Snapshot => ({
   ],
   panes,
   layouts: [],
+  selected_pane_id,
 });
 
 describe("chooseSelectedPane", () => {
@@ -91,6 +92,14 @@ describe("chooseSelectedPane", () => {
     expect(chooseSelectedPane(snapshot([pane("1-1"), pane("1-2", true)]), "missing")).toBe(
       "1-2",
     );
+  });
+
+  it("prefers current local selection over a stale streamed selection", () => {
+    expect(chooseSelectedPane(snapshot([pane("1-1"), pane("1-2")], "1-2"), "1-1")).toBe("1-1");
+  });
+
+  it("uses streamed selection when there is no current pane", () => {
+    expect(chooseSelectedPane(snapshot([pane("1-1"), pane("1-2")], "1-2"), null)).toBe("1-2");
   });
 });
 

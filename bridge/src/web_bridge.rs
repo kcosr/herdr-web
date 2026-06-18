@@ -2616,7 +2616,9 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
                         }
                     }
                     Ok(Message::Binary(bytes)) => {
-                        let _ = write_tx.send(ClientMessage::Input { data: bytes.to_vec() });
+                        if handle_terminal_binary_frame(&write_tx, bytes).is_err() {
+                            break;
+                        }
                     }
                     Ok(Message::Close(_)) => break,
                     Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
@@ -3131,6 +3133,17 @@ fn handle_terminal_text_frame(
     }
 }
 
+fn handle_terminal_binary_frame(
+    write_tx: &mpsc::Sender<ClientMessage>,
+    bytes: Bytes,
+) -> Result<(), String> {
+    write_tx
+        .send(ClientMessage::Input {
+            data: bytes.to_vec(),
+        })
+        .map_err(|_| "terminal writer closed".to_string())
+}
+
 fn parse_terminal_client_frame(text: &str) -> Result<TerminalClientFrame, String> {
     serde_json::from_str(text).map_err(|err| format!("invalid terminal frame: {err}"))
 }
@@ -3363,6 +3376,20 @@ mod tests {
             parse_terminal_client_frame(r#"{"type":"input","data":"ls\n"}"#).unwrap(),
             TerminalClientFrame::Input {
                 data: "ls\n".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn handles_binary_input_frame() {
+        let (write_tx, write_rx) = mpsc::channel();
+
+        handle_terminal_binary_frame(&write_tx, Bytes::from_static(b"hello\n")).unwrap();
+
+        assert_eq!(
+            write_rx.recv().unwrap(),
+            ClientMessage::Input {
+                data: b"hello\n".to_vec()
             }
         );
     }

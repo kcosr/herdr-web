@@ -25,6 +25,8 @@ type Props = {
   resumeToken: number;
   httpUrl: (path: string, query?: URLSearchParams) => string;
   wsUrl: (path: string, query?: URLSearchParams) => string;
+  /** Whether this mounted terminal is the active keyboard/input owner. */
+  active?: boolean;
   /** Whether to grab keyboard focus on attach. Off on mobile to avoid popping the keyboard. */
   autoFocus?: boolean;
   /** Wheel scroll speed multiplier; slower on desktop, faster on mobile. */
@@ -64,6 +66,7 @@ type MobileSelectionAction = {
 
 const MAX_UPLOAD_FILES = 8;
 const TERMINAL_CONNECT_TIMEOUT_MS = 3500;
+const textEncoder = new TextEncoder();
 
 export function TerminalView({
   pane,
@@ -71,6 +74,7 @@ export function TerminalView({
   resumeToken,
   httpUrl,
   wsUrl,
+  active = true,
   autoFocus = true,
   scrollSensitivity = 1,
   mobileControls = false,
@@ -98,6 +102,7 @@ export function TerminalView({
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadConflict, setUploadConflict] = useState<UploadConflictState | null>(null);
+  const [attachResumeToken, setAttachResumeToken] = useState(resumeToken);
   const [mobileSelectionAction, setMobileSelectionAction] =
     useState<MobileSelectionAction | null>(null);
   // Read at attach time without re-running the effect (which would re-attach the socket).
@@ -111,6 +116,10 @@ export function TerminalView({
   mobileTapTargetRef.current = mobileTapTarget;
   const mobileTouchSelectionRef = useRef(mobileTouchSelection);
   mobileTouchSelectionRef.current = mobileTouchSelection;
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const attachResumeTokenRef = useRef(attachResumeToken);
+  attachResumeTokenRef.current = attachResumeToken;
   connectionKeyRef.current = connectionKey;
   terminalIdRef.current = pane?.terminal_id ?? null;
 
@@ -220,6 +229,25 @@ export function TerminalView({
   }, [scrollSensitivity]);
 
   useEffect(() => {
+    if (active && attachResumeTokenRef.current !== resumeToken) {
+      setAttachResumeToken(resumeToken);
+    }
+  }, [active, resumeToken]);
+
+  useEffect(() => {
+    if (!active) {
+      rendererRef.current?.blur();
+      return;
+    }
+    if (!autoFocus) {
+      return;
+    }
+    const focus = () => focusPreferredInput();
+    const frame = window.requestAnimationFrame(focus);
+    return () => window.cancelAnimationFrame(frame);
+  }, [active, autoFocus, focusPreferredInput]);
+
+  useEffect(() => {
     if (focusToken === 0) {
       return;
     }
@@ -247,10 +275,12 @@ export function TerminalView({
     let disposeInput: (() => void) | null = null;
     let disposeScroll: (() => void) | null = null;
     let resizeObserver: ResizeObserver | null = null;
+    let resizeFrame: number | null = null;
     let reconnectTimer: number | null = null;
     let connectTimer: number | null = null;
     let reconnectAttempts = 0;
     let lastCloseReason: string | null = null;
+    const mountAbortController = new AbortController();
     const renderer: TerminalRenderer = new GhosttyRenderer();
     rendererRef.current = renderer;
     setConnectionState("connecting");
@@ -263,7 +293,7 @@ export function TerminalView({
     sendResizeRef.current = sendResize;
 
     void renderer
-      .mount(host)
+      .mount(host, mountAbortController.signal)
       .then(() => {
         if (disposed) {
           return;
@@ -283,8 +313,8 @@ export function TerminalView({
         );
 
         disposeInput = renderer.onInput((data) => {
-          if (socket?.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: "input", data }));
+          if (activeRef.current && socket?.readyState === WebSocket.OPEN) {
+            socket.send(textEncoder.encode(data));
           }
         });
         disposeScroll = renderer.onScroll((lines) => {
@@ -301,10 +331,16 @@ export function TerminalView({
         });
 
         resizeObserver = new ResizeObserver(() => {
-          const size = measureTerminal(renderer);
-          if (size) {
-            sendResize(size);
+          if (resizeFrame !== null) {
+            return;
           }
+          resizeFrame = window.requestAnimationFrame(() => {
+            resizeFrame = null;
+            const size = measureTerminal(renderer);
+            if (size) {
+              sendResize(size);
+            }
+          });
         });
         resizeObserver.observe(host);
 
@@ -388,7 +424,7 @@ export function TerminalView({
               if (size) {
                 sendResize(size);
               }
-              if (autoFocusRef.current) {
+              if (activeRef.current && autoFocusRef.current) {
                 window.setTimeout(() => renderer.focus(), 0);
               }
             }
@@ -435,14 +471,16 @@ export function TerminalView({
         connectSocket();
       })
       .catch((error: unknown) => {
-        console.error("failed to mount terminal renderer", error);
-        if (!disposed) {
-          setConnectionState("error");
+        if (disposed) {
+          return;
         }
+        console.error("failed to mount terminal renderer", error);
+        setConnectionState("error");
       });
 
     return () => {
       disposed = true;
+      mountAbortController.abort();
       inputQueueRef.current = [];
       if (inputFlushTimerRef.current !== null) {
         window.clearTimeout(inputFlushTimerRef.current);
@@ -451,6 +489,10 @@ export function TerminalView({
       disposeInput?.();
       disposeScroll?.();
       resizeObserver?.disconnect();
+      if (resizeFrame !== null) {
+        window.cancelAnimationFrame(resizeFrame);
+        resizeFrame = null;
+      }
       if (reconnectTimer !== null) {
         window.clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -468,7 +510,7 @@ export function TerminalView({
       rendererRef.current = null;
       host.replaceChildren();
     };
-  }, [connectionKey, measureTerminal, pane?.terminal_id, resumeToken, wsUrl]);
+  }, [attachResumeToken, connectionKey, measureTerminal, pane?.terminal_id, wsUrl]);
 
   useEffect(() => {
     rendererRef.current?.setTapFocusHandler(
@@ -528,7 +570,7 @@ export function TerminalView({
   const sendTerminalInput = (data: string) => {
     const socket = socketRef.current;
     if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: "input", data }));
+      socket.send(textEncoder.encode(data));
     }
   };
   const uploadDisabled = !pane || uploading;
@@ -682,7 +724,7 @@ export function TerminalView({
       retryCount = 0;
       const next = inputQueueRef.current.shift();
       if (next !== undefined) {
-        socket.send(JSON.stringify({ type: "input", data: next }));
+        socket.send(textEncoder.encode(next));
       }
       if (inputQueueRef.current.length > 0) {
         inputFlushTimerRef.current = window.setTimeout(flush, 35);

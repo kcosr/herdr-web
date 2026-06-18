@@ -1,4 +1,4 @@
-import { FitAddon, init, Terminal } from "ghostty-web";
+import type { FitAddon, Terminal } from "ghostty-web";
 import { selectedTextFromVisibleRows, terminalSelectionRange } from "./terminalSelection";
 import type { TerminalSelectionPoint } from "./terminalSelection";
 import { terminalTapFocusAction } from "./terminalTapFocus";
@@ -16,7 +16,27 @@ const TAP_URL_PATTERN =
   /(?:https?:\/\/|mailto:|ftp:\/\/|ssh:\/\/|git:\/\/|tel:|magnet:|gemini:\/\/|gopher:\/\/|news:)[\w\-.~:/?#@!$&*+,;=%]+/giu;
 const TAP_URL_TRAILING_PUNCTUATION = /[.,;!?)\]]+$/u;
 
-const ghosttyReady = init();
+type GhosttyWebModule = typeof import("ghostty-web");
+let ghosttyLoad: Promise<GhosttyWebModule> | null = null;
+
+async function loadGhostty(signal?: AbortSignal) {
+  if (!ghosttyLoad) {
+    ghosttyLoad = import("ghostty-web")
+      .then(async (module) => {
+        await module.init();
+        return module;
+      })
+      .catch((error) => {
+        ghosttyLoad = null;
+        throw error;
+      });
+  }
+  const module = await ghosttyLoad;
+  if (signal?.aborted) {
+    throw new Error("terminal renderer mount aborted");
+  }
+  return module;
+}
 
 export type TerminalSize = {
   cols: number;
@@ -52,7 +72,7 @@ type TerminalBufferLine = {
 };
 
 export type TerminalRenderer = {
-  mount(container: HTMLElement): Promise<TerminalSize>;
+  mount(container: HTMLElement, signal?: AbortSignal): Promise<TerminalSize>;
   write(data: string | Uint8Array): void;
   onInput(callback: (data: string) => void): () => void;
   onScroll(callback: (lines: number) => void): () => void;
@@ -62,6 +82,7 @@ export type TerminalRenderer = {
   refreshMetrics(): TerminalSize;
   focus(): void;
   focusTextInput(): void;
+  blur(): void;
   setScrollSensitivity(value: number): void;
   dispose(): void;
 };
@@ -79,8 +100,8 @@ export class GhosttyRenderer implements TerminalRenderer {
   #mobileTouchSelectionHandler: ((text: string) => void) | null = null;
   #textInputTapGraceUntil = 0;
 
-  async mount(container: HTMLElement) {
-    await ghosttyReady;
+  async mount(container: HTMLElement, signal?: AbortSignal) {
+    const { FitAddon, Terminal } = await loadGhostty(signal);
 
     this.#container = container;
     const terminal = new Terminal({
@@ -116,6 +137,10 @@ export class GhosttyRenderer implements TerminalRenderer {
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(container);
+    if (signal?.aborted) {
+      terminal.dispose();
+      throw new Error("terminal renderer mount aborted");
+    }
     terminal.attachCustomKeyEventHandler((event) => {
       const output = customKeyboardEventOutput(event);
       if (!output) {
@@ -206,6 +231,11 @@ export class GhosttyRenderer implements TerminalRenderer {
         textarea.focus({ preventScroll: true });
       }
     }, 0);
+  }
+
+  blur() {
+    this.#terminal?.textarea?.blur();
+    this.#container?.blur();
   }
 
   setScrollSensitivity(value: number) {

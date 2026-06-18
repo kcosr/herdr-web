@@ -9,12 +9,18 @@
 - Added bridge state-stream admission control, per-stream refresh rate limiting, and opaque stream
   and refresh IDs.
 - Added live state stream design documentation covering Herdr API adaptation and recovery behavior.
+- Added PWA metadata and mobile safe-area handling for installed/mobile browser use.
 
 ### Changed
 
 - Changed browser commands that can affect workspace structure to explicitly refresh state streams
   after success instead of relying on structural subscription replay.
 - Changed bridge capability probing to require explicit web protocol compatibility metadata.
+- Changed terminal panes to keep recently used terminals mounted, send keystroke input as binary
+  WebSocket frames, lazy-load Ghostty, and split terminal/react bundles for faster switching and
+  smaller app chunks.
+- Changed mobile terminal controls and dialog inputs to avoid Safari zoom and use larger touch
+  targets on touch layouts.
 - Moved state-stream pane/workspace/tab enrichment off the async WebSocket loop and tightened
   frontend state refresh scheduling around reconnects, timeouts, and queued refresh triggers.
 

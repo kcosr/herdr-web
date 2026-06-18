@@ -12,14 +12,14 @@ export function chooseSelectedPane(snapshot: Snapshot | null, currentPaneId: str
   if (!snapshot || snapshot.panes.length === 0) {
     return null;
   }
+  if (currentPaneId && snapshot.panes.some((pane) => pane.pane_id === currentPaneId)) {
+    return currentPaneId;
+  }
   if (
     snapshot.selected_pane_id &&
     snapshot.panes.some((pane) => pane.pane_id === snapshot.selected_pane_id)
   ) {
     return snapshot.selected_pane_id;
-  }
-  if (currentPaneId && snapshot.panes.some((pane) => pane.pane_id === currentPaneId)) {
-    return currentPaneId;
   }
   return snapshot.panes.find((pane) => pane.focused)?.pane_id ?? snapshot.panes[0].pane_id;
 }

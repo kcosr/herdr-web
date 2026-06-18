@@ -938,10 +938,43 @@ button {
   touch-action: none;
   font-variant-ligatures: none;
   font-feature-settings: "liga" 0, "calt" 0, "kern" 0;
+  contain: layout style;
 }
 
 .terminal-host canvas {
   display: block;
+}
+
+.terminal-stack {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--term-bg);
+}
+
+.terminal-stack-layer {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  visibility: hidden;
+  pointer-events: none;
+  contain: strict;
+}
+
+.terminal-stack-layer[data-active="true"] {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 auto;
+  visibility: visible;
+  pointer-events: auto;
+  contain: layout style;
 }
 
 .terminal-host .ghostty-hidden-input {
@@ -1075,7 +1108,10 @@ button {
   display: none;
   flex: 0 0 auto;
   gap: 5px;
-  padding: 6px max(8px, env(safe-area-inset-right)) 7px max(8px, env(safe-area-inset-left));
+  padding:
+    6px max(8px, env(safe-area-inset-right))
+    calc(7px + env(safe-area-inset-bottom, 0px))
+    max(8px, env(safe-area-inset-left));
   border-top: 1px solid var(--line);
   background: color-mix(in srgb, var(--mantle) 94%, black);
 }
@@ -1122,14 +1158,14 @@ button {
 .term-send {
   display: inline-grid;
   min-width: 0;
-  height: 30px;
+  height: 44px;
   flex: 0 0 auto;
   place-items: center;
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
   background: var(--surface0);
   color: var(--text);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1;
   white-space: nowrap;
   user-select: none;
@@ -1137,12 +1173,12 @@ button {
 }
 
 .term-key {
-  min-width: 34px;
-  padding: 0 7px;
+  min-width: 44px;
+  padding: 0 8px;
 }
 
 .term-key-icon {
-  width: 34px;
+  width: 44px;
   padding: 0;
 }
 
@@ -1178,7 +1214,7 @@ button {
   padding: 0 10px;
   background: var(--crust);
   color: var(--text);
-  font-size: 13px;
+  font-size: 16px;
 }
 
 .term-native-input:focus {
@@ -1776,6 +1812,10 @@ button {
   .icon-btn[data-spin] svg {
     animation: none;
   }
+  .overlay-scrim,
+  .terminal-overlay {
+    backdrop-filter: none;
+  }
 }
 
 /* ------------------------------------------------------- narrow / mobile */
@@ -1903,7 +1943,27 @@ button {
 
 .app[data-touch="true"] .sb-head,
 .app[data-touch="true"] .stage-bar {
-  height: 60px;
+  height: calc(60px + env(safe-area-inset-top, 0px));
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+.app[data-touch="true"] .icon-btn {
+  width: 44px;
+  height: 44px;
+}
+
+.app[data-touch="true"] .sidebar-mode button,
+.app[data-touch="true"] .sidebar-scope button {
+  height: 36px;
+}
+
+.app[data-touch="true"] .sec-add {
+  width: 34px;
+  height: 34px;
+}
+
+.app[data-touch="true"] .field {
+  font-size: 16px;
 }
 
 .app[data-touch="true"] .terminal-mobile-controls {
@@ -1912,31 +1972,31 @@ button {
 }
 
 .app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-overlay {
-  bottom: 120px;
+  bottom: calc(120px + env(safe-area-inset-bottom, 0px));
 }
 
 .app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-upload-status {
-  bottom: 122px;
+  bottom: calc(122px + env(safe-area-inset-bottom, 0px));
 }
 
 .app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-selection-sheet {
-  bottom: 122px;
+  bottom: calc(122px + env(safe-area-inset-bottom, 0px));
 }
 
 .app[data-touch="true"]
   .terminal-stage:has(.terminal-mobile-controls[data-expanded="true"])
   .terminal-overlay {
-  bottom: 158px;
+  bottom: calc(158px + env(safe-area-inset-bottom, 0px));
 }
 
 .app[data-touch="true"]
   .terminal-stage:has(.terminal-mobile-controls[data-expanded="true"])
   .terminal-upload-status {
-  bottom: 160px;
+  bottom: calc(160px + env(safe-area-inset-bottom, 0px));
 }
 
 .app[data-touch="true"]
   .terminal-stage:has(.terminal-mobile-controls[data-expanded="true"])
   .terminal-selection-sheet {
-  bottom: 160px;
+  bottom: calc(160px + env(safe-area-inset-bottom, 0px));
 }

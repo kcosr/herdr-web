@@ -59,6 +59,7 @@ import {
 } from "./stateStream";
 import { createStateRefreshScheduler, type StateRefreshReason } from "./stateRefreshScheduler";
 import { openStateSocket } from "./stateSocket";
+import { promoteCachedPaneId, pruneCachedPaneIds } from "./terminalPaneCache";
 import type { AgentStatus, PaneInfo, Snapshot, TabInfo, WorkspaceInfo } from "./types";
 
 type LoadState = "loading" | "ready" | "error";
@@ -104,6 +105,28 @@ const MOBILE_DETAIL_HISTORY_KEY = "herdrWebMobileDetail";
 const DEFAULT_SIDEBAR_WIDTH = 320;
 const MIN_SIDEBAR_WIDTH = 260;
 const MAX_SIDEBAR_WIDTH = 560;
+
+function useCachedPaneIds(
+  activePaneId: string | null,
+  snapshot: Snapshot | null,
+  connectionKey: string,
+): string[] {
+  const [cache, setCache] = useState<string[]>([]);
+
+  useEffect(() => {
+    setCache([]);
+  }, [connectionKey]);
+
+  useEffect(() => {
+    setCache((prev) => pruneCachedPaneIds(prev, snapshot));
+  }, [snapshot]);
+
+  useEffect(() => {
+    setCache((prev) => promoteCachedPaneId(prev, activePaneId, snapshot));
+  }, [activePaneId, snapshot]);
+
+  return cache;
+}
 
 function readDisplayPrefs(): DisplayPrefs {
   const fallback: DisplayPrefs = {
@@ -824,7 +847,7 @@ export function App() {
     }
   };
 
-  const closeMobileDetail = () => {
+  const closeMobileDetail = useCallback(() => {
     if (mobileDetailHistoryRef.current && isMobileDetailHistoryState(window.history.state)) {
       window.history.back();
       return;
@@ -832,7 +855,62 @@ export function App() {
     mobileDetailHistoryRef.current = false;
     showDetailRef.current = false;
     setShowDetail(false);
-  };
+  }, []);
+
+  useEffect(() => {
+    if (!isCompactLayout || !showDetail) {
+      return;
+    }
+    let startX = 0;
+    let startY = 0;
+    let swiping = false;
+    const onTouchStart = (event: TouchEvent) => {
+      if (event.touches.length !== 1 || hasOpenModal()) {
+        return;
+      }
+      const target = event.target;
+      if (
+        isShortcutTextEntryTarget(target) ||
+        (target instanceof HTMLElement &&
+          target.closest(".terminal-host, .terminal-mobile-controls, .terminal-selection-sheet, .menu"))
+      ) {
+        return;
+      }
+      const touch = event.touches[0];
+      if (!touch || touch.clientX >= 30) {
+        return;
+      }
+      startX = touch.clientX;
+      startY = touch.clientY;
+      swiping = true;
+    };
+    const onTouchEnd = (event: TouchEvent) => {
+      if (!swiping) {
+        return;
+      }
+      swiping = false;
+      const touch = event.changedTouches[0];
+      if (!touch) {
+        return;
+      }
+      const dx = touch.clientX - startX;
+      const dy = Math.abs(touch.clientY - startY);
+      if (dx > 80 && dy < dx) {
+        closeMobileDetail();
+      }
+    };
+    const onTouchCancel = () => {
+      swiping = false;
+    };
+    document.addEventListener("touchstart", onTouchStart, { passive: true });
+    document.addEventListener("touchend", onTouchEnd, { passive: true });
+    document.addEventListener("touchcancel", onTouchCancel, { passive: true });
+    return () => {
+      document.removeEventListener("touchstart", onTouchStart);
+      document.removeEventListener("touchend", onTouchEnd);
+      document.removeEventListener("touchcancel", onTouchCancel);
+    };
+  }, [closeMobileDetail, isCompactLayout, showDetail]);
 
   const openPane = (pane: PaneInfo) => {
     setSelectedPaneId(pane.pane_id);
@@ -1185,6 +1263,7 @@ export function App() {
   };
 
   const renderTerminal = !isCompactLayout || showDetail;
+  const cachedPaneIds = useCachedPaneIds(resolvedPaneId, snapshot, bridge.connectionKey);
   const appStyle = { "--sidebar-w": `${sidebarWidth}px` } as CSSProperties &
     Record<"--sidebar-w", string>;
 
@@ -1383,8 +1462,10 @@ export function App() {
             wsUrl={bridge.wsUrl}
           />
         ) : renderTerminal ? (
-          <TerminalView
-            pane={selectedPane}
+          <TerminalStack
+            cachedPaneIds={cachedPaneIds}
+            activePaneId={resolvedPaneId}
+            panes={snapshot?.panes ?? []}
             connectionKey={bridge.connectionKey}
             resumeToken={bridge.resumeToken}
             httpUrl={bridge.httpUrl}
@@ -1603,6 +1684,78 @@ function hasOpenModal() {
   return document.querySelector(".overlay-root [role='dialog']") !== null;
 }
 
+function TerminalStack({
+  cachedPaneIds,
+  activePaneId,
+  panes,
+  connectionKey,
+  resumeToken,
+  httpUrl,
+  wsUrl,
+  autoFocus,
+  scrollSensitivity,
+  mobileControls,
+  mobileTapTarget,
+  mobileTouchSelection,
+  refitToken,
+  focusToken,
+}: {
+  cachedPaneIds: string[];
+  activePaneId: string | null;
+  panes: PaneInfo[];
+  connectionKey: string;
+  resumeToken: number;
+  httpUrl: (path: string, query?: URLSearchParams) => string;
+  wsUrl: (path: string, query?: URLSearchParams) => string;
+  autoFocus: boolean;
+  scrollSensitivity: number;
+  mobileControls: boolean;
+  mobileTapTarget: MobileTerminalTapTarget;
+  mobileTouchSelection: boolean;
+  refitToken: number;
+  focusToken: number;
+}) {
+  const panesById = useMemo(
+    () => new Map(panes.map((pane) => [pane.pane_id, pane])),
+    [panes],
+  );
+  if (cachedPaneIds.length === 0) {
+    return <div className="terminal-stage" aria-hidden="true" />;
+  }
+  return (
+    <div className="terminal-stack">
+      {cachedPaneIds.map((paneId) => {
+        const active = paneId === activePaneId;
+        const pane = panesById.get(paneId) ?? null;
+        return (
+          <div
+            key={paneId}
+            className="terminal-stack-layer"
+            data-active={active ? "true" : "false"}
+            aria-hidden={!active}
+          >
+            <TerminalView
+              pane={pane}
+              connectionKey={connectionKey}
+              resumeToken={resumeToken}
+              httpUrl={httpUrl}
+              wsUrl={wsUrl}
+              active={active}
+              autoFocus={active && autoFocus}
+              scrollSensitivity={scrollSensitivity}
+              mobileControls={active && mobileControls}
+              mobileTapTarget={mobileTapTarget}
+              mobileTouchSelection={active && mobileTouchSelection}
+              refitToken={active ? refitToken : 0}
+              focusToken={active ? focusToken : 0}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function SplitGrid({
   cells,
   selectedPaneId,
@@ -1648,6 +1801,7 @@ function SplitGrid({
               resumeToken={resumeToken}
               httpUrl={httpUrl}
               wsUrl={wsUrl}
+              active={selected}
               autoFocus={selected && !touchInput}
               scrollSensitivity={touchInput ? 2 : 0.4}
               mobileControls={selected && touchInput}

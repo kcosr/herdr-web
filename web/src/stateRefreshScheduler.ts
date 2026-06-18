@@ -16,6 +16,7 @@ type StateRefreshSchedulerOptions = {
   postRefresh: (streamId: string, reason: StateRefreshReason) => Promise<RefreshResponse>;
   isTerminalError?: (error: Error) => boolean;
   onTerminalError?: (error: Error) => void;
+  onRetryExhausted?: (reason: StateRefreshReason, error: Error) => void;
   delay?: (ms: number) => Promise<void>;
   setTimeout?: (handler: () => void, ms: number) => number;
   clearTimeout?: (timer: number) => void;
@@ -113,6 +114,7 @@ export function createStateRefreshScheduler(options: StateRefreshSchedulerOption
       }
     }
     if (options.hasCurrentSnapshot()) {
+      options.onRetryExhausted?.(reason, lastError ?? new Error("state refresh failed"));
       return;
     }
     throw lastError ?? new Error("state refresh failed");

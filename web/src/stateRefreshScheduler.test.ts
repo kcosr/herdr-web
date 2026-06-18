@@ -175,6 +175,37 @@ describe("state refresh scheduler", () => {
     expect(posts).toEqual(["refresh-1"]);
   });
 
+  it("reports exhausted resync refresh retries while keeping a stale snapshot", async () => {
+    const posts: string[] = [];
+    const exhausted: string[] = [];
+    const scheduler = createStateRefreshScheduler({
+      enabled: () => true,
+      currentStreamId: () => "stream-1",
+      hasCurrentSnapshot: () => true,
+      maxAttempts: 2,
+      postRefresh: async () => {
+        const refreshId = `refresh-${posts.length + 1}`;
+        posts.push(refreshId);
+        return { refresh_id: refreshId };
+      },
+      onRetryExhausted: (reason, error) => exhausted.push(`${reason}:${error.message}`),
+      delay: async () => {},
+      setTimeout: () => 1,
+      clearTimeout: () => {},
+    });
+
+    const request = scheduler.request("resync_required");
+    await flush();
+    scheduler.settle(["refresh-1"], new Error("rebuild failed"));
+    await flush();
+    await flush();
+    scheduler.settle(["refresh-2"], new Error("still failed"));
+
+    await expect(request).resolves.toBeUndefined();
+    expect(posts).toEqual(["refresh-1", "refresh-2"]);
+    expect(exhausted).toEqual(["resync_required:still failed"]);
+  });
+
   it("fails terminal stale-stream refresh errors without retrying when no snapshot exists", async () => {
     const posts: string[] = [];
     const terminalErrors: string[] = [];

@@ -232,6 +232,45 @@ describe("state stream reducer", () => {
     expect(result.model.snapshot?.panes[0].agent_status).toBe("idle");
   });
 
+  it("rebases a resync-pending model when a follow-up snapshot arrives", () => {
+    const initial = applyStateMessage(emptyStateStreamModel, {
+      type: "snapshot",
+      generation: 1,
+      sequence: 1,
+      stream_id: "stream-1",
+      snapshot: snapshot(),
+    });
+    const resync = applyStateMessage(initial.model, {
+      type: "resync_required",
+      generation: 1,
+      sequence: 2,
+      reason: "rebuild failed",
+      refresh_ids: ["refresh-1"],
+    });
+
+    expect(resync.status).toBe("resync");
+    expect(resync.model.resyncPending).toBe(true);
+
+    const recovered = applyStateMessage(resync.model, {
+      type: "snapshot",
+      generation: 2,
+      sequence: 3,
+      stream_id: "stream-1",
+      refresh_ids: ["refresh-2"],
+      snapshot: {
+        ...snapshot(),
+        panes: [pane({ agent_status: "working" })],
+      },
+    });
+
+    expect(recovered.status).toBe("applied");
+    expect(recovered.model.generation).toBe(2);
+    expect(recovered.model.nextSequence).toBe(4);
+    expect(recovered.model.resyncPending).toBe(false);
+    expect(recovered.model.streamId).toBe("stream-1");
+    expect(recovered.model.snapshot?.panes[0].agent_status).toBe("working");
+  });
+
   it("rejects unknown sequenced message types at runtime", () => {
     expect(
       isStateMessage({

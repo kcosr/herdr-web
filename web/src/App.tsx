@@ -259,6 +259,7 @@ export function App() {
   const bridgeRef = useRef(bridge);
   bridgeRef.current = bridge;
   const stateSocketRef = useRef<ReturnType<typeof openStateSocket> | null>(null);
+  const resyncRetryTimerRef = useRef<number | null>(null);
   const stateRefreshSchedulerRef = useRef<ReturnType<typeof createStateRefreshScheduler> | null>(
     null,
   );
@@ -273,6 +274,7 @@ export function App() {
         postStateRefresh(bridgeRef.current.httpUrl, streamId, reason),
       isTerminalError: isTerminalStateRefreshError,
       onTerminalError: () => stateSocketRef.current?.reconnect(),
+      onRetryExhausted: (reason, error) => queueResyncRetry(reason, error),
       delay,
       setTimeout: (handler, ms) => window.setTimeout(handler, ms),
       clearTimeout: (timer) => window.clearTimeout(timer),
@@ -312,6 +314,16 @@ export function App() {
     });
   }, [backendSettingsOpen, dialog, launchTarget, menu]);
 
+  useEffect(
+    () => () => {
+      if (resyncRetryTimerRef.current !== null) {
+        window.clearTimeout(resyncRetryTimerRef.current);
+        resyncRetryTimerRef.current = null;
+      }
+    },
+    [],
+  );
+
   const snapshot = currentConnectionSnapshot(
     snapshotState,
     snapshotConnectionKey,
@@ -328,6 +340,10 @@ export function App() {
   };
 
   const clearStateRefreshWaiters = (message: string) => {
+    if (resyncRetryTimerRef.current !== null) {
+      window.clearTimeout(resyncRetryTimerRef.current);
+      resyncRetryTimerRef.current = null;
+    }
     stateRefreshSchedulerRef.current?.clear(message);
   };
 
@@ -337,6 +353,23 @@ export function App() {
     },
     [],
   );
+
+  function queueResyncRetry(reason: StateRefreshReason, error: Error) {
+    if (reason !== "resync_required" || resyncRetryTimerRef.current !== null) {
+      return;
+    }
+    setError(`State refresh is retrying: ${error.message}`);
+    resyncRetryTimerRef.current = window.setTimeout(() => {
+      resyncRetryTimerRef.current = null;
+      if (
+        connectionKeyRef.current !== bridgeRef.current.connectionKey ||
+        !stateStreamModelRef.current.resyncPending
+      ) {
+        return;
+      }
+      void stateRefreshSchedulerRef.current?.request("resync_required").catch(() => {});
+    }, 5000);
+  }
 
 
   const ensureMobileSidebarHistory = () => {

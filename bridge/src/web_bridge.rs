@@ -54,6 +54,7 @@ const STATE_STREAM_READ_TIMEOUT: Duration = Duration::from_millis(250);
 const STATE_STREAM_REBUILD_DEBOUNCE: Duration = Duration::from_millis(100);
 const STATE_STREAM_STARTUP_DRAIN: Duration = Duration::from_millis(50);
 const STATE_STREAM_STARTUP_CONVERGENCE_LIMIT: usize = 3;
+const STATE_STREAM_PATCH_PERMIT_TIMEOUT: Duration = Duration::from_millis(250);
 const STATE_STREAM_PATCH_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_STATE_PATCH_BLOCKING_TASKS: usize = 4;
 const MAX_STATE_STREAMS: usize = 16;
@@ -65,6 +66,8 @@ const STRUCTURAL_REFRESH_RETRY_STABLE_AFTER: Duration = Duration::from_secs(10);
 const SNAPSHOT_CACHE_REBUILD_ATTEMPTS: usize = 3;
 static UPLOAD_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static SNAPSHOT_REBUILD_COUNTER: AtomicUsize = AtomicUsize::new(0);
+const WEB_COMPAT_VERSION: u32 = 2;
+const MIN_ANDROID_APP_COMPAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone)]
 struct BridgeOptions {
@@ -128,6 +131,9 @@ struct SnapshotTabInfo {
 #[derive(Debug, Serialize)]
 struct Capabilities {
     commands: &'static [&'static str],
+    bridge_version: &'static str,
+    web_compat: u32,
+    min_android_app_compat: u32,
 }
 
 #[derive(Debug)]
@@ -1779,6 +1785,9 @@ async fn capabilities_handler(
     ensure_allowed_request(&headers, &state.request_policy)?;
     Ok(Json(Capabilities {
         commands: ALLOWED_COMMANDS,
+        bridge_version: env!("CARGO_PKG_VERSION"),
+        web_compat: WEB_COMPAT_VERSION,
+        min_android_app_compat: MIN_ANDROID_APP_COMPAT_VERSION,
     }))
 }
 
@@ -2322,27 +2331,34 @@ async fn run_state_patch_blocking<T>(
 where
     T: Send + 'static,
 {
-    run_state_patch_blocking_with_timeout(state, STATE_STREAM_PATCH_TIMEOUT, operation).await
+    run_state_patch_blocking_with_limits(
+        state,
+        STATE_STREAM_PATCH_PERMIT_TIMEOUT,
+        STATE_STREAM_PATCH_TIMEOUT,
+        operation,
+    )
+    .await
 }
 
-async fn run_state_patch_blocking_with_timeout<T>(
+async fn run_state_patch_blocking_with_limits<T>(
     state: &BridgeState,
-    timeout: Duration,
+    permit_timeout: Duration,
+    operation_timeout: Duration,
     operation: impl FnOnce() -> Result<T, BridgeError> + Send + 'static,
 ) -> Result<T, BridgeError>
 where
     T: Send + 'static,
 {
-    let permit = state
-        .state_patch_permits
-        .clone()
-        .try_acquire_owned()
+    let permit = state.state_patch_permits.clone().acquire_owned();
+    let permit = tokio::time::timeout(permit_timeout, permit)
+        .await
+        .map_err(|_| BridgeError::Protocol("state stream patch workers exhausted".to_string()))?
         .map_err(|_| BridgeError::Protocol("state stream patch workers exhausted".to_string()))?;
     let task = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         operation()
     });
-    match tokio::time::timeout(timeout, task).await {
+    match tokio::time::timeout(operation_timeout, task).await {
         Ok(result) => result.map_err(|err| BridgeError::Protocol(err.to_string()))?,
         Err(_) => Err(BridgeError::Protocol(
             "state stream patch timed out".to_string(),
@@ -3602,6 +3618,27 @@ mod tests {
             .contains_key(&stream_id));
     }
 
+    #[test]
+    fn capabilities_include_protocol_compatibility_metadata() {
+        let value = serde_json::to_value(Capabilities {
+            commands: ALLOWED_COMMANDS,
+            bridge_version: env!("CARGO_PKG_VERSION"),
+            web_compat: WEB_COMPAT_VERSION,
+            min_android_app_compat: MIN_ANDROID_APP_COMPAT_VERSION,
+        })
+        .unwrap();
+
+        assert_eq!(value["bridge_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(value["web_compat"], WEB_COMPAT_VERSION);
+        assert_eq!(
+            value["min_android_app_compat"],
+            MIN_ANDROID_APP_COMPAT_VERSION
+        );
+        assert!(value["commands"]
+            .as_array()
+            .is_some_and(|commands| commands.iter().any(|command| command == "pane.split")));
+    }
+
     #[tokio::test]
     async fn state_patch_blocking_tasks_are_bounded_after_timeout() {
         let state = test_bridge_state();
@@ -3612,8 +3649,9 @@ mod tests {
         for _ in 0..MAX_STATE_PATCH_BLOCKING_TASKS {
             let started_tx = started_tx.clone();
             let release_rx = release_rx.clone();
-            let result = run_state_patch_blocking_with_timeout(
+            let result = run_state_patch_blocking_with_limits(
                 &state,
+                STATE_STREAM_PATCH_PERMIT_TIMEOUT,
                 Duration::from_millis(1),
                 move || {
                     let _ = started_tx.send(());
@@ -3630,13 +3668,52 @@ mod tests {
             started_rx.recv().await.unwrap();
         }
 
-        let limited = run_state_patch_blocking(&state, || Ok(())).await;
+        let limited = run_state_patch_blocking_with_limits(
+            &state,
+            Duration::from_millis(1),
+            STATE_STREAM_PATCH_TIMEOUT,
+            || Ok(()),
+        )
+        .await;
         assert!(
             matches!(limited, Err(BridgeError::Protocol(message)) if message.contains("workers exhausted"))
         );
         for _ in 0..MAX_STATE_PATCH_BLOCKING_TASKS {
             release_tx.send(()).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn state_patch_blocking_waits_briefly_for_permit() {
+        let state = test_bridge_state();
+        let mut permits = Vec::new();
+        for _ in 0..MAX_STATE_PATCH_BLOCKING_TASKS {
+            permits.push(
+                state
+                    .state_patch_permits
+                    .clone()
+                    .try_acquire_owned()
+                    .unwrap(),
+            );
+        }
+
+        let release = permits.pop().unwrap();
+        let release_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            drop(release);
+        });
+
+        let result = run_state_patch_blocking_with_limits(
+            &state,
+            Duration::from_millis(100),
+            STATE_STREAM_PATCH_TIMEOUT,
+            || Ok("patched"),
+        )
+        .await
+        .unwrap();
+        release_task.await.unwrap();
+
+        assert_eq!(result, "patched");
     }
 
     #[test]

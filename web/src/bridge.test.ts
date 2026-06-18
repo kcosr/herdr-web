@@ -111,6 +111,13 @@ describe("capabilities", () => {
       error: "Bridge is not compatible with this web app",
       retry: false,
     });
+    expect(capabilityProbeSuccess({ commands: [] })).toEqual({
+      blocked: true,
+      state: "error",
+      capabilities: null,
+      error: "Bridge is not compatible with this web app",
+      retry: false,
+    });
     expect(capabilityProbeFailure(new Error("network down"))).toEqual({
       blocked: false,
       state: "error",
@@ -145,11 +152,12 @@ describe("capabilities", () => {
 
   it("probes configured bridge capabilities", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ commands: ["pane.move"] }), { status: 200 }),
+      new Response(JSON.stringify({ commands: ["pane.move"], web_compat: 2 }), { status: 200 }),
     );
 
     await expect(probeBridgeBaseUrl("192.168.1.20:4000")).resolves.toEqual({
       commands: ["pane.move"],
+      web_compat: 2,
     });
     expect(fetchMock).toHaveBeenCalledWith("http://192.168.1.20:4000/api/capabilities");
 

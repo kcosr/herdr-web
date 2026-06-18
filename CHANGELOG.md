@@ -14,6 +14,7 @@
 
 - Changed browser commands that can affect workspace structure to explicitly refresh state streams
   after success instead of relying on structural subscription replay.
+- Changed bridge capability probing to require explicit web protocol compatibility metadata.
 - Moved state-stream pane/workspace/tab enrichment off the async WebSocket loop and tightened
   frontend state refresh scheduling around reconnects, timeouts, and queued refresh triggers.
 
@@ -21,6 +22,8 @@
 
 - Reduced structural refresh subscription reconnect noise with capped backoff and fewer redundant
   broadcasts.
+- Reduced stale-state windows after failed state-stream resyncs by scheduling shorter retry follow-ups
+  and waiting briefly for busy bridge patch workers before forcing resync.
 
 ### Removed
 

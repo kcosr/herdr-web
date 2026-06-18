@@ -65,6 +65,7 @@ export type BackendInput = {
 const STORE_KEY = "herdrWeb.bridgeBackends.v1";
 const STORE_VERSION = 1;
 const APP_MIN_WEB_COMPAT = 1;
+const ANDROID_APP_COMPAT = 1;
 const fallbackStore: BridgeBackendStore = {
   version: STORE_VERSION,
   activeBackendId: null,
@@ -568,11 +569,19 @@ export function parseCapabilities(value: unknown): BridgeCapabilities {
 }
 
 function compatibilityError(capabilities: BridgeCapabilities) {
-  if (
-    typeof capabilities.web_compat === "number" &&
-    capabilities.web_compat < APP_MIN_WEB_COMPAT
-  ) {
+  if (typeof capabilities.web_compat !== "number") {
     return "Bridge is not compatible with this web app";
+  }
+  if (capabilities.web_compat < APP_MIN_WEB_COMPAT) {
+    return "Bridge is not compatible with this web app";
+  }
+  if (
+    Capacitor.isNativePlatform() &&
+    Capacitor.getPlatform() === "android" &&
+    typeof capabilities.min_android_app_compat === "number" &&
+    capabilities.min_android_app_compat > ANDROID_APP_COMPAT
+  ) {
+    return "Bridge requires a newer Android app";
   }
   return null;
 }

@@ -66,7 +66,6 @@ type MobileSelectionAction = {
 
 const MAX_UPLOAD_FILES = 8;
 const TERMINAL_CONNECT_TIMEOUT_MS = 3500;
-const textEncoder = new TextEncoder();
 
 export function TerminalView({
   pane,
@@ -314,7 +313,7 @@ export function TerminalView({
 
         disposeInput = renderer.onInput((data) => {
           if (activeRef.current && socket?.readyState === WebSocket.OPEN) {
-            socket.send(textEncoder.encode(data));
+            socket.send(JSON.stringify({ type: "input", data }));
           }
         });
         disposeScroll = renderer.onScroll((lines) => {
@@ -570,7 +569,7 @@ export function TerminalView({
   const sendTerminalInput = (data: string) => {
     const socket = socketRef.current;
     if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(textEncoder.encode(data));
+      socket.send(JSON.stringify({ type: "input", data }));
     }
   };
   const uploadDisabled = !pane || uploading;
@@ -724,7 +723,7 @@ export function TerminalView({
       retryCount = 0;
       const next = inputQueueRef.current.shift();
       if (next !== undefined) {
-        socket.send(textEncoder.encode(next));
+        socket.send(JSON.stringify({ type: "input", data: next }));
       }
       if (inputQueueRef.current.length > 0) {
         inputFlushTimerRef.current = window.setTimeout(flush, 35);

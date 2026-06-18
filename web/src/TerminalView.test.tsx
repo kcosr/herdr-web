@@ -176,7 +176,7 @@ describe("TerminalView lifecycle", () => {
 
     renderer.emitInput("a");
     expect(socket.sent).toHaveLength(2);
-    expect(ArrayBuffer.isView(socket.sent[1])).toBe(true);
+    expect(socket.sent[1]).toBe(JSON.stringify({ type: "input", data: "a" }));
 
     await render(root, props({ active: false, autoFocus: false }));
 

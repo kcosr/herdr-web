@@ -19,6 +19,10 @@
 - Changed terminal panes to keep recently used terminals mounted, send keystroke input as binary
   WebSocket frames, lazy-load Ghostty, and split terminal/react bundles for faster switching and
   smaller app chunks.
+- Changed bridge snapshot rebuilds to cache split layouts by a structural fingerprint and warm a
+  bounded pool of preconnected Herdr API sockets.
+- Changed release bridge builds to use link-time optimization and serve gzip-compressed HTTP
+  responses when clients support them.
 - Changed mobile terminal controls and dialog inputs to avoid Safari zoom and use larger touch
   targets on touch layouts.
 - Moved state-stream pane/workspace/tab enrichment off the async WebSocket loop and tightened

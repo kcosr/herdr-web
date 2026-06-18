@@ -5,6 +5,7 @@
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use interprocess::local_socket::traits::Stream as _;
@@ -15,6 +16,8 @@ use crate::api::schema::{
     SuccessResponse,
 };
 use crate::ipc::LocalStream;
+
+const MAX_PRECONNECTED_API_SOCKETS: usize = 8;
 
 /// API connection target resolved by clients at the process edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,9 +34,14 @@ impl ConnectionTarget {
 }
 
 /// Reusable client for Herdr's newline-delimited JSON API.
+///
+/// Clones share a small pool of preconnected, unused sockets. A socket is consumed by one
+/// request and is not returned to the pool, so the client does not assume multi-request socket
+/// semantics from the daemon.
 #[derive(Debug, Clone)]
 pub struct ApiClient {
     target: ConnectionTarget,
+    pool: Arc<Mutex<Vec<LocalStream>>>,
 }
 
 impl ApiClient {
@@ -42,7 +50,10 @@ impl ApiClient {
     }
 
     pub fn for_target(target: ConnectionTarget) -> Self {
-        Self { target }
+        Self {
+            target,
+            pool: Arc::new(Mutex::new(Vec::new())),
+        }
     }
 
     pub fn socket_path(&self) -> PathBuf {
@@ -143,7 +154,41 @@ impl ApiClient {
     }
 
     fn connect(&self) -> io::Result<LocalStream> {
+        if let Ok(mut pool) = self.pool.lock() {
+            if let Some(stream) = pool.pop() {
+                return Ok(stream);
+            }
+        }
         crate::ipc::connect_local_stream(&self.socket_path())
+    }
+
+    pub fn replenish_pool(&self, target_size: usize) {
+        let target_size = target_size.min(MAX_PRECONNECTED_API_SOCKETS);
+        let missing = match self.pool.lock() {
+            Ok(pool) => target_size.saturating_sub(pool.len()),
+            Err(_) => return,
+        };
+        if missing == 0 {
+            return;
+        }
+
+        let socket_path = self.socket_path();
+        let mut streams = Vec::with_capacity(missing);
+        for _ in 0..missing {
+            match crate::ipc::connect_local_stream(&socket_path) {
+                Ok(stream) => streams.push(stream),
+                Err(_) => break,
+            }
+        }
+        if streams.is_empty() {
+            return;
+        }
+
+        let Ok(mut pool) = self.pool.lock() else {
+            return;
+        };
+        let remaining = target_size.saturating_sub(pool.len());
+        pool.extend(streams.into_iter().take(remaining));
     }
 }
 
@@ -215,7 +260,7 @@ impl From<serde_json::Error> for ApiClientError {
 }
 
 fn write_request(stream: &mut LocalStream, request: &Request) -> Result<(), ApiClientError> {
-    stream.write_all(serde_json::to_string(request)?.as_bytes())?;
+    serde_json::to_writer(&mut *stream, request)?;
     stream.write_all(b"\n")?;
     stream.flush()?;
     Ok(())

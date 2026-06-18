@@ -24,6 +24,7 @@ use axum::{extract::Request as AxumRequest, Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use herdr_compat::TryClone as _;
 use serde::{Deserialize, Serialize};
+use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -94,6 +95,8 @@ struct BridgeState {
     snapshot_cache: Arc<Mutex<SnapshotCache>>,
     snapshot_rebuild_lock: Arc<Mutex<()>>,
     snapshot_required_epoch: Arc<AtomicUsize>,
+    layout_cache: Arc<Mutex<LayoutCache>>,
+    layout_required_epoch: Arc<AtomicUsize>,
     upload_dir: PathBuf,
 }
 
@@ -156,6 +159,33 @@ struct SnapshotCacheEntry {
     rebuild_epoch: usize,
 }
 
+#[derive(Debug, Default)]
+struct LayoutCache {
+    entry: Option<LayoutCacheEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct LayoutCacheEntry {
+    layouts: Vec<PaneLayoutSnapshot>,
+    signature: LayoutCacheSignature,
+    epoch: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LayoutCacheSignature {
+    tabs: Vec<LayoutCacheTabSignature>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LayoutCacheTabSignature {
+    tab_id: String,
+    workspace_id: String,
+    focused: bool,
+    pane_count: usize,
+    focused_pane_id: Option<String>,
+    pane_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum SnapshotCachePolicy {
     RebuildAfter { epoch: usize, not_before: Instant },
@@ -182,6 +212,12 @@ enum StateRefreshReason {
     ResyncRequired,
     Manual,
     Safety,
+}
+
+impl StateRefreshReason {
+    fn invalidates_layout_cache(&self) -> bool {
+        matches!(self, Self::ResyncRequired | Self::Manual)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -588,6 +624,8 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         snapshot_cache: Arc::new(Mutex::new(SnapshotCache::default())),
         snapshot_rebuild_lock: Arc::new(Mutex::new(())),
         snapshot_required_epoch: Arc::new(AtomicUsize::new(0)),
+        layout_cache: Arc::new(Mutex::new(LayoutCache::default())),
+        layout_required_epoch: Arc::new(AtomicUsize::new(0)),
         upload_dir: options.upload_dir.clone(),
     };
     spawn_structural_refresh_loop(state.clone());
@@ -620,6 +658,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
             add_security_headers,
         ))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
+        .layer(CompressionLayer::new())
         .with_state(state);
     let bind = format!("{}:{}", options.host, options.port);
     let listener = tokio::net::TcpListener::bind(&bind).await?;
@@ -1305,7 +1344,7 @@ async fn state_refresh_handler(
     check_state_refresh_allowed(&state, &body.stream_id)?;
     let refresh_id = next_state_refresh_id();
     let _ = &body.reason;
-    let rebuild_epoch = mark_snapshot_dirty(&state);
+    let rebuild_epoch = mark_snapshot_dirty(&state, body.reason.invalidates_layout_cache());
     let event = StateRefreshEvent {
         target_stream_id: Some(body.stream_id),
         refresh_id: Some(refresh_id.clone()),
@@ -1367,11 +1406,16 @@ fn next_snapshot_rebuild_epoch() -> usize {
     SNAPSHOT_REBUILD_COUNTER.fetch_add(1, Ordering::Relaxed) + 1
 }
 
-fn mark_snapshot_dirty(state: &BridgeState) -> usize {
+fn mark_snapshot_dirty(state: &BridgeState, invalidate_layout: bool) -> usize {
     let epoch = next_snapshot_rebuild_epoch();
     state
         .snapshot_required_epoch
         .fetch_max(epoch, Ordering::Release);
+    if invalidate_layout {
+        state
+            .layout_required_epoch
+            .fetch_max(epoch, Ordering::Release);
+    }
     epoch
 }
 
@@ -1379,8 +1423,12 @@ fn required_snapshot_epoch(state: &BridgeState) -> usize {
     state.snapshot_required_epoch.load(Ordering::Acquire)
 }
 
+fn required_layout_epoch(state: &BridgeState) -> usize {
+    state.layout_required_epoch.load(Ordering::Acquire)
+}
+
 fn broadcast_state_snapshot_refresh(state: &BridgeState) {
-    let rebuild_epoch = mark_snapshot_dirty(state);
+    let rebuild_epoch = mark_snapshot_dirty(state, true);
     let _ = state.state_refresh_tx.send(StateRefreshEvent {
         target_stream_id: None,
         refresh_id: None,
@@ -1757,7 +1805,8 @@ fn build_snapshot_uncached(state: &BridgeState) -> Result<Snapshot, BridgeError>
         }
     };
     let panes = current_panes(&state.api)?;
-    let layouts = collect_tab_layouts(&state.api, &tabs, &panes);
+    let layouts = collect_tab_layouts_cached(state, required_layout_epoch(state), &tabs, &panes)?;
+    state.api.replenish_pool(4);
     let workspaces = workspaces
         .into_iter()
         .map(|workspace| wrap_workspace(workspace, &panes))
@@ -1891,6 +1940,73 @@ fn api_request(api: &ApiClient, id: &str, method: Method) -> Result<ResponseResu
             method,
         })?
         .result)
+}
+
+fn collect_tab_layouts_cached(
+    state: &BridgeState,
+    layout_epoch: usize,
+    tabs: &[TabInfo],
+    panes: &[PaneInfo],
+) -> Result<Vec<PaneLayoutSnapshot>, BridgeError> {
+    let signature = layout_cache_signature(tabs, panes);
+    let cached = {
+        let cache = state
+            .layout_cache
+            .lock()
+            .map_err(|_| BridgeError::Protocol("layout cache lock poisoned".to_string()))?;
+        cache.entry.clone()
+    };
+    if let Some(entry) = cached {
+        if entry.epoch >= layout_epoch && entry.signature == signature {
+            return Ok(entry.layouts);
+        }
+    }
+
+    let layouts = collect_tab_layouts(&state.api, tabs, panes);
+    let entry = LayoutCacheEntry {
+        layouts: layouts.clone(),
+        signature,
+        epoch: layout_epoch,
+    };
+    let mut cache = state
+        .layout_cache
+        .lock()
+        .map_err(|_| BridgeError::Protocol("layout cache lock poisoned".to_string()))?;
+    let replace = cache
+        .entry
+        .as_ref()
+        .map_or(true, |current| current.epoch <= entry.epoch);
+    if replace {
+        cache.entry = Some(entry);
+    }
+    Ok(layouts)
+}
+
+fn layout_cache_signature(tabs: &[TabInfo], panes: &[PaneInfo]) -> LayoutCacheSignature {
+    let mut tabs = tabs
+        .iter()
+        .map(|tab| {
+            let mut pane_ids = panes
+                .iter()
+                .filter(|pane| pane.tab_id == tab.tab_id)
+                .map(|pane| pane.pane_id.clone())
+                .collect::<Vec<_>>();
+            pane_ids.sort();
+            LayoutCacheTabSignature {
+                tab_id: tab.tab_id.clone(),
+                workspace_id: tab.workspace_id.clone(),
+                focused: tab.focused,
+                pane_count: tab.pane_count,
+                focused_pane_id: panes
+                    .iter()
+                    .find(|pane| pane.tab_id == tab.tab_id && pane.focused)
+                    .map(|pane| pane.pane_id.clone()),
+                pane_ids,
+            }
+        })
+        .collect::<Vec<_>>();
+    tabs.sort_by(|left, right| left.tab_id.cmp(&right.tab_id));
+    LayoutCacheSignature { tabs }
 }
 
 fn collect_tab_layouts(
@@ -3349,6 +3465,39 @@ mod tests {
         }
     }
 
+    fn test_tab(tab_id: &str, workspace_id: &str, pane_count: usize, focused: bool) -> TabInfo {
+        TabInfo {
+            tab_id: tab_id.to_string(),
+            workspace_id: workspace_id.to_string(),
+            number: 1,
+            label: tab_id.to_string(),
+            focused,
+            pane_count,
+            agent_status: herdr_compat::api::schema::AgentStatus::Idle,
+        }
+    }
+
+    fn test_pane(pane_id: &str, terminal_id: &str, workspace_id: &str, tab_id: &str) -> PaneInfo {
+        PaneInfo {
+            pane_id: pane_id.to_string(),
+            terminal_id: terminal_id.to_string(),
+            workspace_id: workspace_id.to_string(),
+            tab_id: tab_id.to_string(),
+            focused: false,
+            cwd: None,
+            foreground_cwd: None,
+            label: None,
+            agent: None,
+            agent_session: None,
+            title: None,
+            display_agent: None,
+            agent_status: herdr_compat::api::schema::AgentStatus::Idle,
+            custom_status: None,
+            state_labels: HashMap::new(),
+            revision: 1,
+        }
+    }
+
     fn test_bridge_state() -> BridgeState {
         BridgeState {
             api: ApiClient::for_socket_path(PathBuf::from("/tmp/herdr-web-test.sock")),
@@ -3366,6 +3515,8 @@ mod tests {
             snapshot_cache: Arc::new(Mutex::new(SnapshotCache::default())),
             snapshot_rebuild_lock: Arc::new(Mutex::new(())),
             snapshot_required_epoch: Arc::new(AtomicUsize::new(0)),
+            layout_cache: Arc::new(Mutex::new(LayoutCache::default())),
+            layout_required_epoch: Arc::new(AtomicUsize::new(0)),
             upload_dir: PathBuf::from("/tmp"),
         }
     }
@@ -3904,6 +4055,54 @@ mod tests {
             },
             20
         ));
+    }
+
+    #[test]
+    fn layout_cache_signature_changes_for_same_count_pane_swap() {
+        let tabs = vec![test_tab("t1", "w1", 2, true)];
+        let first = vec![
+            test_pane("p1", "term-1", "w1", "t1"),
+            test_pane("p2", "term-2", "w1", "t1"),
+        ];
+        let second = vec![
+            test_pane("p1", "term-1", "w1", "t1"),
+            test_pane("p3", "term-3", "w1", "t1"),
+        ];
+
+        assert_ne!(
+            layout_cache_signature(&tabs, &first),
+            layout_cache_signature(&tabs, &second)
+        );
+    }
+
+    #[test]
+    fn layout_cache_signature_changes_for_focus_without_count_change() {
+        let tabs = vec![test_tab("t1", "w1", 2, true)];
+        let mut first = vec![
+            test_pane("p1", "term-1", "w1", "t1"),
+            test_pane("p2", "term-2", "w1", "t1"),
+        ];
+        let mut second = first.clone();
+        first[0].focused = true;
+        second[1].focused = true;
+
+        assert_ne!(
+            layout_cache_signature(&tabs, &first),
+            layout_cache_signature(&tabs, &second)
+        );
+    }
+
+    #[test]
+    fn layout_epoch_only_advances_for_layout_invalidating_refreshes() {
+        let state = test_bridge_state();
+
+        let snapshot_only_epoch = mark_snapshot_dirty(&state, false);
+        assert!(required_snapshot_epoch(&state) >= snapshot_only_epoch);
+        assert_eq!(required_layout_epoch(&state), 0);
+
+        let layout_epoch = mark_snapshot_dirty(&state, true);
+        assert!(required_snapshot_epoch(&state) >= layout_epoch);
+        assert!(required_layout_epoch(&state) >= layout_epoch);
     }
 
     #[test]

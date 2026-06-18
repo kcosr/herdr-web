@@ -1951,6 +1951,11 @@ button {
   padding-top: 0;
 }
 
+.app[data-mobile-chrome-insets="extra"] .stage-bar {
+  height: calc(60px + env(safe-area-inset-top, 0px));
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
 .app[data-touch="true"] .icon-btn {
   width: 44px;
   height: 44px;
@@ -1973,6 +1978,15 @@ button {
 .app[data-touch="true"] .terminal-mobile-controls {
   display: flex;
   flex-direction: column;
+}
+
+.app[data-native-android="true"][data-mobile-chrome-insets="system"] .sb-head {
+  height: 56px;
+  padding-top: 0;
+}
+
+.app[data-native-android="true"][data-mobile-chrome-insets="system"] .terminal-mobile-controls {
+  padding: 6px 8px 7px;
 }
 
 .app[data-mobile-terminal-scale="comfortable"] .term-key,
@@ -1998,12 +2012,30 @@ button {
   bottom: calc(120px + env(safe-area-inset-bottom, 0px));
 }
 
+.app[data-native-android="true"][data-mobile-chrome-insets="system"]
+  .terminal-stage:has(.terminal-mobile-controls)
+  .terminal-overlay {
+  bottom: 120px;
+}
+
 .app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-upload-status {
   bottom: calc(122px + env(safe-area-inset-bottom, 0px));
 }
 
+.app[data-native-android="true"][data-mobile-chrome-insets="system"]
+  .terminal-stage:has(.terminal-mobile-controls)
+  .terminal-upload-status {
+  bottom: 122px;
+}
+
 .app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-selection-sheet {
   bottom: calc(122px + env(safe-area-inset-bottom, 0px));
+}
+
+.app[data-native-android="true"][data-mobile-chrome-insets="system"]
+  .terminal-stage:has(.terminal-mobile-controls)
+  .terminal-selection-sheet {
+  bottom: 122px;
 }
 
 .app[data-touch="true"]
@@ -2012,14 +2044,32 @@ button {
   bottom: calc(158px + env(safe-area-inset-bottom, 0px));
 }
 
+.app[data-native-android="true"][data-mobile-chrome-insets="system"]
+  .terminal-stage:has(.terminal-mobile-controls[data-expanded="true"])
+  .terminal-overlay {
+  bottom: 158px;
+}
+
 .app[data-touch="true"]
   .terminal-stage:has(.terminal-mobile-controls[data-expanded="true"])
   .terminal-upload-status {
   bottom: calc(160px + env(safe-area-inset-bottom, 0px));
 }
 
+.app[data-native-android="true"][data-mobile-chrome-insets="system"]
+  .terminal-stage:has(.terminal-mobile-controls[data-expanded="true"])
+  .terminal-upload-status {
+  bottom: 160px;
+}
+
 .app[data-touch="true"]
   .terminal-stage:has(.terminal-mobile-controls[data-expanded="true"])
   .terminal-selection-sheet {
   bottom: calc(160px + env(safe-area-inset-bottom, 0px));
+}
+
+.app[data-native-android="true"][data-mobile-chrome-insets="system"]
+  .terminal-stage:has(.terminal-mobile-controls[data-expanded="true"])
+  .terminal-selection-sheet {
+  bottom: 160px;
 }

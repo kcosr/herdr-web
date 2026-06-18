@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_MOBILE_CHROME_INSETS,
   DEFAULT_MOBILE_KEYBOARD_HIDE_REFIT,
   DEFAULT_MOBILE_TERMINAL_CONTROL_SCALE,
   DEFAULT_MOBILE_TOUCH_SELECTION,
   DEFAULT_MOBILE_TERMINAL_TAP_TARGET,
+  parseMobileChromeInsets,
   parseMobileKeyboardHideRefit,
   parseMobileTerminalControlScale,
   parseMobileTouchSelection,
@@ -31,6 +33,16 @@ describe("mobile terminal preferences", () => {
   it("falls back for unknown mobile control scales", () => {
     expect(parseMobileTerminalControlScale("large")).toBe(DEFAULT_MOBILE_TERMINAL_CONTROL_SCALE);
     expect(parseMobileTerminalControlScale(null)).toBe(DEFAULT_MOBILE_TERMINAL_CONTROL_SCALE);
+  });
+
+  it("parses supported mobile chrome inset modes", () => {
+    expect(parseMobileChromeInsets("system")).toBe("system");
+    expect(parseMobileChromeInsets("extra")).toBe("extra");
+  });
+
+  it("falls back for unknown mobile chrome inset modes", () => {
+    expect(parseMobileChromeInsets("none")).toBe(DEFAULT_MOBILE_CHROME_INSETS);
+    expect(parseMobileChromeInsets(null)).toBe(DEFAULT_MOBILE_CHROME_INSETS);
   });
 
   it("parses the mobile touch selection flag", () => {

@@ -6,7 +6,11 @@ import {
   useBridge,
 } from "./bridge";
 import type { BridgeBackendProfile } from "./bridge";
-import type { MobileTerminalControlScale, MobileTerminalTapTarget } from "./mobileTerminalPrefs";
+import type {
+  MobileChromeInsets,
+  MobileTerminalControlScale,
+  MobileTerminalTapTarget,
+} from "./mobileTerminalPrefs";
 
 type Props = {
   showMobileTerminalSettings: boolean;
@@ -14,6 +18,8 @@ type Props = {
   onMobileTerminalTapTarget: (target: MobileTerminalTapTarget) => void;
   mobileTerminalControlScale: MobileTerminalControlScale;
   onMobileTerminalControlScale: (scale: MobileTerminalControlScale) => void;
+  mobileChromeInsets: MobileChromeInsets;
+  onMobileChromeInsets: (mode: MobileChromeInsets) => void;
   mobileTouchSelection: boolean;
   onMobileTouchSelection: (enabled: boolean) => void;
   showMobileKeyboardHideRefit: boolean;
@@ -42,6 +48,8 @@ export function BackendSettingsDialog({
   onMobileTerminalTapTarget,
   mobileTerminalControlScale,
   onMobileTerminalControlScale,
+  mobileChromeInsets,
+  onMobileChromeInsets,
   mobileTouchSelection,
   onMobileTouchSelection,
   showMobileKeyboardHideRefit,
@@ -354,6 +362,27 @@ export function BackendSettingsDialog({
                       onClick={() => onMobileTerminalControlScale("comfortable")}
                     >
                       Comfortable
+                    </button>
+                  </div>
+                </div>
+                <div className="settings-row">
+                  <span>Edge padding</span>
+                  <div className="segmented-control" role="group" aria-label="Mobile edge padding">
+                    <button
+                      type="button"
+                      data-on={mobileChromeInsets === "system"}
+                      aria-pressed={mobileChromeInsets === "system"}
+                      onClick={() => onMobileChromeInsets("system")}
+                    >
+                      System
+                    </button>
+                    <button
+                      type="button"
+                      data-on={mobileChromeInsets === "extra"}
+                      aria-pressed={mobileChromeInsets === "extra"}
+                      onClick={() => onMobileChromeInsets("extra")}
+                    >
+                      Extra
                     </button>
                   </div>
                 </div>

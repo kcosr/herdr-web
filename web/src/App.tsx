@@ -22,16 +22,22 @@ import { LaunchDialog } from "./LaunchDialog";
 import { resolveLaunchSpec } from "./launch";
 import type { LaunchTarget } from "./launch";
 import {
+  DEFAULT_MOBILE_CHROME_INSETS,
   DEFAULT_MOBILE_TERMINAL_CONTROL_SCALE,
   DEFAULT_MOBILE_KEYBOARD_HIDE_REFIT,
   DEFAULT_MOBILE_TOUCH_SELECTION,
   DEFAULT_MOBILE_TERMINAL_TAP_TARGET,
+  parseMobileChromeInsets,
   parseMobileKeyboardHideRefit,
   parseMobileTerminalControlScale,
   parseMobileTouchSelection,
   parseMobileTerminalTapTarget,
 } from "./mobileTerminalPrefs";
-import type { MobileTerminalControlScale, MobileTerminalTapTarget } from "./mobileTerminalPrefs";
+import type {
+  MobileChromeInsets,
+  MobileTerminalControlScale,
+  MobileTerminalTapTarget,
+} from "./mobileTerminalPrefs";
 import { addNativeBackHandler, addNativeKeyboardHideHandler, isNativeAndroid } from "./native";
 import { ActionMenu, ConfirmDialog, RenameDialog, useLongPress } from "./overlays";
 import type { MenuItem } from "./overlays";
@@ -96,6 +102,7 @@ type DisplayPrefs = {
   selectedPaneId: string | null;
   mobileTerminalTapTarget: MobileTerminalTapTarget;
   mobileTerminalControlScale: MobileTerminalControlScale;
+  mobileChromeInsets: MobileChromeInsets;
   mobileTouchSelection: boolean;
   mobileKeyboardHideRefit: boolean;
 };
@@ -143,6 +150,7 @@ function readDisplayPrefs(): DisplayPrefs {
     selectedPaneId: null,
     mobileTerminalTapTarget: DEFAULT_MOBILE_TERMINAL_TAP_TARGET,
     mobileTerminalControlScale: DEFAULT_MOBILE_TERMINAL_CONTROL_SCALE,
+    mobileChromeInsets: DEFAULT_MOBILE_CHROME_INSETS,
     mobileTouchSelection: DEFAULT_MOBILE_TOUCH_SELECTION,
     mobileKeyboardHideRefit: DEFAULT_MOBILE_KEYBOARD_HIDE_REFIT,
   };
@@ -182,6 +190,7 @@ function readDisplayPrefs(): DisplayPrefs {
       mobileTerminalControlScale: parseMobileTerminalControlScale(
         parsed.mobileTerminalControlScale,
       ),
+      mobileChromeInsets: parseMobileChromeInsets(parsed.mobileChromeInsets),
       mobileTouchSelection: parseMobileTouchSelection(parsed.mobileTouchSelection),
       mobileKeyboardHideRefit: parseMobileKeyboardHideRefit(parsed.mobileKeyboardHideRefit),
     };
@@ -271,6 +280,7 @@ export function App() {
   const [mobileTerminalControlScale, setMobileTerminalControlScale] = useState(
     initialPrefs.mobileTerminalControlScale,
   );
+  const [mobileChromeInsets, setMobileChromeInsets] = useState(initialPrefs.mobileChromeInsets);
   const [mobileTouchSelection, setMobileTouchSelection] = useState(
     initialPrefs.mobileTouchSelection,
   );
@@ -284,7 +294,8 @@ export function App() {
   const [terminalFocusToken, setTerminalFocusToken] = useState(0);
   const isCompactLayout = useIsCompactLayout();
   const isTouchInput = useIsTouchInput();
-  const showMobileKeyboardHideRefit = isNativeAndroid();
+  const isNativeAndroidApp = isNativeAndroid();
+  const showMobileKeyboardHideRefit = isNativeAndroidApp;
   const snapshotRef = useRef<Snapshot | null>(null);
   const stateStreamModelRef = useRef<StateStreamModel>(emptyStateStreamModel);
   const connectionKeyRef = useRef(bridge.connectionKey);
@@ -461,6 +472,7 @@ export function App() {
       selectedPaneId,
       mobileTerminalTapTarget,
       mobileTerminalControlScale,
+      mobileChromeInsets,
       mobileTouchSelection,
       mobileKeyboardHideRefit,
     });
@@ -475,6 +487,7 @@ export function App() {
     selectedPaneId,
     mobileTerminalTapTarget,
     mobileTerminalControlScale,
+    mobileChromeInsets,
     mobileTouchSelection,
     mobileKeyboardHideRefit,
   ]);
@@ -1287,7 +1300,9 @@ export function App() {
       data-resizing-sidebar={resizingSidebar ? "true" : "false"}
       data-compact={isCompactLayout ? "true" : "false"}
       data-touch={isTouchInput ? "true" : "false"}
+      data-native-android={isNativeAndroidApp ? "true" : "false"}
       data-mobile-terminal-scale={mobileTerminalControlScale}
+      data-mobile-chrome-insets={mobileChromeInsets}
       data-detail={isCompactLayout && showDetail ? "true" : "false"}
     >
       <aside className="sidebar" aria-label="Switcher">
@@ -1546,6 +1561,8 @@ export function App() {
           onMobileTerminalTapTarget={setMobileTerminalTapTarget}
           mobileTerminalControlScale={mobileTerminalControlScale}
           onMobileTerminalControlScale={setMobileTerminalControlScale}
+          mobileChromeInsets={mobileChromeInsets}
+          onMobileChromeInsets={setMobileChromeInsets}
           mobileTouchSelection={mobileTouchSelection}
           onMobileTouchSelection={setMobileTouchSelection}
           showMobileKeyboardHideRefit={showMobileKeyboardHideRefit}

@@ -1158,14 +1158,14 @@ button {
 .term-send {
   display: inline-grid;
   min-width: 0;
-  height: 44px;
+  height: 30px;
   flex: 0 0 auto;
   place-items: center;
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
   background: var(--surface0);
   color: var(--text);
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1;
   white-space: nowrap;
   user-select: none;
@@ -1173,12 +1173,12 @@ button {
 }
 
 .term-key {
-  min-width: 44px;
-  padding: 0 8px;
+  min-width: 34px;
+  padding: 0 7px;
 }
 
 .term-key-icon {
-  width: 44px;
+  width: 34px;
   padding: 0;
 }
 
@@ -1214,7 +1214,7 @@ button {
   padding: 0 10px;
   background: var(--crust);
   color: var(--text);
-  font-size: 16px;
+  font-size: 13px;
 }
 
 .term-native-input:focus {
@@ -1941,10 +1941,14 @@ button {
   padding: 11px 12px;
 }
 
-.app[data-touch="true"] .sb-head,
-.app[data-touch="true"] .stage-bar {
+.app[data-touch="true"] .sb-head {
   height: calc(60px + env(safe-area-inset-top, 0px));
   padding-top: env(safe-area-inset-top, 0px);
+}
+
+.app[data-touch="true"] .stage-bar {
+  height: 56px;
+  padding-top: 0;
 }
 
 .app[data-touch="true"] .icon-btn {
@@ -1969,6 +1973,25 @@ button {
 .app[data-touch="true"] .terminal-mobile-controls {
   display: flex;
   flex-direction: column;
+}
+
+.app[data-mobile-terminal-scale="comfortable"] .term-key,
+.app[data-mobile-terminal-scale="comfortable"] .term-send {
+  height: 44px;
+  font-size: 12px;
+}
+
+.app[data-mobile-terminal-scale="comfortable"] .term-key {
+  min-width: 44px;
+  padding: 0 8px;
+}
+
+.app[data-mobile-terminal-scale="comfortable"] .term-key-icon {
+  width: 44px;
+}
+
+.app[data-mobile-terminal-scale="comfortable"] .term-native-input {
+  font-size: 16px;
 }
 
 .app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-overlay {

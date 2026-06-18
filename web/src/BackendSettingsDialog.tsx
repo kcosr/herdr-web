@@ -6,12 +6,14 @@ import {
   useBridge,
 } from "./bridge";
 import type { BridgeBackendProfile } from "./bridge";
-import type { MobileTerminalTapTarget } from "./mobileTerminalPrefs";
+import type { MobileTerminalControlScale, MobileTerminalTapTarget } from "./mobileTerminalPrefs";
 
 type Props = {
   showMobileTerminalSettings: boolean;
   mobileTerminalTapTarget: MobileTerminalTapTarget;
   onMobileTerminalTapTarget: (target: MobileTerminalTapTarget) => void;
+  mobileTerminalControlScale: MobileTerminalControlScale;
+  onMobileTerminalControlScale: (scale: MobileTerminalControlScale) => void;
   mobileTouchSelection: boolean;
   onMobileTouchSelection: (enabled: boolean) => void;
   showMobileKeyboardHideRefit: boolean;
@@ -38,6 +40,8 @@ export function BackendSettingsDialog({
   showMobileTerminalSettings,
   mobileTerminalTapTarget,
   onMobileTerminalTapTarget,
+  mobileTerminalControlScale,
+  onMobileTerminalControlScale,
   mobileTouchSelection,
   onMobileTouchSelection,
   showMobileKeyboardHideRefit,
@@ -329,6 +333,27 @@ export function BackendSettingsDialog({
                       onClick={() => onMobileTerminalTapTarget("terminal")}
                     >
                       Terminal
+                    </button>
+                  </div>
+                </div>
+                <div className="settings-row">
+                  <span>Control scale</span>
+                  <div className="segmented-control" role="group" aria-label="Mobile control scale">
+                    <button
+                      type="button"
+                      data-on={mobileTerminalControlScale === "compact"}
+                      aria-pressed={mobileTerminalControlScale === "compact"}
+                      onClick={() => onMobileTerminalControlScale("compact")}
+                    >
+                      Compact
+                    </button>
+                    <button
+                      type="button"
+                      data-on={mobileTerminalControlScale === "comfortable"}
+                      aria-pressed={mobileTerminalControlScale === "comfortable"}
+                      onClick={() => onMobileTerminalControlScale("comfortable")}
+                    >
+                      Comfortable
                     </button>
                   </div>
                 </div>

@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_MOBILE_KEYBOARD_HIDE_REFIT,
+  DEFAULT_MOBILE_TERMINAL_CONTROL_SCALE,
   DEFAULT_MOBILE_TOUCH_SELECTION,
   DEFAULT_MOBILE_TERMINAL_TAP_TARGET,
   parseMobileKeyboardHideRefit,
+  parseMobileTerminalControlScale,
   parseMobileTouchSelection,
   parseMobileTerminalTapTarget,
 } from "./mobileTerminalPrefs";
@@ -19,6 +21,16 @@ describe("mobile terminal preferences", () => {
       DEFAULT_MOBILE_TERMINAL_TAP_TARGET,
     );
     expect(parseMobileTerminalTapTarget(null)).toBe(DEFAULT_MOBILE_TERMINAL_TAP_TARGET);
+  });
+
+  it("parses supported mobile control scales", () => {
+    expect(parseMobileTerminalControlScale("compact")).toBe("compact");
+    expect(parseMobileTerminalControlScale("comfortable")).toBe("comfortable");
+  });
+
+  it("falls back for unknown mobile control scales", () => {
+    expect(parseMobileTerminalControlScale("large")).toBe(DEFAULT_MOBILE_TERMINAL_CONTROL_SCALE);
+    expect(parseMobileTerminalControlScale(null)).toBe(DEFAULT_MOBILE_TERMINAL_CONTROL_SCALE);
   });
 
   it("parses the mobile touch selection flag", () => {

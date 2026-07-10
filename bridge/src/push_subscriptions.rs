@@ -36,13 +36,25 @@ impl From<io::Error> for PushSubscriptionsError {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Holds push subscription secret material (`p256dh` and `auth`). These are
+/// equivalent to private key material and must never be serialized into a
+/// browser-facing HTTP response.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PushKeys {
     pub p256dh: String,
     pub auth: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+impl std::fmt::Debug for PushKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PushKeys")
+            .field("p256dh", &"<redacted>")
+            .field("auth", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationPrefs {
     #[serde(default)]
     pub statuses: HashMap<String, bool>,
@@ -52,6 +64,17 @@ pub struct NotificationPrefs {
     pub workspaces: HashMap<String, bool>,
     #[serde(default)]
     pub agents: HashMap<String, bool>,
+}
+
+impl Default for NotificationPrefs {
+    fn default() -> Self {
+        Self {
+            statuses: HashMap::new(),
+            scope_default: default_scope(),
+            workspaces: HashMap::new(),
+            agents: HashMap::new(),
+        }
+    }
 }
 
 fn default_scope() -> String {
@@ -65,6 +88,9 @@ pub struct PushSubscriptionInput {
     pub prefs: NotificationPrefs,
 }
 
+/// Holds a stored push subscription, including secret push keys (`auth`,
+/// `p256dh`) and the push service `endpoint`. This data must never be
+/// serialized into a browser-facing HTTP response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PushSubscriptionRecord {
     pub endpoint: String,

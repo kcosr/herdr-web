@@ -110,6 +110,12 @@ struct BridgeState {
     notes: Arc<NotesManager>,
     push_subscriptions: Arc<PushSubscriptionsManager>,
     web_push: Arc<WebPushSender>,
+    // The activity watcher runs on a dedicated `std::thread`, not a tokio
+    // worker thread, so a bare `tokio::spawn` there panics with "no reactor
+    // running". Capture the runtime `Handle` here (while `run_server` is
+    // executing inside `runtime.block_on(...)`) so that thread can spawn
+    // the push send onto the runtime via `state.runtime_handle.spawn(...)`.
+    runtime_handle: tokio::runtime::Handle,
     ui_event_tx: tokio::sync::broadcast::Sender<String>,
     activity_tx: tokio::sync::broadcast::Sender<ActivityMessage>,
     upload_dir: PathBuf,
@@ -973,6 +979,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         notes,
         push_subscriptions,
         web_push,
+        runtime_handle: tokio::runtime::Handle::current(),
         ui_event_tx: tokio::sync::broadcast::channel(256).0,
         activity_tx: tokio::sync::broadcast::channel(512).0,
         upload_dir: options.upload_dir.clone(),
@@ -2911,6 +2918,45 @@ where
     sent
 }
 
+fn push_status_str(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Idle => "idle",
+        AgentStatus::Working => "working",
+        AgentStatus::Blocked => "blocked",
+        AgentStatus::Done => "done",
+        AgentStatus::Unknown => "unknown",
+    }
+}
+
+fn notification_payload(
+    workspace_id: &str,
+    pane_id: &str,
+    status: &str,
+    agent: &Option<String>,
+    display_agent: &Option<String>,
+    title: &Option<String>,
+) -> PushPayload {
+    let who = display_agent
+        .clone()
+        .or_else(|| agent.clone())
+        .unwrap_or_else(|| "Agent".to_string());
+    let heading = match status {
+        "blocked" => format!("{who} blocked"),
+        "done" => format!("{who} done"),
+        other => format!("{who} {other}"),
+    };
+    let body = title
+        .clone()
+        .unwrap_or_else(|| "Tap to open herdr".to_string());
+    PushPayload {
+        title: heading,
+        body,
+        workspace_id: workspace_id.to_string(),
+        pane_id: pane_id.to_string(),
+        agent_status: status.to_string(),
+    }
+}
+
 fn broadcast_agent_pins_changed(state: &BridgeState, pane_id: Option<&str>) {
     let mut payload = serde_json::json!({
         "type": "herdr_web.agent_pins_changed",
@@ -3765,7 +3811,11 @@ fn run_agent_activity_subscription(
                 if let Some(message) = activity_message_from_subscription_value(value) {
                     if let ActivityMessage::PaneAgentStatusChanged {
                         pane_id,
+                        workspace_id,
                         agent_status,
+                        agent,
+                        title,
+                        display_agent,
                         ..
                     } = &message
                     {
@@ -3774,6 +3824,32 @@ fn run_agent_activity_subscription(
                             .observe_status_event(pane_id, *agent_status)
                         {
                             broadcast_agent_activity_changed(state);
+                            let status = push_status_str(*agent_status);
+                            if status == "blocked" || status == "done" {
+                                let payload = notification_payload(
+                                    workspace_id,
+                                    pane_id,
+                                    status,
+                                    agent,
+                                    display_agent,
+                                    title,
+                                );
+                                let pane_id = pane_id.clone();
+                                let workspace_id = workspace_id.clone();
+                                let status = status.to_string();
+                                let push_state = state.clone();
+                                state.runtime_handle.spawn(async move {
+                                    send_push_to_all(&push_state, &payload, |record| {
+                                        crate::push_subscriptions::should_notify(
+                                            &record.prefs,
+                                            &status,
+                                            &workspace_id,
+                                            &pane_id,
+                                        )
+                                    })
+                                    .await;
+                                });
+                            }
                         }
                     }
                     let _ = state.activity_tx.send(message);

@@ -48,6 +48,7 @@ export type BridgeCapabilities = {
   launcher_presets?: {
     version: 1;
   };
+  push?: { version: number };
   bridge_version?: string;
   web_compat?: number;
   min_android_app_compat?: number;

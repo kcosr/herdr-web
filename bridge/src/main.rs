@@ -2,6 +2,7 @@ mod agent_activity;
 mod agent_pins;
 mod launcher_presets;
 mod notes;
+mod push_subscriptions;
 mod session;
 mod store_util;
 mod web_bridge;

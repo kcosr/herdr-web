@@ -1,5 +1,6 @@
-use std::fs;
-use std::path::PathBuf;
+use std::fs::{self, File};
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -80,21 +81,37 @@ pub fn load_or_create_vapid() -> Result<VapidKeyMaterial, WebPushError> {
         }
     }
     let material = generate_vapid_material()?;
-    fs::write(&pem_path, material.private_key_pem.as_bytes())?;
-    set_private_file_permissions(&pem_path)?;
-    fs::write(&pub_path, material.public_key_b64url.as_bytes())?;
-    set_private_file_permissions(&pub_path)?;
+    write_file_atomic(&pem_path, material.private_key_pem.as_bytes())?;
+    write_file_atomic(&pub_path, material.public_key_b64url.as_bytes())?;
     Ok(material)
+}
+
+/// Write `bytes` to `path` via a temp-file-then-rename so a crash mid-write
+/// can never leave a truncated-but-non-empty file at `path`.
+fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), WebPushError> {
+    let temp_path = path.with_extension(format!("{}.tmp", std::process::id()));
+    let mut file = File::create(&temp_path)?;
+    set_private_file_permissions(&temp_path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&temp_path, path)?;
+    set_private_file_permissions(path)?;
+    Ok(())
 }
 
 #[derive(Clone)]
 pub struct WebPushSender {
     material: VapidKeyMaterial,
+    client: web_push::HyperWebPushClient,
 }
 
 impl WebPushSender {
     pub fn new(material: VapidKeyMaterial) -> Self {
-        Self { material }
+        Self {
+            material,
+            client: web_push::HyperWebPushClient::new(),
+        }
     }
 
     pub fn public_key_b64url(&self) -> &str {
@@ -109,8 +126,8 @@ impl WebPushSender {
         payload: &PushPayload,
     ) -> WebPushSendResult {
         use web_push::{
-            ContentEncoding, IsahcWebPushClient, SubscriptionInfo, SubscriptionKeys,
-            VapidSignatureBuilder, WebPushClient as _, WebPushMessageBuilder,
+            ContentEncoding, SubscriptionInfo, SubscriptionKeys, VapidSignatureBuilder,
+            WebPushClient as _, WebPushMessageBuilder,
         };
 
         let subscription = SubscriptionInfo {
@@ -140,11 +157,7 @@ impl WebPushSender {
             Ok(m) => m,
             Err(e) => return WebPushSendResult::Failed(e.to_string()),
         };
-        let client = match IsahcWebPushClient::new() {
-            Ok(c) => c,
-            Err(e) => return WebPushSendResult::Failed(e.to_string()),
-        };
-        match client.send(message).await {
+        match self.client.send(message).await {
             Ok(_) => WebPushSendResult::Ok,
             Err(web_push::WebPushError::EndpointNotFound)
             | Err(web_push::WebPushError::EndpointNotValid) => WebPushSendResult::Gone,

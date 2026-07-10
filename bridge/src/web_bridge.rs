@@ -54,6 +54,10 @@ use crate::notes::{
     AttachNoteRequest, CreateNoteRequest, NoteResponse, NotesError, NotesListQuery,
     NotesListResponse, NotesManager, RevisionRequest, UpdateNoteRequest,
 };
+use crate::push_subscriptions::{
+    NotificationPrefs, PushKeys, PushSubscriptionInput, PushSubscriptionsManager,
+};
+use crate::web_push::{load_or_create_vapid, PushPayload, WebPushSendResult, WebPushSender};
 
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8787;
@@ -104,6 +108,8 @@ struct BridgeState {
     agent_pins: Arc<AgentPinsManager>,
     launcher_presets: Arc<LauncherPresetStore>,
     notes: Arc<NotesManager>,
+    push_subscriptions: Arc<PushSubscriptionsManager>,
+    web_push: Arc<WebPushSender>,
     ui_event_tx: tokio::sync::broadcast::Sender<String>,
     activity_tx: tokio::sync::broadcast::Sender<ActivityMessage>,
     upload_dir: PathBuf,
@@ -148,6 +154,7 @@ struct Capabilities {
     agent_pins: AgentPinsCapability,
     launcher_presets: LauncherPresetsCapability,
     notes: NotesCapability,
+    push: PushCapability,
 }
 
 #[derive(Debug, Serialize)]
@@ -167,6 +174,11 @@ struct LauncherPresetsCapability {
 
 #[derive(Debug, Serialize)]
 struct NotesCapability {
+    version: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct PushCapability {
     version: u32,
 }
 
@@ -930,6 +942,10 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
             .map_err(|message| io::Error::new(ErrorKind::InvalidInput, message))?,
     );
     let notes = Arc::new(NotesManager::new()?);
+    let push_subscriptions = Arc::new(PushSubscriptionsManager::new()?);
+    let web_push = Arc::new(WebPushSender::new(load_or_create_vapid().map_err(|e| {
+        io::Error::new(ErrorKind::Other, format!("vapid init failed: {e:?}"))
+    })?));
     let request_policy = RequestPolicy {
         bind_host: options.host.clone(),
         bind_port: options.port,
@@ -955,6 +971,8 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         agent_pins,
         launcher_presets,
         notes,
+        push_subscriptions,
+        web_push,
         ui_event_tx: tokio::sync::broadcast::channel(256).0,
         activity_tx: tokio::sync::broadcast::channel(512).0,
         upload_dir: options.upload_dir.clone(),
@@ -1018,11 +1036,29 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
             "/api/launcher-presets/launch",
             post(launcher_preset_launch_handler).options(preflight_handler),
         );
+    let push_routes = Router::new()
+        .route(
+            "/api/push/vapid-public-key",
+            get(push_vapid_public_key_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/push/subscribe",
+            post(push_subscribe_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/push/unsubscribe",
+            post(push_unsubscribe_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/push/test-fire",
+            post(push_test_fire_handler).options(preflight_handler),
+        );
     let app = Router::new()
         .merge(agent_activity_routes)
         .merge(agent_pins_routes)
         .merge(notes_routes)
         .merge(launcher_preset_routes)
+        .merge(push_routes)
         .route(
             "/api/snapshot",
             get(snapshot_handler).options(preflight_handler),
@@ -1690,6 +1726,52 @@ struct LauncherPresetLaunchResponse {
     workspace_id: String,
     tab_id: String,
     pane_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PushSubscribeRequest {
+    endpoint: String,
+    keys: PushSubscribeKeys,
+    #[serde(default)]
+    prefs: NotificationPrefsBody,
+}
+
+#[derive(Debug, Deserialize)]
+struct PushSubscribeKeys {
+    p256dh: String,
+    auth: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct NotificationPrefsBody {
+    #[serde(default)]
+    statuses: std::collections::HashMap<String, bool>,
+    #[serde(default)]
+    scope_default: Option<String>,
+    #[serde(default)]
+    workspaces: std::collections::HashMap<String, bool>,
+    #[serde(default)]
+    agents: std::collections::HashMap<String, bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PushUnsubscribeRequest {
+    endpoint: String,
+}
+
+#[derive(Debug, Serialize)]
+struct VapidPublicKeyResponse {
+    public_key: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PushOkResponse {
+    ok: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct PushTestFireResponse {
+    sent: usize,
 }
 
 #[derive(Debug)]
@@ -2527,6 +2609,7 @@ async fn capabilities_handler(
         agent_pins: AgentPinsCapability { version: 1 },
         launcher_presets: LauncherPresetsCapability { version: 1 },
         notes: NotesCapability { version: 1 },
+        push: PushCapability { version: 1 },
     }))
 }
 
@@ -2590,6 +2673,80 @@ async fn agent_pins_unpin_handler(
     .await?;
     broadcast_agent_pins_changed(&state, Some(&event_pane_id));
     Ok(Json(response))
+}
+
+async fn push_vapid_public_key_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+) -> Result<Json<VapidPublicKeyResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    Ok(Json(VapidPublicKeyResponse {
+        public_key: state.web_push.public_key_b64url().to_string(),
+    }))
+}
+
+async fn push_subscribe_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+    Json(body): Json<PushSubscribeRequest>,
+) -> Result<Json<PushOkResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let input = PushSubscriptionInput {
+        endpoint: body.endpoint,
+        keys: PushKeys {
+            p256dh: body.keys.p256dh,
+            auth: body.keys.auth,
+        },
+        prefs: NotificationPrefs {
+            statuses: body.prefs.statuses,
+            scope_default: body
+                .prefs
+                .scope_default
+                .unwrap_or_else(|| "off".to_string()),
+            workspaces: body.prefs.workspaces,
+            agents: body.prefs.agents,
+        },
+    };
+    run_store_task(state, move |state| {
+        state
+            .push_subscriptions
+            .upsert(input)
+            .map_err(|e| BridgeError::BadRequest(e.to_string()))
+    })
+    .await?;
+    Ok(Json(PushOkResponse { ok: true }))
+}
+
+async fn push_unsubscribe_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+    Json(body): Json<PushUnsubscribeRequest>,
+) -> Result<Json<PushOkResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    run_store_task(state, move |state| {
+        state
+            .push_subscriptions
+            .remove(&body.endpoint)
+            .map_err(|e| BridgeError::BadRequest(e.to_string()))
+    })
+    .await?;
+    Ok(Json(PushOkResponse { ok: true }))
+}
+
+async fn push_test_fire_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+) -> Result<Json<PushTestFireResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let payload = PushPayload {
+        title: "herdr-web test".to_string(),
+        body: "Push notifications are working.".to_string(),
+        workspace_id: String::new(),
+        pane_id: String::new(),
+        agent_status: "done".to_string(),
+    };
+    let sent = send_push_to_all(&state, &payload, |_| true).await;
+    Ok(Json(PushTestFireResponse { sent }))
 }
 
 async fn notes_list_handler(
@@ -2726,6 +2883,32 @@ where
     tokio::task::spawn_blocking(move || task(state))
         .await
         .map_err(|err| BridgeError::Protocol(err.to_string()))?
+}
+
+async fn send_push_to_all<F>(state: &BridgeState, payload: &PushPayload, matches: F) -> usize
+where
+    F: Fn(&crate::push_subscriptions::PushSubscriptionRecord) -> bool,
+{
+    let subs = match state.push_subscriptions.list_for_send() {
+        Ok(subs) => subs,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to list push subscriptions");
+            return 0;
+        }
+    };
+    let mut sent = 0usize;
+    for record in subs.into_iter().filter(|r| matches(r)) {
+        match state.web_push.send(&record, payload).await {
+            WebPushSendResult::Ok => sent += 1,
+            WebPushSendResult::Gone => {
+                let _ = state.push_subscriptions.prune(&record.endpoint);
+            }
+            WebPushSendResult::Failed(msg) => {
+                tracing::warn!(endpoint = %record.endpoint, error = %msg, "push send failed");
+            }
+        }
+    }
+    sent
 }
 
 fn broadcast_agent_pins_changed(state: &BridgeState, pane_id: Option<&str>) {

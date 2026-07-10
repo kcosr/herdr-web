@@ -32,13 +32,14 @@ export async function enablePush(
   }
   const registration = await navigator.serviceWorker.register("/sw.js");
   await navigator.serviceWorker.ready;
-  const vapid = await fetchVapidPublicKey(httpUrl);
-  const subscription =
-    (await registration.pushManager.getSubscription()) ??
-    (await registration.pushManager.subscribe({
+  const existing = await registration.pushManager.getSubscription();
+  const subscription = existing ?? (await (async () => {
+    const vapid = await fetchVapidPublicKey(httpUrl);
+    return registration.pushManager.subscribe({
       userVisibleOnly: true,
       applicationServerKey: urlBase64ToUint8Array(vapid),
-    }));
+    });
+  })());
   await postSubscription(httpUrl, subscription, prefs);
   return "enabled";
 }
@@ -56,6 +57,9 @@ export async function updatePushPrefs(httpUrl: BridgeHttpUrl, prefs: Notificatio
 }
 
 export async function disablePush(httpUrl: BridgeHttpUrl) {
+  if (!pushRuntimeSupported()) {
+    return;
+  }
   const registration = await navigator.serviceWorker.getRegistration();
   const subscription = await registration?.pushManager.getSubscription();
   if (!subscription) {

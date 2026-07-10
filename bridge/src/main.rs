@@ -6,6 +6,7 @@ mod push_subscriptions;
 mod session;
 mod store_util;
 mod web_bridge;
+mod web_push;
 mod workspace;
 
 fn main() -> std::io::Result<()> {

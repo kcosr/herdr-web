@@ -10,11 +10,14 @@ path = "src/main.rs"
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
 bytes = "1"
 futures-util = "0.3"
 herdr-compat = { path = "../vendor/herdr-compat" }
 libc = "0.2"
+p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 png = "0.17"
+rand_core = { version = "0.6", features = ["getrandom"] }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -24,6 +27,7 @@ tower-http = { version = "0.6", features = ["fs", "compression-gzip"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 unicode-width = "0.2"
+web-push = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

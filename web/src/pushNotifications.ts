@@ -32,14 +32,19 @@ export async function enablePush(
   }
   const registration = await navigator.serviceWorker.register("/sw.js");
   await navigator.serviceWorker.ready;
-  const existing = await registration.pushManager.getSubscription();
-  const subscription = existing ?? (await (async () => {
-    const vapid = await fetchVapidPublicKey(httpUrl);
-    return registration.pushManager.subscribe({
+  const vapid = await fetchVapidPublicKey(httpUrl);
+  const desiredKey = urlBase64ToUint8Array(vapid);
+  let existing = await registration.pushManager.getSubscription();
+  if (existing && !applicationServerKeyMatches(existing.options.applicationServerKey, desiredKey)) {
+    await existing.unsubscribe();
+    existing = null;
+  }
+  const subscription =
+    existing ??
+    (await registration.pushManager.subscribe({
       userVisibleOnly: true,
-      applicationServerKey: urlBase64ToUint8Array(vapid),
-    });
-  })());
+      applicationServerKey: desiredKey,
+    }));
   await postSubscription(httpUrl, subscription, prefs);
   return "enabled";
 }
@@ -103,6 +108,25 @@ async function fetchVapidPublicKey(httpUrl: BridgeHttpUrl): Promise<string> {
     throw new Error("vapid public key missing");
   }
   return value.public_key;
+}
+
+function applicationServerKeyMatches(
+  existingKey: ArrayBuffer | null,
+  desiredKey: Uint8Array<ArrayBuffer>,
+): boolean {
+  if (!existingKey) {
+    return false;
+  }
+  const existingBytes = new Uint8Array(existingKey);
+  if (existingBytes.length !== desiredKey.length) {
+    return false;
+  }
+  for (let i = 0; i < existingBytes.length; i += 1) {
+    if (existingBytes[i] !== desiredKey[i]) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function urlBase64ToUint8Array(base64Url: string): Uint8Array<ArrayBuffer> {

@@ -810,7 +810,7 @@ export function App() {
   const [noteDeleteTarget, setNoteDeleteTarget] = useState<ScopedNoteEntry | null>(null);
   const [deletingNote, setDeletingNote] = useState(false);
   const [backendSettingsOpen, setBackendSettingsOpen] = useState(false);
-  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
+  const [pushSubscribedBridgeId, setPushSubscribedBridgeId] = useState<string | null>(null);
   const [terminalFontSizePx, setTerminalFontSizePx] = useState(
     initialPrefs.terminalFontSizePx,
   );
@@ -1417,7 +1417,7 @@ export function App() {
       return;
     }
     const result = await enablePush(selectedRuntime.httpUrl, notificationPrefs);
-    setNotificationsEnabled(result === "enabled");
+    setPushSubscribedBridgeId(result === "enabled" ? selectedRuntime.id : null);
   }, [notificationPrefs, selectedRuntime]);
 
   const handleDisableNotifications = useCallback(async () => {
@@ -1425,15 +1425,19 @@ export function App() {
       return;
     }
     await disablePush(selectedRuntime.httpUrl);
-    setNotificationsEnabled(false);
+    setPushSubscribedBridgeId(null);
   }, [selectedRuntime]);
 
   useEffect(() => {
-    if (!displayPrefsLoaded || !notificationsEnabled || !selectedRuntime) {
+    if (
+      !displayPrefsLoaded ||
+      !selectedRuntime ||
+      selectedRuntime.id !== pushSubscribedBridgeId
+    ) {
       return;
     }
     void updatePushPrefs(selectedRuntime.httpUrl, notificationPrefs);
-  }, [displayPrefsLoaded, notificationPrefs, notificationsEnabled, selectedRuntime]);
+  }, [displayPrefsLoaded, notificationPrefs, pushSubscribedBridgeId, selectedRuntime]);
 
   useEffect(() => {
     if (!mobileKeyboardHideRefit || !showMobileKeyboardHideRefit) {
@@ -3713,7 +3717,9 @@ export function App() {
           notesEnabled={notesEnabled}
           onNotesEnabled={setNotesEnabled}
           notificationsSupported={supportsPush(selectedRuntime?.capabilities) && pushRuntimeSupported()}
-          notificationsEnabled={notificationsEnabled}
+          notificationsEnabled={
+            pushSubscribedBridgeId !== null && pushSubscribedBridgeId === selectedRuntime?.id
+          }
           onEnableNotifications={() => void handleEnableNotifications()}
           onDisableNotifications={() => void handleDisableNotifications()}
           notificationPrefs={notificationPrefs}

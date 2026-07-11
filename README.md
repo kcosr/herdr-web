@@ -24,6 +24,7 @@ navigation, multi-client viewing, mobile input controls, and synchronized pane s
 - Image and file uploads from the terminal toolbar, paste, or drag/drop, with uploaded paths inserted
   into the active terminal input.
 - Context menus for renaming, closing, splitting, and moving panes between tabs or spaces.
+- Push notifications (self-hosted VAPID Web Push to an installed PWA) — see `docs/push-notifications-design.md`.
 
 ## Screenshots
 

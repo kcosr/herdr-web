@@ -42,6 +42,10 @@ an FCM-based path are explicitly out of scope for this design; see Non-Goals.
 - In-app foreground toasts. This design delivers operating-system notifications through the push
   service and service worker, not in-page UI.
 
+## Limitations
+
+- **One active push bridge per installed PWA.** A Web Push subscription is scoped to the PWA's origin and pinned to a single application server (VAPID) key. Because the web app can connect to multiple bridges but the browser holds one push subscription per origin, push notifications are delivered for one bridge at a time — the bridge most recently enabled in Settings → Notifications. Enabling notifications on a different bridge re-subscribes with that bridge's VAPID key, replacing the previous subscription. Supporting simultaneous push from multiple bridges would require a separate origin (or a bridge-multiplexing push relay) and is out of scope.
+
 ## Bridge-Owned Push Subscriptions
 
 The bridge owns a single push-subscription store per bridge process, mirroring the existing

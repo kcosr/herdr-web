@@ -6,6 +6,11 @@
 
 ### Added
 
+- Push notifications: the bridge sends self-hosted VAPID Web Push to an installed PWA when an agent
+  enters `blocked` or `done`, with per-status and per-workspace/per-agent opt-in in Settings →
+  Notifications. Requires serving the bridge over a secure (HTTPS) origin; see
+  `docs/push-notifications-design.md`. (PR #TODO)
+
 ### Changed
 
 ### Fixed

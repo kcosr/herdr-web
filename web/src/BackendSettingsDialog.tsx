@@ -2,6 +2,7 @@ import { hexToHsva, hsvaToHex } from "@uiw/color-convert";
 import type { HsvaColor } from "@uiw/color-convert";
 import Wheel from "@uiw/react-color-wheel";
 import {
+  Bell,
   Plus,
   RotateCcw,
   Server,
@@ -24,6 +25,7 @@ import {
   useBridge,
 } from "./bridge";
 import type { BridgeBackendProfile } from "./bridge";
+import type { NotificationPrefs, NotificationStatus } from "./notificationPrefs";
 import {
   DEFAULT_CONTENT_INSET_BOTTOM_PX,
   DEFAULT_CONTENT_INSET_TOP_PX,
@@ -60,6 +62,12 @@ type Props = {
   showMobileTerminalSettings: boolean;
   notesEnabled: boolean;
   onNotesEnabled: (enabled: boolean) => void;
+  notificationsSupported: boolean;
+  notificationsEnabled: boolean;
+  onEnableNotifications: () => void;
+  onDisableNotifications: () => void;
+  notificationPrefs: NotificationPrefs;
+  onNotificationPrefsChange: (prefs: NotificationPrefs) => void;
   terminalFontSizePx: number;
   onTerminalFontSizePx: (value: number) => void;
   terminalInputTransport: TerminalInputTransport;
@@ -100,12 +108,18 @@ type FormState = {
 };
 
 type SelectionMode = "same-origin" | "new" | "backend";
-type SettingsArea = "bridge" | "features" | "display" | "terminal" | "mobile";
+type SettingsArea = "bridge" | "features" | "notifications" | "display" | "terminal" | "mobile";
 
 export function BackendSettingsDialog({
   showMobileTerminalSettings,
   notesEnabled,
   onNotesEnabled,
+  notificationsSupported,
+  notificationsEnabled,
+  onEnableNotifications,
+  onDisableNotifications,
+  notificationPrefs,
+  onNotificationPrefsChange,
   terminalFontSizePx,
   onTerminalFontSizePx,
   terminalInputTransport,
@@ -268,6 +282,7 @@ export function BackendSettingsDialog({
   const areas: { id: SettingsArea; label: string; icon: typeof Server }[] = [
     { id: "bridge", label: "Bridge", icon: Server },
     { id: "features", label: "Features", icon: StickyNote },
+    { id: "notifications", label: "Notifications", icon: Bell },
     { id: "display", label: "Display", icon: SlidersHorizontal },
     { id: "terminal", label: "Terminal", icon: SquareTerminal },
     ...(showMobileTerminalSettings
@@ -496,6 +511,63 @@ export function BackendSettingsDialog({
                     </button>
                   </div>
                 </div>
+              </div>
+            ) : null}
+
+            {activeArea === "notifications" ? (
+              <div className="settings-section settings-section-flat">
+                {!notificationsSupported ? (
+                  <p>This bridge does not support push notifications.</p>
+                ) : (
+                  <>
+                    <div className="settings-label">Push notifications</div>
+                    <label className="settings-row">
+                      <span>Enable push notifications</span>
+                      <input
+                        type="checkbox"
+                        checked={notificationsEnabled}
+                        onChange={(event) =>
+                          event.target.checked
+                            ? onEnableNotifications()
+                            : onDisableNotifications()
+                        }
+                      />
+                    </label>
+                    {(["blocked", "done", "working", "idle", "unknown"] as NotificationStatus[]).map(
+                      (status) => (
+                        <label className="settings-row" key={status}>
+                          <span>Notify on {status}</span>
+                          <input
+                            type="checkbox"
+                            checked={notificationPrefs.statuses[status]}
+                            onChange={(event) =>
+                              onNotificationPrefsChange({
+                                ...notificationPrefs,
+                                statuses: {
+                                  ...notificationPrefs.statuses,
+                                  [status]: event.target.checked,
+                                },
+                              })
+                            }
+                          />
+                        </label>
+                      ),
+                    )}
+                    <label className="settings-row">
+                      <span>Notify for all workspaces/agents by default</span>
+                      <input
+                        type="checkbox"
+                        checked={notificationPrefs.scopeDefault === "on"}
+                        onChange={(event) =>
+                          onNotificationPrefsChange({
+                            ...notificationPrefs,
+                            scopeDefault: event.target.checked ? "on" : "off",
+                          })
+                        }
+                      />
+                    </label>
+                  </>
+                )}
               </div>
             ) : null}
 

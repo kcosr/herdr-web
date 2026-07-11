@@ -59,6 +59,18 @@ import type { AgentPinsListResponse } from "./agentPins";
 import { applyActivityMessage, parseActivityEventData, replayActivityMessages } from "./activity";
 import type { ActivityLogEntry } from "./activity";
 import { BackendSettingsDialog } from "./BackendSettingsDialog";
+import {
+  DEFAULT_NOTIFICATION_PREFS,
+  parseNotificationPrefs,
+} from "./notificationPrefs";
+import type { NotificationPrefs } from "./notificationPrefs";
+import {
+  disablePush,
+  enablePush,
+  pushRuntimeSupported,
+  supportsPush,
+  updatePushPrefs,
+} from "./pushNotifications";
 import { useBridge } from "./bridge";
 import type { BridgeId, BridgeRuntime } from "./bridge";
 import { createCommands, createdPaneId } from "./commands";
@@ -324,6 +336,7 @@ type DisplayPrefs = {
   notesListPaneCollapsed: boolean;
   notesEnabled: boolean;
   notesPanelOpen: boolean;
+  notificationPrefs: NotificationPrefs;
   sidebarOpen: boolean;
   selectedBridgeId: BridgeId | null;
   selectedPane: ScopedPaneRef | null;
@@ -379,6 +392,7 @@ function readDisplayPrefs(): DisplayPrefs {
     notesListPaneCollapsed: true,
     notesEnabled: true,
     notesPanelOpen: false,
+    notificationPrefs: DEFAULT_NOTIFICATION_PREFS,
     sidebarOpen: true,
     selectedBridgeId: null,
     selectedPane: null,
@@ -491,6 +505,7 @@ function parseDisplayPrefsValue(
       typeof parsed.notesEnabled === "boolean" ? parsed.notesEnabled : fallback.notesEnabled,
     notesPanelOpen:
       typeof parsed.notesPanelOpen === "boolean" ? parsed.notesPanelOpen : fallback.notesPanelOpen,
+    notificationPrefs: parseNotificationPrefs(parsed.notificationPrefs),
     sidebarOpen,
     selectedBridgeId:
       typeof parsed.selectedBridgeId === "string" ? parsed.selectedBridgeId : fallback.selectedBridgeId,
@@ -782,6 +797,9 @@ export function App() {
     notesEnabledRef.current = enabled;
     setNotesEnabledState(enabled);
   }, []);
+  const [notificationPrefs, setNotificationPrefs] = useState<NotificationPrefs>(
+    initialPrefs.notificationPrefs,
+  );
   const [resizingSidebar, setResizingSidebar] = useState(false);
   const [resizingNotesPanel, setResizingNotesPanel] = useState(false);
   const [resizingNotesListPane, setResizingNotesListPane] = useState(false);
@@ -792,6 +810,7 @@ export function App() {
   const [noteDeleteTarget, setNoteDeleteTarget] = useState<ScopedNoteEntry | null>(null);
   const [deletingNote, setDeletingNote] = useState(false);
   const [backendSettingsOpen, setBackendSettingsOpen] = useState(false);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [terminalFontSizePx, setTerminalFontSizePx] = useState(
     initialPrefs.terminalFontSizePx,
   );
@@ -877,6 +896,7 @@ export function App() {
       setNotesListPaneCollapsed(prefs.notesListPaneCollapsed);
       setNotesEnabled(prefs.notesEnabled);
       setNotesPanelOpen(prefs.notesEnabled && prefs.notesPanelOpen);
+      setNotificationPrefs(prefs.notificationPrefs);
       setSidebarOpen(prefs.sidebarOpen);
       setSelectedBridgeId(prefs.selectedBridgeId);
       setSelectedPaneRefState(prefs.selectedPane);
@@ -1334,6 +1354,7 @@ export function App() {
       notesListPaneCollapsed,
       notesEnabled,
       notesPanelOpen,
+      notificationPrefs,
       sidebarOpen,
       selectedBridgeId,
       selectedPane: selectedPaneRefState,
@@ -1369,6 +1390,7 @@ export function App() {
     notesListPaneCollapsed,
     notesEnabled,
     notesPanelOpen,
+    notificationPrefs,
     sidebarOpen,
     selectedBridgeId,
     selectedPaneRefState,
@@ -1389,6 +1411,29 @@ export function App() {
     mobileCommandExpandingInput,
     mobileCommandEnterNewline,
   ]);
+
+  const handleEnableNotifications = useCallback(async () => {
+    if (!selectedRuntime) {
+      return;
+    }
+    const result = await enablePush(selectedRuntime.httpUrl, notificationPrefs);
+    setNotificationsEnabled(result === "enabled");
+  }, [notificationPrefs, selectedRuntime]);
+
+  const handleDisableNotifications = useCallback(async () => {
+    if (!selectedRuntime) {
+      return;
+    }
+    await disablePush(selectedRuntime.httpUrl);
+    setNotificationsEnabled(false);
+  }, [selectedRuntime]);
+
+  useEffect(() => {
+    if (!displayPrefsLoaded || !notificationsEnabled || !selectedRuntime) {
+      return;
+    }
+    void updatePushPrefs(selectedRuntime.httpUrl, notificationPrefs);
+  }, [displayPrefsLoaded, notificationPrefs, notificationsEnabled, selectedRuntime]);
 
   useEffect(() => {
     if (!mobileKeyboardHideRefit || !showMobileKeyboardHideRefit) {
@@ -3667,6 +3712,12 @@ export function App() {
           showMobileTerminalSettings={isTouchInput}
           notesEnabled={notesEnabled}
           onNotesEnabled={setNotesEnabled}
+          notificationsSupported={supportsPush(selectedRuntime?.capabilities) && pushRuntimeSupported()}
+          notificationsEnabled={notificationsEnabled}
+          onEnableNotifications={() => void handleEnableNotifications()}
+          onDisableNotifications={() => void handleDisableNotifications()}
+          notificationPrefs={notificationPrefs}
+          onNotificationPrefsChange={setNotificationPrefs}
           terminalFontSizePx={terminalFontSizePx}
           onTerminalFontSizePx={setTerminalFontSizePx}
           terminalInputTransport={terminalInputTransport}

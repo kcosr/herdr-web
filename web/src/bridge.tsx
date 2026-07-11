@@ -1087,6 +1087,8 @@ export function parseCapabilities(value: unknown): BridgeCapabilities {
       isRecord(value.launcher_presets) && value.launcher_presets.version === 1
         ? { version: 1 }
         : undefined,
+    push:
+      isRecord(value.push) && value.push.version === 1 ? { version: 1 } : undefined,
   };
 }
 

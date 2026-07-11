@@ -323,6 +323,7 @@ describe("capabilities", () => {
         agent_activity: { version: 1 },
         agent_pins: { version: 1 },
         notes: { version: 1 },
+        push: { version: 1 },
       }),
     ).toEqual({
       commands: ["pane.split"],
@@ -332,6 +333,7 @@ describe("capabilities", () => {
       agent_activity: { version: 1 },
       agent_pins: { version: 1 },
       notes: { version: 1 },
+      push: { version: 1 },
     });
   });
 

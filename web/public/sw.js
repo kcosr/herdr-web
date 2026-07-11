@@ -2,7 +2,7 @@ self.addEventListener("push", (event) => {
   let data = {};
   try {
     data = event.data ? event.data.json() : {};
-  } catch (err) {
+  } catch {
     data = { title: "herdr", body: "New activity" };
   }
   const title = data.title || "herdr";

@@ -6,11 +6,11 @@ import {
 } from "./notificationPrefs";
 
 describe("notificationPrefs", () => {
-  it("defaults to blocked+done enabled, opt-in scope", () => {
+  it("defaults to blocked+done enabled, all-agents scope", () => {
     expect(DEFAULT_NOTIFICATION_PREFS.statuses.blocked).toBe(true);
     expect(DEFAULT_NOTIFICATION_PREFS.statuses.done).toBe(true);
     expect(DEFAULT_NOTIFICATION_PREFS.statuses.working).toBe(false);
-    expect(DEFAULT_NOTIFICATION_PREFS.scopeDefault).toBe("off");
+    expect(DEFAULT_NOTIFICATION_PREFS.scopeDefault).toBe("on");
   });
 
   it("returns defaults for garbage input", () => {
@@ -34,7 +34,7 @@ describe("notificationPrefs", () => {
 
   it("emits a snake_case wire body", () => {
     const wire = notificationPrefsWire(DEFAULT_NOTIFICATION_PREFS);
-    expect(wire.scope_default).toBe("off");
+    expect(wire.scope_default).toBe("on");
     expect(wire.statuses.blocked).toBe(true);
   });
 });

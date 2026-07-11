@@ -27,7 +27,9 @@ an FCM-based path are explicitly out of scope for this design; see Non-Goals.
 - Add no cloud dependency: no Firebase, no service account, outbound-only network access.
 - Keep the browser endpoint surface narrow, request-gated, and parameter-validated.
 - Treat subscription endpoints and keys as secrets with private file permissions.
-- Make the feature feature-detectable and off by default until the user opts in.
+- Make the feature feature-detectable and off by default until the user explicitly enables it
+  (grants permission and subscribes); once enabled, default to notifying for all agents, narrowed
+  by per-status and per-workspace/per-agent preferences.
 
 ## Non-Goals
 
@@ -45,6 +47,14 @@ an FCM-based path are explicitly out of scope for this design; see Non-Goals.
 ## Limitations
 
 - **One active push bridge per installed PWA.** A Web Push subscription is scoped to the PWA's origin and pinned to a single application server (VAPID) key. Because the web app can connect to multiple bridges but the browser holds one push subscription per origin, push notifications are delivered for one bridge at a time — the bridge most recently enabled in Settings → Notifications. Enabling notifications on a different bridge re-subscribes with that bridge's VAPID key, replacing the previous subscription. Supporting simultaneous push from multiple bridges would require a separate origin (or a bridge-multiplexing push relay) and is out of scope.
+- **No per-workspace/per-agent opt-in UI yet.** The store and filter already support per-workspace
+  and per-agent entries, but `BackendSettingsDialog` only exposes per-status toggles and the global
+  `scope_default` switch today. Narrowing notifications to specific workspaces or agents requires a
+  follow-up UI.
+- **`notificationclick` does not deep-link.** The service worker's `notificationclick` handler
+  focuses or opens the installed PWA but does not yet navigate to the reported `workspace_id` /
+  `pane_id`. Landing on the correct workspace or pane after tapping a notification requires a
+  follow-up.
 
 ## Bridge-Owned Push Subscriptions
 
@@ -65,7 +75,7 @@ hold the standard W3C `PushSubscription` shape plus the user's notification pref
       "keys": { "p256dh": "BFa...", "auth": "k9x..." },
       "prefs": {
         "statuses": { "blocked": true, "done": true, "idle": false, "working": false, "unknown": false },
-        "scope_default": "off",
+        "scope_default": "on",
         "workspaces": { "w1": true },
         "agents": { "w1:p1": true }
       },
@@ -126,7 +136,7 @@ POST /api/push/subscribe
   "keys": { "p256dh": "BFa...", "auth": "k9x..." },
   "prefs": {
     "statuses": { "blocked": true, "done": true },
-    "scope_default": "off",
+    "scope_default": "on",
     "workspaces": { "w1": true },
     "agents": {}
   }
@@ -182,9 +192,15 @@ in the bridge. Preferences are therefore stored twice: the client keeps them for
 and the bridge keeps an authoritative copy per subscription so it can decide whether to send.
 
 Preferences have three parts: a per-status enable map (defaults: `blocked` and `done` enabled, all
-others disabled), a `scope_default` of `off` (opt-in), and per-workspace and per-agent opt-in maps.
-An agent entry overrides its workspace entry. The bridge sends a notification only when the
-transition's target status is enabled and the transition's workspace or agent is opted in.
+others disabled), a `scope_default`, and per-workspace and per-agent opt-in maps. The feature is off
+until the user explicitly enables notifications (grants permission and subscribes); once enabled,
+the client sends `scope_default: "on"` by default, so notifications fire for all agents unless
+narrowed by per-status toggles or by explicit per-workspace/per-agent entries (an agent entry
+overrides its workspace entry). The server itself treats a missing `scope_default` as `off` —
+a fail-closed default for any subscription that somehow omits it — but the client always sends an
+explicit value, so this fallback should not be reachable in normal operation. The bridge sends a
+notification only when the transition's target status is enabled and the transition's workspace or
+agent is opted in (or, absent a more specific entry, when `scope_default` is `on`).
 
 The frontend shares the same rule through a pure `notificationTrigger.ts` helper. That helper is the
 single unit-tested definition of the decision and is reused for any optional in-page path, but the
@@ -201,8 +217,8 @@ The service worker handles two events:
 
 - `push` — parse the JSON payload and call `showNotification` with the title, body, and a tag derived
   from `pane_id` so repeated notifications for the same pane collapse.
-- `notificationclick` — focus an existing PWA window if one is open, otherwise open the app at the
-  reported workspace.
+- `notificationclick` — focus an existing PWA window if one is open, otherwise open the app at its
+  root. It does not yet deep-link to the reported workspace or pane (see Limitations).
 
 Notification preferences persist through the existing display-preferences path, which dual-writes to
 `@capacitor/preferences` (native) and `localStorage` (browser). A new `notifications` section in
@@ -221,7 +237,8 @@ feature-detect before registering a service worker or requesting notification pe
 }
 ```
 
-When the capability is absent, the client hides the notifications settings section and does not
+When the capability is absent, the client shows a "This bridge does not support push
+notifications" state in the notifications settings section rather than hiding it, and does not
 register the service worker.
 
 ## Subscription Lifecycle

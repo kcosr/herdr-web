@@ -91,7 +91,7 @@ pub struct PushSubscriptionInput {
 /// Holds a stored push subscription, including secret push keys (`auth`,
 /// `p256dh`) and the push service `endpoint`. This data must never be
 /// serialized into a browser-facing HTTP response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PushSubscriptionRecord {
     pub endpoint: String,
     pub keys: PushKeys,
@@ -100,6 +100,18 @@ pub struct PushSubscriptionRecord {
     session_key: String,
     #[serde(default)]
     created_at: String,
+}
+
+impl std::fmt::Debug for PushSubscriptionRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PushSubscriptionRecord")
+            .field("endpoint", &"<redacted>")
+            .field("keys", &self.keys)
+            .field("prefs", &self.prefs)
+            .field("session_key", &self.session_key)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -12,7 +12,7 @@ const STATUS_KEYS: NotificationStatus[] = ["idle", "working", "blocked", "done",
 
 export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
   statuses: { idle: false, working: false, blocked: true, done: true, unknown: false },
-  scopeDefault: "off",
+  scopeDefault: "on",
   workspaces: {},
   agents: {},
 };

@@ -21,10 +21,19 @@ impl From<std::io::Error> for WebPushError {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct VapidKeyMaterial {
     pub public_key_b64url: String,
     pub private_key_pem: String,
+}
+
+impl std::fmt::Debug for VapidKeyMaterial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VapidKeyMaterial")
+            .field("public_key_b64url", &self.public_key_b64url)
+            .field("private_key_pem", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

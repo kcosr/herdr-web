@@ -2896,10 +2896,19 @@ async fn send_push_to_all<F>(state: &BridgeState, payload: &PushPayload, matches
 where
     F: Fn(&crate::push_subscriptions::PushSubscriptionRecord) -> bool,
 {
-    let subs = match state.push_subscriptions.list_for_send() {
-        Ok(subs) => subs,
-        Err(err) => {
+    // `list_for_send`/`prune` do blocking `flock` + file I/O; isolate them on
+    // the blocking pool (mirroring `run_store_task`) so a slow store lock
+    // never stalls an async runtime worker. The actual `web_push.send(...)`
+    // call below is non-blocking network I/O and stays on the async path.
+    let push_subscriptions = state.push_subscriptions.clone();
+    let subs = match tokio::task::spawn_blocking(move || push_subscriptions.list_for_send()).await {
+        Ok(Ok(subs)) => subs,
+        Ok(Err(err)) => {
             tracing::warn!(error = %err, "failed to list push subscriptions");
+            return 0;
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "push subscription list task panicked");
             return 0;
         }
     };
@@ -2908,10 +2917,16 @@ where
         match state.web_push.send(&record, payload).await {
             WebPushSendResult::Ok => sent += 1,
             WebPushSendResult::Gone => {
-                let _ = state.push_subscriptions.prune(&record.endpoint);
+                let push_subscriptions = state.push_subscriptions.clone();
+                let endpoint = record.endpoint.clone();
+                if let Err(err) =
+                    tokio::task::spawn_blocking(move || push_subscriptions.prune(&endpoint)).await
+                {
+                    tracing::warn!(error = %err, "push subscription prune task panicked");
+                }
             }
             WebPushSendResult::Failed(msg) => {
-                tracing::warn!(endpoint = %record.endpoint, error = %msg, "push send failed");
+                tracing::warn!(error = %msg, "push send failed");
             }
         }
     }

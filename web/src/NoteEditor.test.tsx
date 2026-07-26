@@ -135,6 +135,9 @@ describe("BridgeConnectionController sockets", () => {
 
 describe("QuickPaneNoteDialog", () => {
   it("selects the title and submits an optional body", async () => {
+    const opener = document.createElement("button");
+    document.body.appendChild(opener);
+    opener.focus();
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -155,6 +158,7 @@ describe("QuickPaneNoteDialog", () => {
     if (!titleInput) {
       throw new Error("missing quick note title input");
     }
+    expect(container.querySelector<HTMLButtonElement>(".overlay-scrim")?.tabIndex).toBe(-1);
     expect(document.activeElement).toBe(titleInput);
     expect(titleInput.selectionStart).toBe(0);
     expect(titleInput.selectionEnd).toBe(titleInput.value.length);
@@ -181,6 +185,11 @@ describe("QuickPaneNoteDialog", () => {
       buttonByText(container, "Create").click();
     });
     expect(onSubmit).toHaveBeenLastCalledWith("Untitled note", "Follow-up details");
+
+    await act(async () => {
+      root.render(null);
+    });
+    expect(document.activeElement).toBe(opener);
   });
 });
 

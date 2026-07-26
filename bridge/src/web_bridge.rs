@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fmt;
 use std::io::{self, ErrorKind, Write};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
@@ -61,6 +61,7 @@ const DEFAULT_PORT: u16 = 8787;
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 const DEFAULT_STATIC_DIR: &str = "web/dist";
+const CAPACITOR_IOS_ORIGIN: &str = "capacitor://localhost";
 const MIN_HERDR_VERSION: (u64, u64, u64) = (0, 7, 5);
 const MIN_HERDR_VERSION_LABEL: &str = "0.7.5";
 const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
@@ -910,8 +911,9 @@ Defaults to the active Herdr daemon sockets and 127.0.0.1:8787.\n\
 Use --session NAME to target a named Herdr session and ignore HERDR_SOCKET_PATH.\n\
 Use --host 0.0.0.0 to listen on non-loopback interfaces.\n\
 Use --allow-origin http://localhost for bundled Android app access.\n\
+Use --allow-origin capacitor://localhost for bundled iOS app access.\n\
 Use --allow-host HOSTNAME to accept that exact DNS hostname in Host headers.\n\
-Use --allow-connect-origin ORIGIN to let the served web app connect to another bridge origin.\n\
+Use --allow-connect-origin HTTP_OR_HTTPS_ORIGIN to let the served web app connect to another bridge origin.\n\
 Use --launcher-presets PATH or HERDR_WEB_LAUNCHER_PRESETS to load custom launch presets.\n\
 Uploads default to HERDR_WEB_UPLOAD_DIR, XDG_DATA_HOME/herdr-web/uploads, or ~/.local/share/herdr-web/uploads."
 }
@@ -1348,50 +1350,124 @@ fn request_origin_allowed(headers: &HeaderMap, policy: &RequestPolicy) -> bool {
     let Ok(origin) = origin.to_str() else {
         return false;
     };
-    let Some(origin_authority) = origin_authority(origin) else {
-        return false;
-    };
     let Some(host) = headers.get(HOST).and_then(|host| host.to_str().ok()) else {
         return false;
     };
 
+    // Full configured origins are checked before the HTTP same-origin rules so
+    // the one supported custom WebView origin only works when explicitly
+    // allow-listed. The independent Host gate still applies to every request.
+    if policy
+        .allowed_origins
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(origin))
+    {
+        return true;
+    }
+
+    let Some(origin_authority) = origin_authority(origin) else {
+        return false;
+    };
     same_authority(origin_authority, host)
         || (is_loopback_authority(origin_authority) && is_loopback_authority(host))
-        || policy
-            .allowed_origins
-            .iter()
-            .any(|allowed| allowed.eq_ignore_ascii_case(origin))
 }
 
 fn origin_authority(origin: &str) -> Option<&str> {
+    if origin
+        .bytes()
+        .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+    {
+        return None;
+    }
     let rest = origin
         .strip_prefix("http://")
         .or_else(|| origin.strip_prefix("https://"))?;
-    if rest.is_empty() || rest.contains('/') {
-        return None;
+    if valid_http_origin_authority(rest) {
+        Some(rest)
+    } else {
+        None
     }
-    Some(rest)
+}
+
+fn valid_http_origin_authority(authority: &str) -> bool {
+    if authority.is_empty() {
+        return false;
+    }
+
+    if let Some(rest) = authority.strip_prefix('[') {
+        let Some(close) = rest.find(']') else {
+            return false;
+        };
+        let host = &rest[..close];
+        let suffix = &rest[close + 1..];
+        return host.parse::<Ipv6Addr>().is_ok() && valid_optional_origin_port(suffix);
+    }
+
+    if authority.contains('[') || authority.contains(']') {
+        return false;
+    }
+
+    let host = match authority.rsplit_once(':') {
+        Some((host, port)) => {
+            if host.contains(':') || !valid_origin_port(port) {
+                return false;
+            }
+            host
+        }
+        None => authority,
+    };
+    if host.is_empty() {
+        return false;
+    }
+
+    host.parse::<Ipv4Addr>().is_ok() || is_valid_dns_hostname(host)
+}
+
+fn valid_optional_origin_port(suffix: &str) -> bool {
+    if suffix.is_empty() {
+        return true;
+    }
+    suffix.strip_prefix(':').is_some_and(valid_origin_port)
+}
+
+fn valid_origin_port(port: &str) -> bool {
+    !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok()
 }
 
 fn normalize_allowed_origin(origin: &str) -> Result<String, String> {
-    let origin = origin.trim().to_ascii_lowercase();
+    let origin = origin.to_ascii_lowercase();
+    if origin == CAPACITOR_IOS_ORIGIN {
+        return Ok(origin);
+    }
+    normalize_http_origin(&origin).map_err(|_| {
+        format!(
+            "allowed origin must be an http or https origin without a path, or exactly {CAPACITOR_IOS_ORIGIN}"
+        )
+    })
+}
+
+fn normalize_http_origin(origin: &str) -> Result<String, String> {
+    let origin = origin.to_ascii_lowercase();
     let Some(authority) = origin_authority(&origin) else {
-        return Err("allowed origin must be an http or https origin without a path".into());
+        return Err("origin must be an http or https origin without a path".into());
     };
     if authority.is_empty() {
-        return Err("allowed origin must include a host".into());
+        return Err("origin must include a host".into());
     }
     Ok(origin)
 }
 
 fn connect_sources_for_origin(origin: &str) -> Result<Vec<String>, String> {
-    let origin = normalize_allowed_origin(origin)?;
+    let origin = normalize_http_origin(origin)
+        .map_err(|_| "connect origin must be an http or https origin without a path".to_string())?;
     let websocket_origin = if let Some(authority) = origin.strip_prefix("http://") {
         format!("ws://{authority}")
     } else if let Some(authority) = origin.strip_prefix("https://") {
         format!("wss://{authority}")
     } else {
-        unreachable!("normalize_allowed_origin only accepts http and https origins")
+        unreachable!("normalize_http_origin only accepts http and https origins")
     };
     Ok(vec![origin, websocket_origin])
 }
@@ -5338,6 +5414,40 @@ mod tests {
     }
 
     #[test]
+    fn request_gate_allows_only_explicitly_configured_capacitor_ios_origin() {
+        let policy = RequestPolicy {
+            bind_host: "0.0.0.0".to_string(),
+            bind_port: 4000,
+            allowed_hosts: Vec::new(),
+            allowed_origins: vec![normalize_allowed_origin(CAPACITOR_IOS_ORIGIN).unwrap()],
+            allowed_connect_sources: Vec::new(),
+        };
+        assert!(request_allowed(
+            &origin_headers("192.168.1.10:4000", Some(CAPACITOR_IOS_ORIGIN)),
+            &policy
+        ));
+
+        // Explicit origin permission never bypasses the independent Host gate.
+        assert!(!request_allowed(
+            &origin_headers("evil.example:4000", Some(CAPACITOR_IOS_ORIGIN)),
+            &policy
+        ));
+
+        for origin in [
+            "capacitor://localhost/",
+            "capacitor://localhost:4000",
+            "capacitor://localhost.evil",
+            "capacitor://127.0.0.1",
+            "ionic://localhost",
+        ] {
+            assert!(
+                !request_allowed(&origin_headers("192.168.1.10:4000", Some(origin)), &policy),
+                "near-miss custom origin was allowed: {origin}"
+            );
+        }
+    }
+
+    #[test]
     fn origin_gate_allows_same_origin_and_loopback_dev_proxy() {
         let policy = test_policy("127.0.0.1", 8787);
         assert!(request_origin_allowed(
@@ -5405,7 +5515,10 @@ mod tests {
             bind_host: "0.0.0.0".to_string(),
             bind_port: 4000,
             allowed_hosts: Vec::new(),
-            allowed_origins: vec!["http://localhost".to_string()],
+            allowed_origins: vec![
+                "http://localhost".to_string(),
+                CAPACITOR_IOS_ORIGIN.to_string(),
+            ],
             allowed_connect_sources: Vec::new(),
         };
         assert_eq!(
@@ -5416,11 +5529,89 @@ mod tests {
             .and_then(|value| value.to_str().ok().map(str::to_string)),
             Some("http://localhost".to_string())
         );
+        assert_eq!(
+            cors_origin_header(
+                &origin_headers("192.168.1.10:4000", Some(CAPACITOR_IOS_ORIGIN)),
+                &policy
+            )
+            .and_then(|value| value.to_str().ok().map(str::to_string)),
+            Some(CAPACITOR_IOS_ORIGIN.to_string())
+        );
         assert!(cors_origin_header(
             &origin_headers("192.168.1.10:4000", Some("https://example.com")),
             &policy
         )
         .is_none());
+        assert!(cors_origin_header(
+            &origin_headers("192.168.1.10:4000", Some("capacitor://localhost.evil")),
+            &policy
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn allow_origin_parser_accepts_only_the_capacitor_ios_custom_origin() {
+        assert_eq!(
+            normalize_allowed_origin(CAPACITOR_IOS_ORIGIN).unwrap(),
+            CAPACITOR_IOS_ORIGIN
+        );
+        assert_eq!(
+            normalize_allowed_origin("HTTP://HERDR.EXAMPLE:8787").unwrap(),
+            "http://herdr.example:8787"
+        );
+        assert_eq!(
+            normalize_allowed_origin("http://127.0.0.1").unwrap(),
+            "http://127.0.0.1"
+        );
+        assert_eq!(
+            normalize_allowed_origin("https://[2001:DB8::1]:9443").unwrap(),
+            "https://[2001:db8::1]:9443"
+        );
+        let args = vec![
+            "--allow-origin".to_string(),
+            CAPACITOR_IOS_ORIGIN.to_string(),
+        ];
+        let options = parse_options(&args).unwrap().unwrap();
+        assert_eq!(
+            options.allowed_origins,
+            vec![CAPACITOR_IOS_ORIGIN.to_string()]
+        );
+        assert!(options.allowed_connect_sources.is_empty());
+
+        for origin in [
+            "capacitor://localhost/",
+            "capacitor://localhost:8787",
+            "capacitor://localhost.evil",
+            "capacitor://127.0.0.1",
+            "ionic://localhost",
+            "http://localhost/",
+            "http://user@localhost",
+            "http://localhost?query",
+            "http://localhost#fragment",
+            "http://local host",
+            " http://localhost",
+            "http://localhost ",
+            "http://localhost; connect-src *",
+            "http://",
+            "http://:8787",
+            "http://localhost:",
+            "http://localhost:not-a-port",
+            "http://localhost:65536",
+            "http://[::1",
+            "http://::1",
+            "http://[127.0.0.1]",
+        ] {
+            assert!(
+                normalize_allowed_origin(origin).is_err(),
+                "invalid allowed origin parsed: {origin:?}"
+            );
+        }
+
+        let connect_args = vec![
+            "--allow-connect-origin".to_string(),
+            CAPACITOR_IOS_ORIGIN.to_string(),
+        ];
+        assert!(parse_options(&connect_args).is_err());
     }
 
     #[test]
@@ -5454,8 +5645,48 @@ mod tests {
                 "wss://srv.example:9443".to_string()
             ]
         );
-        assert!(connect_sources_for_origin("ws://srv:8787").is_err());
-        assert!(connect_sources_for_origin("http://srv:8787/path").is_err());
+        assert_eq!(
+            connect_sources_for_origin("http://127.0.0.1").unwrap(),
+            vec!["http://127.0.0.1".to_string(), "ws://127.0.0.1".to_string()]
+        );
+        assert_eq!(
+            connect_sources_for_origin("https://[2001:DB8::1]:9443").unwrap(),
+            vec![
+                "https://[2001:db8::1]:9443".to_string(),
+                "wss://[2001:db8::1]:9443".to_string()
+            ]
+        );
+
+        for origin in [
+            "ws://srv:8787",
+            "http://srv:8787/path",
+            CAPACITOR_IOS_ORIGIN,
+            "http://user@srv:8787",
+            "http://srv:8787?query",
+            "http://srv:8787#fragment",
+            "http://srv:8787; worker-src *",
+            "http://srv:8787' 'unsafe-inline'",
+            "http://srv:8787\nworker-src *",
+            "\thttp://srv:8787",
+            "http://",
+            "http://:8787",
+            "http://srv:",
+            "http://srv:not-a-port",
+            "http://srv:65536",
+            "http://[::1",
+            "http://::1",
+        ] {
+            assert!(
+                connect_sources_for_origin(origin).is_err(),
+                "invalid connect origin parsed: {origin:?}"
+            );
+        }
+
+        let injection_args = vec![
+            "--allow-connect-origin".to_string(),
+            "http://srv:8787; worker-src *".to_string(),
+        ];
+        assert!(parse_options(&injection_args).is_err());
     }
 
     #[test]
@@ -6174,6 +6405,8 @@ mod tests {
         assert!(help.contains("herdr-web-bridge"));
         assert!(help.contains("Usage: herdr-web-bridge"));
         assert!(help.contains("--session NAME"));
+        assert!(help.contains("allow-origin capacitor://localhost"));
+        assert!(help.contains("allow-connect-origin HTTP_OR_HTTPS_ORIGIN"));
         assert!(!help.contains("herdr web-bridge"));
     }
 

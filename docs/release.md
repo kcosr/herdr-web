@@ -9,6 +9,7 @@ They do not publish npm packages, and the package versions are not release versi
 - Node.js 22 or newer.
 - Rust stable.
 - JDK 21 and Android SDK when validating the Android shell.
+- macOS with Xcode 26 and an installed iOS Simulator runtime when validating the iOS shell.
 - GitHub CLI authenticated as a user that can create releases.
 - A local Herdr `v0.7.5` or newer session reporting terminal protocol `17` for browser and packaged
   bridge smoke testing.
@@ -32,6 +33,16 @@ npm run check
 
 Do not cut a release without bridge test/build coverage.
 
+For a release that changes the iOS shell or shared web app, also run on macOS:
+
+```bash
+npm run ios:check
+npm run ios:build:debug
+```
+
+These commands validate an unsigned Simulator build only. They do not satisfy the signed iOS
+distribution gate.
+
 ## Package Artifacts
 
 Build or provide platform artifacts immediately after cutting the GitHub release, using the final
@@ -39,7 +50,8 @@ release commit or tag created by the release script. If you made any pre-release
 the release script stamped `CHANGELOG.md`, rebuild them from the released `main`/tag with the final
 `vX.Y.Z` value before upload. Use the documented packaging commands and any supplemental local build
 instructions for the release operator's environment. Do not commit generated tarballs, APKs, or
-build-service outputs.
+build-service outputs. Do not commit or upload iOS Derived Data, Simulator apps, archives, result
+bundles, IPA files, or dSYM bundles.
 
 Linux desktop tarball:
 
@@ -93,6 +105,16 @@ For a public release, build a signed release APK instead and use the non-debug r
 ```text
 dist-packages/herdr-web-vX.Y.Z-android.apk
 ```
+
+The iOS validation build is written by default to:
+
+```text
+ios/DerivedData/Build/Products/Debug-iphonesimulator/App.app
+```
+
+That unsigned Simulator bundle is not a release artifact. Keep it local and follow
+[docs/ios.md](ios.md) for the signing, device-validation, and App Store work that must be completed
+before defining iOS release packaging.
 
 ## Browser Smoke
 
@@ -158,11 +180,33 @@ Before distributing Android builds, follow [docs/android.md](android.md): run
 bridge started using `--allow-origin http://localhost`. Revisit the Android backup policy before
 adding any pairing token or other secret storage.
 
+## iOS Validation
+
+Before merging or releasing iOS-shell or shared mobile-web changes:
+
+1. On macOS with Xcode 26, run `npm run ios:check` and `npm run ios:build:debug`.
+2. Confirm the output is
+   `ios/DerivedData/Build/Products/Debug-iphonesimulator/App.app`.
+3. Run the iPhone and iPad Simulator smoke checklist in [docs/ios.md](ios.md), using a bridge that
+   explicitly allows `capacitor://localhost`.
+4. Confirm the app starts disconnected, saved bridges persist, unreachable bridges leave Settings
+   usable, and terminal/input/upload flows work.
+5. Confirm the built app contains `PrivacyInfo.xcprivacy` and the intended local-network and ATS
+   values.
+
+Record this as Simulator verification only. Signing/team setup, archive/export or App Store
+delivery, physical-device VoiceOver testing, and local-network permission allow/deny/retry checks
+remain operator gates. Do not call the iOS build distribution-ready until those checks are complete.
+
 ## Upload Artifacts
 
 Upload release artifacts manually with GitHub CLI after `node scripts/release.mjs vX.Y.Z` creates
 the release. Upload only artifacts built from the final release commit or tag, and inspect each
 artifact before upload.
+
+Do not upload an iOS Simulator `App.app`, Derived Data directory, `.xcarchive`, or unsigned `.ipa`.
+The recommended GitHub release assets remain the documented desktop tarballs/checksums and Android
+artifact until signed iOS packaging is defined.
 
 Upload the Linux tarball from the Linux build host:
 
@@ -203,4 +247,5 @@ If every artifact has been copied to one machine, the same paths can be uploaded
 
 - Confirm the GitHub release exists and points at the expected tag.
 - Confirm release assets and checksum files are attached.
+- Confirm no iOS Simulator or other unsigned iOS validation output was attached.
 - Confirm `CHANGELOG.md` on `main` has a fresh empty `## [Unreleased]` section.

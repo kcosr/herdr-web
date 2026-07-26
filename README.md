@@ -39,16 +39,26 @@ navigation, multi-client viewing, mobile input controls, and synchronized pane s
 |:--:|
 | <img src="docs/images/android-phone-bridge-settings.png" alt="herdr-web Android bridge settings and color picker" width="260"> |
 
+| iPad |
+|:--:|
+| <img src="docs/images/ios-tablet.png" alt="herdr-web iPad terminal workspace" width="640"> |
+
+| iPhone switcher | iPhone terminal |
+|:--:|:--:|
+| <img src="docs/images/ios-phone-switcher.png" alt="herdr-web iPhone switcher" width="260"> | <img src="docs/images/ios-phone-terminal.png" alt="herdr-web iPhone terminal" width="260"> |
+
 ## Layout
 
 ```text
 web/                 React + Vite browser app
 android/             Capacitor Android shell for the bundled web app
+ios/                 Capacitor iOS shell for the bundled web app
 bridge/              Slim Rust HTTP/WebSocket bridge executable
 vendor/herdr-compat/ minimal Herdr protocol/API compatibility crate
 scripts/run-bridge.sh
 scripts/check-vendor.sh
 docs/android.md
+docs/ios.md
 docs/vendoring.md
 docs/packaging.md
 docs/release.md
@@ -78,6 +88,9 @@ For source development:
 - A running Herdr `v0.7.5` or newer daemon/session that reports terminal protocol `17`
 
 Android development also needs a JDK and Android SDK. See [docs/android.md](docs/android.md).
+
+iOS development requires macOS with Xcode 26 and targets iOS 15 or newer. See
+[docs/ios.md](docs/ios.md).
 
 ## Quick Start From Release
 
@@ -110,6 +123,10 @@ bin/herdr-web --host 0.0.0.0 --port 4000 --allow-origin http://localhost
 See [docs/packaging.md](docs/packaging.md) for release artifact layout and
 [docs/android.md](docs/android.md) for Android behavior.
 
+The iOS shell is currently source/simulator-verified, but no signed iOS package is a recommended
+GitHub release asset yet. See [docs/ios.md](docs/ios.md) for local build instructions and the
+remaining distribution gate.
+
 ## Development Setup
 
 ```bash
@@ -136,16 +153,21 @@ npm run bridge:test
 npm run bridge:build
 npm run android:sync
 npm run android:build:debug
+npm run ios:sync
+npm run ios:check
+npm run ios:build:debug
+npm run ios:open
 scripts/package-tarball.sh vX.Y.Z linux-x86_64
 scripts/package-tarball.sh vX.Y.Z macos-arm64
 scripts/package-tarball.sh vX.Y.Z macos-x86_64
 scripts/check-vendor.sh
 ```
 
-The Android app is a Capacitor shell around the bundled `web/dist` assets. It starts disconnected
-and uses the Bridge area in Settings to save one or more Herdr bridge URLs. Browser-served builds
-still default to the same-origin bridge that served the page. See [docs/android.md](docs/android.md)
-for HTTP/cleartext behavior, Android SDK setup, and APK verification notes.
+The Android and iOS apps are Capacitor shells around the same bundled `web/dist` assets. Both start
+disconnected and use the Bridge area in Settings to save one or more Herdr bridge URLs.
+Browser-served builds still default to the same-origin bridge that served the page. See
+[docs/android.md](docs/android.md) for Android HTTP/cleartext behavior and
+[docs/ios.md](docs/ios.md) for iOS local-network policy, simulator builds, and distribution status.
 
 ## Settings
 
@@ -272,7 +294,9 @@ http://127.0.0.1:8787
 For LAN/mobile testing:
 
 ```bash
-HOST=0.0.0.0 PORT=4000 scripts/run-bridge.sh --allow-origin http://localhost
+HOST=0.0.0.0 PORT=4000 scripts/run-bridge.sh \
+  --allow-origin http://localhost \
+  --allow-origin capacitor://localhost
 ```
 
 Uploads are saved under `HERDR_WEB_UPLOAD_DIR`, `XDG_DATA_HOME/herdr-web/uploads`, or
@@ -283,8 +307,9 @@ UPLOAD_DIR=/tmp/herdr-web-uploads scripts/run-bridge.sh
 ```
 
 The bridge rejects cross-origin browser requests unless the request origin is explicitly allowed.
-The bundled Android app uses `http://localhost`, so LAN Android testing needs
-`--allow-origin http://localhost`. Bind to `0.0.0.0` only on trusted networks.
+The bundled Android app uses `http://localhost`, while the bundled iOS app uses exactly
+`capacitor://localhost`. LAN testing needs the matching `--allow-origin` value. Origin permission
+never bypasses the bridge's separate `Host` policy. Bind to `0.0.0.0` only on trusted networks.
 
 For browser-served multi-bridge setups, configure both directions explicitly:
 
@@ -348,10 +373,10 @@ currently last resize wins. The header's refit button forces the current browser
 fit/resize frame.
 
 API and WebSocket requests must use an allowed bridge `Host` header. Browser-originated requests
-must also be same-origin with the bridge, an explicitly allowed origin such as Android's
-`http://localhost`, or a loopback development proxy origin allowed for Vite. Hostname backends must
-be explicitly allowed with `--allow-host HOSTNAME`. This is a DNS-rebinding/CSRF guard, not user
-authentication.
+must also be same-origin with the bridge, an explicitly allowed bundled-app origin such as
+Android's `http://localhost` or iOS's `capacitor://localhost`, or a loopback development proxy
+origin allowed for Vite. Hostname backends must be explicitly allowed with
+`--allow-host HOSTNAME`. This is a DNS-rebinding/CSRF guard, not user authentication.
 
 Bridge-owned notes are part of that same request policy. Any allowed bridge client can read and
 mutate saved note content, including clients connecting over a trusted LAN when the bridge is bound
@@ -391,7 +416,8 @@ that exact protocol rather than attempting to decode older or newer private wire
 
 See [docs/vendoring.md](docs/vendoring.md) for the refresh process.
 
-See [docs/packaging.md](docs/packaging.md) for desktop tarball and APK artifact packaging.
+See [docs/packaging.md](docs/packaging.md) for desktop tarball, APK, and iOS validation-output
+packaging status.
 
 See [docs/release.md](docs/release.md) for release validation, browser smoke testing, tagging,
 GitHub release creation, and manual artifact upload.

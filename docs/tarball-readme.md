@@ -19,23 +19,34 @@ Open:
 http://127.0.0.1:8787
 ```
 
-## LAN And Android
+## LAN And Bundled Mobile Apps
 
 To expose the bridge to another device on a trusted local network:
+
+For Android:
 
 ```bash
 bin/herdr-web --host 0.0.0.0 --port 4000 --allow-origin http://localhost
 ```
 
-If Android connects through a DNS hostname, allow that hostname too:
+For a source-built iOS app or iOS Simulator:
 
 ```bash
 bin/herdr-web --host 0.0.0.0 --port 4000 \
-  --allow-origin http://localhost \
+  --allow-origin capacitor://localhost
+```
+
+Use only the origin or origins for the clients being tested. If a bundled app connects through a
+DNS hostname, allow that exact hostname in the bridge's independent Host policy too:
+
+```bash
+bin/herdr-web --host 0.0.0.0 --port 4000 \
+  --allow-origin capacitor://localhost \
   --allow-host herdr-host.local
 ```
 
-Then add the bridge URL in the Android app's Bridge area of Settings.
+Then add the bridge URL in the app's Bridge area of Settings. An allowed origin never bypasses the
+Host policy, and neither setting is client authentication.
 
 For browser-served multi-bridge use, configure both directions. The bridge being called must allow
 the web page origin with `--allow-origin`; the bridge serving the web page must allow that page to

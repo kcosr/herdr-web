@@ -53,6 +53,7 @@ import type {
   MobileTouchSelectionEndpointTimeoutMs,
 } from "./mobileTerminalPrefs";
 import type { NavigationSyncMode } from "./navigationPrefs";
+import { trapFocusWithin } from "./overlays";
 import { TERMINAL_INPUT_BATCH_DELAY_OPTIONS_MS } from "./terminalInputTransport";
 import type { TerminalInputTransport } from "./terminalInputTransport";
 import { TERMINAL_OUTPUT_COALESCE_OPTIONS_MS } from "./terminalOutputCoalescing";
@@ -154,7 +155,9 @@ export function BackendSettingsDialog({
 }: Props) {
   const bridge = useBridge();
   const titleId = useId();
+  const dialogRef = useRef<HTMLFormElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
   const [form, setForm] = useState<FormState>(() => newBackendForm(bridge.store.backends));
   const [selectionMode, setSelectionMode] = useState<SelectionMode>(
     initialSelectionMode(bridge.lastSelectedBridgeId, bridge.sameOriginAvailable),
@@ -171,7 +174,18 @@ export function BackendSettingsDialog({
   const sameOriginEnabled = bridge.store.enabledBridgeIds.includes(SAME_ORIGIN_BRIDGE_ID);
 
   useEffect(() => {
+    const activeElement = document.activeElement;
+    if (activeElement instanceof HTMLElement && activeElement !== document.body) {
+      returnFocusRef.current = activeElement;
+    }
     closeButtonRef.current?.focus();
+
+    return () => {
+      const returnTarget = returnFocusRef.current;
+      if (returnTarget?.isConnected) {
+        returnTarget.focus();
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -294,8 +308,15 @@ export function BackendSettingsDialog({
 
   return (
     <div className="overlay-root">
-      <button className="overlay-scrim" type="button" aria-label="Close settings" onClick={onClose} />
+      <button
+        className="overlay-scrim"
+        type="button"
+        tabIndex={-1}
+        aria-label="Close settings"
+        onClick={onClose}
+      />
       <form
+        ref={dialogRef}
         className="modal backend-modal"
         role="dialog"
         aria-modal="true"
@@ -305,7 +326,9 @@ export function BackendSettingsDialog({
           if (event.key === "Escape") {
             event.preventDefault();
             onClose();
+            return;
           }
+          trapFocusWithin(event);
         }}
         onSubmit={(event) => {
           event.preventDefault();

@@ -10,7 +10,14 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent, RefObject } from "react";
+import type {
+  ChangeEvent,
+  ClipboardEvent,
+  CSSProperties,
+  DragEvent,
+  KeyboardEvent,
+  RefObject,
+} from "react";
 import { autosizeMobileCommandTextarea } from "./mobileCommandTextarea";
 import { ConfirmDialog } from "./overlays";
 import { addNativeResumeHandler } from "./native";
@@ -87,6 +94,10 @@ type Props = {
   refitToken?: number;
   /** Incrementing token from the parent that requests focus on the preferred terminal input. */
   focusToken?: number;
+  /** Pane-specific accessible name for the terminal and its screen mirror. */
+  accessibilityLabel?: string;
+  /** Whether this is the currently selected terminal in a split. */
+  selected?: boolean;
 };
 
 type UploadCandidate = {
@@ -126,6 +137,18 @@ type TerminalRendererReady = {
 };
 const MAX_UPLOAD_FILES = 8;
 const DEBUG_TERMINAL_RECONNECT = false;
+const TERMINAL_ACCESSIBLE_SCREEN_STYLE: CSSProperties = {
+  position: "absolute",
+  width: 1,
+  height: 1,
+  padding: 0,
+  margin: -1,
+  overflow: "hidden",
+  clip: "rect(0 0 0 0)",
+  clipPath: "inset(50%)",
+  whiteSpace: "pre-wrap",
+  border: 0,
+};
 
 export function TerminalView({
   pane,
@@ -148,6 +171,8 @@ export function TerminalView({
   terminalOutputCoalesceMs = DEFAULT_TERMINAL_OUTPUT_COALESCE_MS,
   refitToken = 0,
   focusToken = 0,
+  accessibilityLabel = "Terminal",
+  selected = false,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLElement | null>(null);
@@ -176,6 +201,7 @@ export function TerminalView({
   const [connectionState, setConnectionState] = useState<TerminalConnectionState>("idle");
   const [closeReason, setCloseReason] = useState<string | null>(null);
   const [rendererReady, setRendererReady] = useState<TerminalRendererReady | null>(null);
+  const [accessibleScreen, setAccessibleScreen] = useState("");
   const [hasAttachedForTerminal, setHasAttachedForTerminal] = useState(false);
   const [showConnectionOverlay, setShowConnectionOverlay] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
@@ -463,6 +489,7 @@ export function TerminalView({
     overlayTerminalIdRef.current = terminalId;
     rendererReadyRef.current = null;
     setRendererReady(null);
+    setAccessibleScreen("");
     setHasAttachedForTerminal(false);
     setShowConnectionOverlay(false);
     setCloseReason(null);
@@ -475,6 +502,7 @@ export function TerminalView({
 
     host.replaceChildren();
     let disposed = false;
+    let disposeAccessibleScreen: (() => void) | null = null;
     let disposeInput: (() => void) | null = null;
     let disposeScroll: (() => void) | null = null;
     let resizeObserver: ResizeObserver | null = null;
@@ -522,6 +550,15 @@ export function TerminalView({
           mobileTouchSelectionEndpointTimeoutMsRef.current,
         );
 
+        disposeAccessibleScreen = renderer.onAccessibleScreen((text) => {
+          if (
+            !disposed &&
+            rendererRef.current === renderer &&
+            rendererGenerationRef.current === generation
+          ) {
+            setAccessibleScreen(text);
+          }
+        });
         disposeInput = renderer.onInput((data) => {
           sendTerminalInputData(data);
         });
@@ -571,6 +608,7 @@ export function TerminalView({
       flushBatchedTerminalInput();
       batchedInputRef.current = emptyTerminalInputBatch();
       clearQueuedTerminalInput();
+      disposeAccessibleScreen?.();
       disposeInput?.();
       disposeScroll?.();
       resizeObserver?.disconnect();
@@ -1268,7 +1306,8 @@ export function TerminalView({
     <section
       ref={stageRef}
       className="terminal-stage"
-      aria-label="Selected pane terminal"
+      aria-label={accessibilityLabel}
+      aria-current={selected ? "true" : undefined}
       onDragOverCapture={(event) => {
         if (event.dataTransfer.types.includes("Files")) {
           event.preventDefault();
@@ -1278,6 +1317,17 @@ export function TerminalView({
       onPasteCapture={handlePaste}
     >
       <div ref={hostRef} className="terminal-host" />
+      {pane ? (
+        <div
+          role="region"
+          tabIndex={-1}
+          aria-label={`${accessibilityLabel} screen contents`}
+          aria-live="off"
+          style={TERMINAL_ACCESSIBLE_SCREEN_STYLE}
+        >
+          {accessibleScreen}
+        </div>
+      ) : null}
       <input
         ref={fileInputRef}
         className="terminal-file-input"
@@ -1524,12 +1574,19 @@ export function MobileTerminalControls({
   };
 
   return (
-    <div ref={rootRef} className="terminal-mobile-controls" data-expanded={expanded ? "true" : "false"}>
+    <div
+      ref={rootRef}
+      className="terminal-mobile-controls"
+      data-expanded={expanded ? "true" : "false"}
+      role="group"
+      aria-label="Terminal input controls"
+    >
       <div className="term-key-strip" aria-label="Common terminal keys">
         <div className="term-key-group" aria-label="Terminal quick keys">
           <button
             className="term-key"
             type="button"
+            aria-label={ESC_KEY.accessibilityLabel}
             disabled={disabled}
             onClick={() => sendKey(ESC_KEY)}
           >
@@ -1538,6 +1595,8 @@ export function MobileTerminalControls({
           <button
             className="term-key"
             type="button"
+            aria-label="Control modifier"
+            aria-pressed={ctrlLatch}
             data-active={ctrlLatch ? "true" : "false"}
             disabled={disabled}
             onClick={() => setCtrlLatch((active) => !active)}
@@ -1549,6 +1608,7 @@ export function MobileTerminalControls({
               key={key.label}
               className="term-key"
               type="button"
+              aria-label={key.accessibilityLabel ?? key.label}
               disabled={disabled}
               onClick={() => sendKey(key)}
             >
@@ -1560,6 +1620,7 @@ export function MobileTerminalControls({
               key={key.label}
               className="term-key"
               type="button"
+              aria-label={key.accessibilityLabel ?? key.label}
               disabled={disabled}
               onClick={() => sendKey(key)}
             >
@@ -1614,6 +1675,7 @@ export function MobileTerminalControls({
               key={key.label}
               className="term-key"
               type="button"
+              aria-label={key.accessibilityLabel ?? key.label}
               disabled={disabled}
               onClick={() => sendKey(key)}
             >
@@ -1640,6 +1702,7 @@ export function MobileTerminalControls({
             className="term-native-input mono"
             rows={1}
             data-expanding="true"
+            aria-label="Terminal command input"
             autoCapitalize="none"
             autoComplete="off"
             autoCorrect="off"
@@ -1656,6 +1719,7 @@ export function MobileTerminalControls({
             ref={setCommandInputNode}
             className="term-native-input mono"
             type="text"
+            aria-label="Terminal command input"
             autoCapitalize="none"
             autoComplete="off"
             autoCorrect="off"
@@ -1694,15 +1758,20 @@ type TerminalKey = {
   label: string;
   data: string;
   ctrlData?: string;
+  accessibilityLabel?: string;
 };
 
 const COMMON_KEYS: TerminalKey[] = [
   { label: "Tab", data: "\t" },
-  { label: "C-c", data: "\x03" },
-  { label: "C-d", data: "\x04" },
+  { label: "C-c", data: "\x03", accessibilityLabel: "Control C" },
+  { label: "C-d", data: "\x04", accessibilityLabel: "Control D" },
 ];
 
-const ESC_KEY: TerminalKey = { label: "Esc", data: "\x1B" };
+const ESC_KEY: TerminalKey = {
+  label: "Esc",
+  data: "\x1B",
+  accessibilityLabel: "Escape",
+};
 
 const QUICK_NUMBER_KEYS: TerminalKey[] = [
   { label: "1", data: "1" },
@@ -1711,31 +1780,31 @@ const QUICK_NUMBER_KEYS: TerminalKey[] = [
 ];
 
 const SPECIAL_KEYS: TerminalKey[] = [
-  { label: "←", data: "\x1B[D" },
-  { label: "↑", data: "\x1B[A" },
-  { label: "↓", data: "\x1B[B" },
-  { label: "→", data: "\x1B[C" },
-  { label: "S-Tab", data: "\x1B[Z" },
-  { label: "Bksp", data: "\x7F" },
-  { label: "Del", data: "\x1B[3~" },
+  { label: "←", data: "\x1B[D", accessibilityLabel: "Left arrow" },
+  { label: "↑", data: "\x1B[A", accessibilityLabel: "Up arrow" },
+  { label: "↓", data: "\x1B[B", accessibilityLabel: "Down arrow" },
+  { label: "→", data: "\x1B[C", accessibilityLabel: "Right arrow" },
+  { label: "S-Tab", data: "\x1B[Z", accessibilityLabel: "Shift Tab" },
+  { label: "Bksp", data: "\x7F", accessibilityLabel: "Backspace" },
+  { label: "Del", data: "\x1B[3~", accessibilityLabel: "Delete" },
   { label: "Home", data: "\x1B[H" },
   { label: "End", data: "\x1B[F" },
-  { label: "PgUp", data: "\x1B[5~" },
-  { label: "PgDn", data: "\x1B[6~" },
-  { label: "C-l", data: "\x0C" },
-  { label: "C-r", data: "\x12" },
-  { label: "C-z", data: "\x1A" },
-  { label: "/", data: "/", ctrlData: "\x1F" },
-  { label: "|", data: "|" },
-  { label: "~", data: "~" },
-  { label: "-", data: "-" },
-  { label: "_", data: "_" },
-  { label: "'", data: "'" },
-  { label: "\"", data: "\"" },
-  { label: "[", data: "[" },
-  { label: "]", data: "]" },
-  { label: "{", data: "{" },
-  { label: "}", data: "}" },
+  { label: "PgUp", data: "\x1B[5~", accessibilityLabel: "Page Up" },
+  { label: "PgDn", data: "\x1B[6~", accessibilityLabel: "Page Down" },
+  { label: "C-l", data: "\x0C", accessibilityLabel: "Control L" },
+  { label: "C-r", data: "\x12", accessibilityLabel: "Control R" },
+  { label: "C-z", data: "\x1A", accessibilityLabel: "Control Z" },
+  { label: "/", data: "/", ctrlData: "\x1F", accessibilityLabel: "Slash" },
+  { label: "|", data: "|", accessibilityLabel: "Vertical bar" },
+  { label: "~", data: "~", accessibilityLabel: "Tilde" },
+  { label: "-", data: "-", accessibilityLabel: "Hyphen" },
+  { label: "_", data: "_", accessibilityLabel: "Underscore" },
+  { label: "'", data: "'", accessibilityLabel: "Apostrophe" },
+  { label: "\"", data: "\"", accessibilityLabel: "Double quote" },
+  { label: "[", data: "[", accessibilityLabel: "Left bracket" },
+  { label: "]", data: "]", accessibilityLabel: "Right bracket" },
+  { label: "{", data: "{", accessibilityLabel: "Left brace" },
+  { label: "}", data: "}", accessibilityLabel: "Right brace" },
 ];
 
 function terminalSocketUrl(

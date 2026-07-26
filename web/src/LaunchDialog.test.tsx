@@ -187,6 +187,35 @@ describe("LaunchDialog", () => {
     expect(titleInput(container).value).toBe("reviewer");
     expect(launchOptions(container)[0].getAttribute("aria-checked")).toBe("true");
   });
+
+  it("labels the modal, traps focus, and restores the opener", async () => {
+    const opener = document.createElement("button");
+    document.body.appendChild(opener);
+    opener.focus();
+    const { container, root } = await renderDialog([
+      preset("builtin:shell", "Shell", null, true),
+    ]);
+    const dialog = requiredElement<HTMLFormElement>(container, '[role="dialog"]');
+    const modalTitle = requiredElement<HTMLElement>(container, ".modal-title");
+    const scrim = requiredElement<HTMLButtonElement>(container, ".overlay-scrim");
+    const option = launchOptions(container)[0];
+    const create = createButton(container);
+
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+    expect(dialog.getAttribute("aria-labelledby")).toBe(modalTitle.id);
+    expect(scrim.tabIndex).toBe(-1);
+
+    create.focus();
+    await press(create, "Tab");
+    expect(document.activeElement).toBe(option);
+    await press(option, "Tab", { shiftKey: true });
+    expect(document.activeElement).toBe(create);
+
+    await act(async () => {
+      root.render(null);
+    });
+    expect(document.activeElement).toBe(opener);
+  });
 });
 
 async function renderDialog(options: LauncherPresetOption[], emptyMessage?: string) {
@@ -231,6 +260,30 @@ function createButton(container: HTMLElement) {
     throw new Error("missing create button");
   }
   return button;
+}
+
+function requiredElement<T extends Element = HTMLElement>(
+  container: ParentNode,
+  selector: string,
+) {
+  const element = container.querySelector<T>(selector);
+  if (!element) {
+    throw new Error(`missing element: ${selector}`);
+  }
+  return element;
+}
+
+async function press(target: HTMLElement, key: string, init: KeyboardEventInit = {}) {
+  const event = new KeyboardEvent("keydown", {
+    ...init,
+    key,
+    bubbles: true,
+    cancelable: true,
+  });
+  await act(async () => {
+    target.dispatchEvent(event);
+  });
+  return event;
 }
 
 function preset(

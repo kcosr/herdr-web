@@ -1,6 +1,8 @@
 # Packaging
 
-`herdr-web` ships as separate desktop bridge/web tarballs and an Android APK.
+`herdr-web` ships as separate desktop bridge/web tarballs and an Android APK. The repository also
+contains an iOS shell, but its current unsigned Simulator app is a validation output rather than a
+release artifact.
 
 The desktop tarball does not include Herdr itself. Users still need a running Herdr `v0.7.5` or
 newer session or daemon that reports terminal protocol `17`; the bundled bridge connects to the
@@ -19,6 +21,10 @@ herdr-web-vX.Y.Z-macos-x86_64.tar.gz
 herdr-web-vX.Y.Z-macos-x86_64.tar.gz.sha256
 herdr-web-vX.Y.Z-android-debug.apk
 ```
+
+Do not add an iOS Simulator `App.app`, Derived Data directory, `.xcarchive`, or unsigned `.ipa` to
+the recommended assets. iOS release packaging remains gated on an Apple Developer team, signing,
+physical-device validation, and a documented archive/export or App Store workflow.
 
 Build or provide Linux artifacts from a Linux environment, macOS ARM artifacts from an Apple Silicon
 Mac environment, and macOS x86_64 artifacts from an Intel Mac environment. Build the APK from a
@@ -125,6 +131,28 @@ For a public release, build a signed release APK instead and use the non-debug r
 dist-packages/herdr-web-vX.Y.Z-android.apk
 ```
 
+## Build iOS Simulator App
+
+The iOS shell currently produces an unsigned Simulator app for development and release-candidate
+validation only. Use macOS with Xcode 26:
+
+```bash
+npm ci
+npm ci --prefix web
+npm run ios:check
+npm run ios:build:debug
+```
+
+The default output is:
+
+```text
+ios/DerivedData/Build/Products/Debug-iphonesimulator/App.app
+```
+
+Inspect the build locally and run the smoke checklist in [docs/ios.md](ios.md). Do not copy this
+bundle into `dist-packages/` or upload it to GitHub Releases. A Simulator app is unsigned, tied to
+the Simulator runtime, and is not an installable iPhone or iPad distribution package.
+
 ## User Quick Start From Tarball
 
 Start or attach Herdr `v0.7.5` or newer with terminal protocol `17` first:
@@ -147,21 +175,26 @@ Open:
 http://127.0.0.1:8787
 ```
 
-For LAN or Android testing:
-
-```bash
-bin/herdr-web --host 0.0.0.0 --port 4000 --allow-origin http://localhost
-```
-
-If using a DNS hostname from Android, also allow it:
+For LAN or bundled mobile-app testing:
 
 ```bash
 bin/herdr-web --host 0.0.0.0 --port 4000 \
   --allow-origin http://localhost \
+  --allow-origin capacitor://localhost
+```
+
+If using a DNS hostname from either bundled app, also allow it:
+
+```bash
+bin/herdr-web --host 0.0.0.0 --port 4000 \
+  --allow-origin http://localhost \
+  --allow-origin capacitor://localhost \
   --allow-host herdr-host.local
 ```
 
-Then install the Android APK and add the bridge URL in the Bridge area of Settings.
+Then install the Android APK, or run the source-built iOS shell, and add the bridge URL in the
+Bridge area of Settings. Android uses `http://localhost`; iOS uses exactly
+`capacitor://localhost`, so a bridge needs only the origin for the client being tested.
 
 For browser-served multi-bridge use, configure both the page-serving bridge and the bridge being
 called. If a page opened from `http://host-a:8787` should connect to `http://host-b:8787`, run host
@@ -184,7 +217,8 @@ WebSocket.
 ## Manual Release Upload
 
 The release script creates the GitHub release from changelog notes. Separately packaged tarballs and
-APKs are uploaded manually after the release exists.
+APKs are uploaded manually after the release exists. Keep iOS Simulator output local until signed
+iOS packaging is defined and verified.
 
 Upload the Linux tarball from the Linux build host:
 

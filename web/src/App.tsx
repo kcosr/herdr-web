@@ -131,7 +131,15 @@ import {
   writeNavigationSyncMode,
 } from "./navigationPrefs";
 import type { NavigationSyncMode } from "./navigationPrefs";
-import { ActionMenu, ConfirmDialog, RenameDialog, useLongPress } from "./overlays";
+import {
+  ActionMenu,
+  clampActionMenuPosition,
+  ConfirmDialog,
+  overlaySafeAreaInsets,
+  RenameDialog,
+  trapFocusWithin,
+  useLongPress,
+} from "./overlays";
 import type { MenuItem } from "./overlays";
 import { createSnapshotRefreshController } from "./refreshCoordinator";
 import { TerminalView } from "./TerminalView";
@@ -3893,6 +3901,10 @@ export function App() {
             terminalOutputCoalesceMs={terminalOutputCoalesceMs}
             refitToken={refitToken}
             focusToken={terminalFocusToken}
+            accessibilityLabel={
+              selectedPane ? `Selected pane terminal: ${paneTitle(selectedPane)}` : "Terminal"
+            }
+            selected={Boolean(selectedPane)}
           />
         ) : (
           <div className="terminal-stage" aria-hidden="true" />
@@ -5615,8 +5627,9 @@ function SplitGrid({
 }) {
   return (
     <div className="pane-grid" aria-label="Split panes">
-      {cells.map(({ pane, style }) => {
+      {cells.map(({ pane, style }, index) => {
         const selected = pane.pane_id === selectedPaneId;
+        const accessibilityLabel = `Pane ${index + 1} of ${cells.length} terminal: ${paneTitle(pane)}`;
         return (
           <div
             key={pane.pane_id}
@@ -5646,6 +5659,8 @@ function SplitGrid({
               terminalOutputCoalesceMs={terminalOutputCoalesceMs}
               refitToken={selected ? refitToken : 0}
               focusToken={selected ? focusToken : 0}
+              accessibilityLabel={accessibilityLabel}
+              selected={selected}
             />
           </div>
         );
@@ -7147,26 +7162,63 @@ function OptionsMenuShell({
   children: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
 
   useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) {
+    const updatePosition = () => {
+      const el = ref.current;
+      if (!el) {
+        return;
+      }
+      const rect = el.getBoundingClientRect();
+      setPos(
+        clampActionMenuPosition({
+          x: x - rect.width,
+          y,
+          width: rect.width,
+          height: rect.height,
+          viewportWidth: window.innerWidth,
+          viewportHeight: window.innerHeight,
+          insets: overlaySafeAreaInsets(el.parentElement ?? el),
+        }),
+      );
+    };
+
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.visualViewport?.addEventListener("resize", updatePosition);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.visualViewport?.removeEventListener("resize", updatePosition);
+    };
+  }, [x, y]);
+
+  useLayoutEffect(() => {
+    const activeElement = document.activeElement;
+    if (activeElement instanceof HTMLElement && activeElement !== document.body) {
+      returnFocusRef.current = activeElement;
+    }
+
+    return () => {
+      const returnTarget = returnFocusRef.current;
+      if (returnTarget?.isConnected) {
+        returnTarget.focus();
+      }
+    };
+  }, []);
+
+  // Focus only once the menu is positioned: while `pos` is null the menu is
+  // visibility:hidden, and focusing a hidden element is a silent no-op in
+  // real browsers (jsdom does not enforce this).
+  const autoFocusedRef = useRef(false);
+  useLayoutEffect(() => {
+    if (!pos || autoFocusedRef.current) {
       return;
     }
-    const rect = el.getBoundingClientRect();
-    const margin = 8;
-    let left = x - rect.width;
-    let top = y;
-    if (left < margin) {
-      left = margin;
-    }
-    if (top + rect.height > window.innerHeight - margin) {
-      top = window.innerHeight - margin - rect.height;
-    }
-    setPos({ left, top: Math.max(margin, top) });
-    el.focus();
-  }, [x, y]);
+    autoFocusedRef.current = true;
+    ref.current?.focus();
+  }, [pos]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -7190,6 +7242,7 @@ function OptionsMenuShell({
       <button
         className="overlay-scrim overlay-scrim-clear"
         type="button"
+        tabIndex={-1}
         aria-label="Close list options"
         onClick={onClose}
       />
@@ -7199,6 +7252,7 @@ function OptionsMenuShell({
         role="dialog"
         aria-label={ariaLabel}
         tabIndex={-1}
+        onKeyDown={trapFocusWithin}
         style={{
           left: pos?.left ?? x,
           top: pos?.top ?? y,
@@ -7228,10 +7282,22 @@ export function QuickPaneNoteDialog({
   const dialogRef = useRef<HTMLFormElement | null>(null);
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const bodyInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
+    const activeElement = document.activeElement;
+    if (activeElement instanceof HTMLElement && activeElement !== document.body) {
+      returnFocusRef.current = activeElement;
+    }
     titleInputRef.current?.focus();
     titleInputRef.current?.select();
+
+    return () => {
+      const returnTarget = returnFocusRef.current;
+      if (returnTarget?.isConnected) {
+        returnTarget.focus();
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -7263,39 +7329,12 @@ export function QuickPaneNoteDialog({
     }
     onSubmit(trimmedTitle, bodyExpanded ? body : "");
   };
-  const trapDialogFocus = (event: ReactKeyboardEvent<HTMLFormElement>) => {
-    if (event.key !== "Tab") {
-      return;
-    }
-    const dialog = dialogRef.current;
-    if (!dialog) {
-      return;
-    }
-    const focusable = Array.from(
-      dialog.querySelectorAll<HTMLElement>(
-        "button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex='-1'])",
-      ),
-    );
-    if (focusable.length === 0) {
-      return;
-    }
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    const active = document.activeElement;
-    if (event.shiftKey && active === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && active === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  };
-
   return (
     <div className="overlay-root">
       <button
         className="overlay-scrim"
         type="button"
+        tabIndex={-1}
         aria-label="Cancel"
         disabled={busy}
         onClick={cancel}
@@ -7313,7 +7352,7 @@ export function QuickPaneNoteDialog({
             cancel();
             return;
           }
-          trapDialogFocus(event);
+          trapFocusWithin(event);
         }}
       >
         <div className="modal-title">Add note</div>

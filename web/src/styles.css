@@ -57,6 +57,16 @@
   --notes-list-w: 240px;
   --content-inset-top: 0px;
   --content-inset-bottom: 0px;
+  --safe-area-inset-top: env(safe-area-inset-top, 0px);
+  --safe-area-inset-right: env(safe-area-inset-right, 0px);
+  --safe-area-inset-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-area-inset-left: env(safe-area-inset-left, 0px);
+  --effective-content-inset-top: calc(
+    var(--content-inset-top) + var(--safe-area-inset-top)
+  );
+  --effective-content-inset-bottom: calc(
+    var(--content-inset-bottom) + var(--safe-area-inset-bottom)
+  );
   --mobile-controls-scale: 1;
 
   --ui:
@@ -109,7 +119,8 @@ button {
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr) 0;
   width: 100%;
   height: 100%;
-  padding-block: var(--content-inset-top) var(--content-inset-bottom);
+  padding: var(--effective-content-inset-top) var(--safe-area-inset-right)
+    var(--effective-content-inset-bottom) var(--safe-area-inset-left);
   overflow: hidden;
   background: var(--app-bg);
   transition: grid-template-columns 200ms cubic-bezier(0.4, 0, 0.2, 1);
@@ -1827,8 +1838,8 @@ button {
   display: none;
   flex: 0 0 auto;
   gap: var(--mobile-control-gap);
-  padding: calc(6px * var(--mobile-controls-scale)) max(8px, env(safe-area-inset-right))
-    calc(7px * var(--mobile-controls-scale)) max(8px, env(safe-area-inset-left));
+  padding: calc(6px * var(--mobile-controls-scale)) 8px
+    calc(7px * var(--mobile-controls-scale));
   border-top: 1px solid var(--line);
   background: color-mix(in srgb, var(--mantle) 94%, black);
 }
@@ -2106,7 +2117,8 @@ button {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 16px;
+  padding: max(16px, var(--safe-area-inset-top)) max(16px, var(--safe-area-inset-right))
+    max(16px, var(--safe-area-inset-bottom)) max(16px, var(--safe-area-inset-left));
 }
 
 .overlay-scrim {
@@ -2127,7 +2139,10 @@ button {
   z-index: 1;
   display: flex;
   min-width: 192px;
-  max-width: calc(100vw - 16px);
+  max-width: calc(
+    100vw - max(16px, var(--safe-area-inset-left)) -
+      max(16px, var(--safe-area-inset-right))
+  );
   flex-direction: column;
   padding: 6px;
   border: 1px solid var(--surface0);
@@ -2176,7 +2191,13 @@ button {
   position: fixed;
   z-index: 1;
   display: flex;
-  width: min(232px, calc(100vw - 16px));
+  width: min(
+    232px,
+    calc(
+      100vw - max(16px, var(--safe-area-inset-left)) -
+        max(16px, var(--safe-area-inset-right))
+    )
+  );
   flex-direction: column;
   gap: 10px;
   padding: 10px;
@@ -2892,7 +2913,7 @@ button {
 
 .toast {
   position: fixed;
-  bottom: 22px;
+  bottom: calc(22px + var(--safe-area-inset-bottom));
   left: 50%;
   z-index: 200;
   max-width: min(440px, calc(100% - 32px));
@@ -2991,10 +3012,12 @@ button {
   .sidebar,
   .stage {
     position: fixed;
-    top: var(--content-inset-top);
-    left: 0;
-    width: 100vw;
-    height: calc(100dvh - var(--content-inset-top) - var(--content-inset-bottom));
+    top: var(--effective-content-inset-top);
+    left: var(--safe-area-inset-left);
+    width: calc(100vw - var(--safe-area-inset-left) - var(--safe-area-inset-right));
+    height: calc(
+      100dvh - var(--effective-content-inset-top) - var(--effective-content-inset-bottom)
+    );
     flex: none;
     transition: transform 260ms cubic-bezier(0.4, 0, 0.2, 1);
   }
@@ -3004,11 +3027,11 @@ button {
   }
 
   .stage {
-    transform: translateX(100vw);
+    transform: translateX(100%);
   }
 
   .app[data-detail="true"] .sidebar {
-    transform: translateX(-100vw);
+    transform: translateX(-100%);
   }
 
   .app[data-detail="true"] .stage {
@@ -3075,10 +3098,12 @@ button {
 .app[data-compact="true"] .sidebar,
 .app[data-compact="true"] .stage {
   position: fixed;
-  top: var(--content-inset-top);
-  left: 0;
-  width: 100vw;
-  height: calc(100dvh - var(--content-inset-top) - var(--content-inset-bottom));
+  top: var(--effective-content-inset-top);
+  left: var(--safe-area-inset-left);
+  width: calc(100vw - var(--safe-area-inset-left) - var(--safe-area-inset-right));
+  height: calc(
+    100dvh - var(--effective-content-inset-top) - var(--effective-content-inset-bottom)
+  );
   flex: none;
   transition: transform 260ms cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -3088,11 +3113,11 @@ button {
 }
 
 .app[data-compact="true"] .stage {
-  transform: translateX(100vw);
+  transform: translateX(100%);
 }
 
 .app[data-compact="true"][data-detail="true"] .sidebar {
-  transform: translateX(-100vw);
+  transform: translateX(-100%);
 }
 
 .app[data-compact="true"][data-detail="true"] .stage {
@@ -3111,11 +3136,13 @@ button {
 .notes-surface[data-compact="true"] {
   position: fixed;
   z-index: 5;
-  top: var(--content-inset-top);
-  left: 0;
+  top: var(--effective-content-inset-top);
+  left: var(--safe-area-inset-left);
   right: auto;
-  width: 100vw;
-  height: calc(100dvh - var(--content-inset-top) - var(--content-inset-bottom));
+  width: calc(100vw - var(--safe-area-inset-left) - var(--safe-area-inset-right));
+  height: calc(
+    100dvh - var(--effective-content-inset-top) - var(--effective-content-inset-bottom)
+  );
   border-left: 0;
   box-shadow: none;
 }

@@ -15,6 +15,10 @@
     "android:sync": "npm run build:web && cap sync android",
     "android:build:debug": "npm run android:sync && cd android && ./gradlew assembleDebug",
     "android:open": "cap open android",
+    "ios:sync": "npm run build:web && cap sync ios",
+    "ios:check": "npm run ios:sync && scripts/check-ios.sh",
+    "ios:build:debug": "npm run ios:sync && scripts/build-ios.sh",
+    "ios:open": "cap open ios",
     "package:tarball": "scripts/package-tarball.sh",
     "build": "npm run build:web && npm run bridge:build",
     "test": "npm run test:web && npm run bridge:test",
@@ -24,6 +28,7 @@
   "devDependencies": {
     "@capacitor/android": "^8.4.0",
     "@capacitor/cli": "^8.4.0",
+    "@capacitor/ios": "^8.4.2",
     "typescript": "^5.9.3"
   },
   "dependencies": {

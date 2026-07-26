@@ -6,6 +6,10 @@
 
 ### Added
 
+- Added an iOS 15+ Capacitor shell with the bundled web app, disconnected-first bridge setup,
+  Herdr-branded native assets, local-network purpose text, and a Preferences privacy manifest.
+- Added macOS/Xcode 26 iOS sync, project-audit, unsigned Simulator build, and Xcode-open workflows
+  with operator smoke and distribution-gate documentation.
 - Added persistent expand/collapse controls to grouped Agents, Tabs, and Spaces headers, including
   independent, visually nested host and workspace controls for Host + workspace grouping and a
   bulk expand/collapse control for the current Agents or Tabs list.
@@ -16,11 +20,23 @@
 
 ### Changed
 
+- Extended the bridge's explicit origin allow-list to accept exactly `capacitor://localhost` for
+  the iOS shell while preserving the independent bridge `Host` policy.
+- Improved shared mobile layouts for iOS safe areas and added accessible terminal screen text and
+  VoiceOver labels and keyboard behavior for terminal controls, dialogs, and action menus.
+- Hardened bridge origin parsing: `--allow-origin` and `--allow-connect-origin` values are no
+  longer whitespace-trimmed, and origins with control characters, invalid ports, or non-DNS
+  hostnames are now rejected at startup instead of silently accepted; `--allow-connect-origin`
+  additionally accepts only `http`/`https` origins.
 - Simplified Workspace grouping in the Agents and Tabs sidebars to show workspace-only group
   headers and move host context into each detail row. Host + workspace grouping keeps its nested
   host and workspace headers. [PR #47](https://github.com/kcosr/herdr-web/pull/47)
 
 ### Fixed
+
+- Prevented concealed terminal cells from appearing in the accessibility screen mirror.
+- Kept action menus and list options inside iOS safe areas after rotation, and contained/restored
+  keyboard focus across mobile menus and dialogs.
 
 ### Removed
 

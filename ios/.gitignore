@@ -1,0 +1,22 @@
+/App/build/
+/App/Pods/
+/App/output/
+/App/App/public/
+/DerivedData*/
+**/xcuserdata/
+*.xcuserstate
+
+# Cordova plugins for Capacitor
+/capacitor-cordova-ios-plugins/
+
+# Generated Config files
+/App/App/capacitor.config.json
+/App/App/config.xml
+
+# Swift Package Manager and Xcode build products
+/App/CapApp-SPM/.build/
+/App/CapApp-SPM/Packages/
+*.xcarchive
+*.xcresult
+*.ipa
+*.dSYM

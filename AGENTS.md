@@ -6,8 +6,11 @@ This is a lightweight internal onboarding note for agents working in this repo.
 
 - Read `README.md` for the product shape, bridge runtime model, and local run commands.
 - Read `web/README.md` before changing the React/Vite app.
+- Read `docs/ios.md` before changing the Capacitor iOS shell, network/privacy declarations, or
+  simulator workflow.
 - Read `docs/vendoring.md` before touching `vendor/herdr-compat/`.
-- Read `docs/packaging.md` before changing desktop tarball or Android release artifact behavior.
+- Read `docs/packaging.md` before changing desktop tarball, Android release artifact, or iOS
+  packaging behavior.
 - Read `docs/release.md` before changing release scripts or release checklists.
 - Web source lives in `web/src/`.
 - The repo-owned bridge implementation lives in `bridge/src/web_bridge.rs`.
@@ -21,8 +24,9 @@ This is a lightweight internal onboarding note for agents working in this repo.
   unless the user explicitly asks for core Herdr changes.
 - Prefer small pure helpers in `web/src/` for state, launch, and protocol formatting logic that can be unit tested.
 - Keep bridge command exposure narrow. Browser commands should stay allow-listed and parameter-validated in `web_bridge.rs`.
-- Keep generated outputs out of commits: `web/dist/`, `bridge/target/`, and
-  `vendor/herdr-compat/target/`, `dist-packages/`, and Android build outputs.
+- Keep generated outputs out of commits: `web/dist/`, `bridge/target/`,
+  `vendor/herdr-compat/target/`, `dist-packages/`, Android build outputs, and iOS synced web/config
+  assets, Derived Data, archives, result bundles, IPA files, and dSYM bundles.
 - The bridge is local-first and currently has no full browser authentication. Treat LAN binding and upload behavior as security-sensitive.
 
 ## Testing
@@ -33,6 +37,8 @@ This is a lightweight internal onboarding note for agents working in this repo.
 - Run `npm run test:web` for Vitest.
 - Run `npm run build:web` for the frontend production build.
 - Run `npm run bridge:test` for bridge unit tests when a Rust toolchain (cargo) is available.
+- On macOS with Xcode 26, run `npm run ios:check` and `npm run ios:build:debug` for iOS or shared
+  mobile-web changes.
 - Run `npm run check` before committing or releasing.
 - If cargo/Rust is missing, call out that bridge build/test verification could not run.
 
@@ -41,6 +47,8 @@ This is a lightweight internal onboarding note for agents working in this repo.
 - Development build: `npm run build` builds the web app and debug bridge binary.
 - Android debug build: `npm run android:build:debug`; output is
   `android/app/build/outputs/apk/debug/app-debug.apk`.
+- iOS Simulator validation: `npm run ios:build:debug`; unsigned output is
+  `ios/DerivedData/Build/Products/Debug-iphonesimulator/App.app`.
 - Desktop release tarball: `scripts/package-tarball.sh vX.Y.Z PLATFORM`; outputs go under
   `dist-packages/`.
 - Build or provide `linux-x86_64` tarballs from Linux, `macos-arm64` tarballs from an Apple Silicon
@@ -51,6 +59,9 @@ This is a lightweight internal onboarding note for agents working in this repo.
   stamps the changelog and creates the release. Inspect tarball/APK contents before upload.
 - Desktop tarballs include only `herdr-web-bridge`, bundled `web/dist` assets, a wrapper script, and
   docs. They do not include Herdr itself.
+- Do not stage or upload iOS Simulator output as a GitHub release asset. Signed iOS packaging is not
+  defined until team/signing, physical-device, accessibility, LAN-permission, and App Store gates
+  are complete.
 
 ## Changelog
 
@@ -69,6 +80,8 @@ This is a lightweight internal onboarding note for agents working in this repo.
 - Ensure `CHANGELOG.md` has the release notes under `## [Unreleased]`.
 - Run `npm run check`.
 - Run the browser smoke checklist in `docs/release.md`.
+- For iOS or shared mobile-web changes, run the iOS Simulator checklist in `docs/ios.md` and record
+  it as Simulator-only verification.
 - Run `node scripts/release.mjs vX.Y.Z`.
 - The release script promotes the changelog, commits, tags, pushes, creates a GitHub release from changelog notes, and opens the next `## [Unreleased]` section.
 - Build/upload tarball and APK artifacts manually after the release exists. Use

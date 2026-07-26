@@ -11,6 +11,11 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent, RefObject } from "react";
+import {
+  mobileCommandSubmitInput,
+  nextMobileCommandFieldKey,
+  syncMobileCommandInputValue,
+} from "./mobileCommandInput";
 import { autosizeMobileCommandTextarea } from "./mobileCommandTextarea";
 import { ConfirmDialog } from "./overlays";
 import { addNativeResumeHandler } from "./native";
@@ -1323,7 +1328,9 @@ export function TerminalView({
           onTerminalFocus={() => rendererRef.current?.focusTextInput()}
           onUpload={openFilePicker}
           onStageCommand={(command) => enqueueTerminalInput([command])}
-          onSubmitCommand={(command) => enqueueTerminalInput([command, "\r"])}
+          onSubmitCommand={(command) =>
+            enqueueTerminalInput([mobileCommandSubmitInput(command)])
+          }
         />
       ) : null}
       {mobileSelectionAction ? (
@@ -1431,22 +1438,47 @@ function MobileTerminalControls({
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [value, setValue] = useState("");
+  const [fieldKey, setFieldKey] = useState(0);
   const [expanded, setExpanded] = useState(false);
   const [ctrlLatch, setCtrlLatch] = useState(false);
   const setCommandInputNode = (node: HTMLInputElement | HTMLTextAreaElement | null) => {
     commandInputRef.current = node;
   };
-  const submit = () => {
-    onSubmitCommand(value);
+  const clearCommandInput = () => {
     setValue("");
+    // Remount plus an imperative sync so a stale native value cannot prepend
+    // itself onto the next keystrokes after React clears state.
+    syncMobileCommandInputValue(commandInputRef.current, "");
+    setFieldKey((key) => nextMobileCommandFieldKey(key));
+  };
+  const submit = () => {
+    const command = value;
+    clearCommandInput();
+    onSubmitCommand(command);
   };
   const stage = () => {
     if (value.length === 0) {
       return;
     }
-    onStageCommand(value);
-    setValue("");
+    const command = value;
+    clearCommandInput();
+    onStageCommand(command);
   };
+
+  useLayoutEffect(() => {
+    if (fieldKey === 0) {
+      return;
+    }
+    const node = commandInputRef.current;
+    if (!node || node.disabled) {
+      return;
+    }
+    syncMobileCommandInputValue(node, "");
+    if (expandingInput) {
+      autosizeMobileCommandTextarea(node);
+    }
+    node.focus();
+  }, [commandInputRef, expandingInput, fieldKey]);
   const sendKey = (key: TerminalKey) => {
     onInput(ctrlLatch && key.ctrlData ? key.ctrlData : key.data);
     if (ctrlLatch) {
@@ -1615,6 +1647,7 @@ function MobileTerminalControls({
       >
         {expandingInput ? (
           <textarea
+            key={fieldKey}
             ref={setCommandInputNode}
             className="term-native-input mono"
             rows={1}
@@ -1631,6 +1664,7 @@ function MobileTerminalControls({
           />
         ) : (
           <input
+            key={fieldKey}
             ref={setCommandInputNode}
             className="term-native-input mono"
             type="text"

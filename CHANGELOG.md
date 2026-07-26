@@ -20,6 +20,9 @@
 
 ### Fixed
 
+- Remounted and cleared the mobile terminal command field on Send/Stage so a stale native prefix cannot be appended onto the next keystrokes and resubmitted.
+- Sent mobile Send as one PTY frame (`text` + Enter) instead of two delayed frames, so agent prompts no longer keep staged text for the next Send to prepend.
+
 ### Removed
 
 ## [0.3.3] - 2026-07-19

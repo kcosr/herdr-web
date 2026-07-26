@@ -21,7 +21,9 @@
 ### Fixed
 
 - Remounted and cleared the mobile terminal command field on Send/Stage so a stale native prefix cannot be appended onto the next keystrokes and resubmitted.
+  [PR #38](https://github.com/kcosr/herdr-web/pull/38)
 - Sent mobile Send as one PTY frame (`text` + Enter) instead of two delayed frames, so agent prompts no longer keep staged text for the next Send to prepend.
+  [PR #38](https://github.com/kcosr/herdr-web/pull/38)
 
 ### Removed
 

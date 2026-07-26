@@ -254,7 +254,7 @@ fn pane_key(pane: &PaneInfo) -> PaneKey {
 fn is_agent_like(pane: &PaneInfo) -> bool {
     pane.agent.is_some()
         || pane.display_agent.is_some()
-        || pane.custom_status.is_some()
+        || !pane.state_labels.is_empty()
         || pane.title.is_some()
         || pane.agent_status != AgentStatus::Unknown
 }
@@ -492,10 +492,12 @@ mod tests {
             agent: None,
             agent_session: None,
             title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
             display_agent: None,
             agent_status: AgentStatus::Unknown,
-            custom_status: None,
             state_labels: HashMap::new(),
+            tokens: HashMap::new(),
             scroll: None,
             revision: 1,
         }

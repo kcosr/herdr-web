@@ -18,6 +18,7 @@ required=(
   "$COMPAT/src/api/schema"
   "$COMPAT/src/ipc.rs"
   "$COMPAT/src/logging.rs"
+  "$COMPAT/src/popup_size.rs"
   "$COMPAT/src/protocol.rs"
   "$COMPAT/src/protocol/wire.rs"
   "$COMPAT/src/server/socket_paths.rs"
@@ -91,6 +92,7 @@ if [[ -n "${HERDR_SRC:-}" ]]; then
   }
 
   compare_exact "src/api/schema.rs" "src/api/schema.rs"
+  compare_exact "src/popup_size.rs" "src/popup_size.rs"
   while IFS= read -r -d '' upstream_schema_file; do
     file_name="$(basename "$upstream_schema_file")"
     case "$file_name" in

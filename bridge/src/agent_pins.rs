@@ -423,10 +423,12 @@ mod tests {
             agent: Some("codex".to_string()),
             agent_session: None,
             title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
             display_agent: Some("Codex".to_string()),
             agent_status: AgentStatus::Idle,
-            custom_status: None,
             state_labels: HashMap::new(),
+            tokens: HashMap::new(),
             scroll: None,
             revision: 1,
         }

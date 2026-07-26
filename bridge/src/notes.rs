@@ -1014,6 +1014,7 @@ fn default_notes_dir() -> PathBuf {
 mod tests {
     use super::*;
     use herdr_compat::api::schema::AgentStatus;
+    use std::collections::HashMap;
 
     #[test]
     fn creates_and_lists_linked_note() {
@@ -1391,10 +1392,12 @@ mod tests {
             label: None,
             agent: None,
             title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
             display_agent: None,
             agent_status: AgentStatus::Unknown,
-            custom_status: None,
             state_labels: Default::default(),
+            tokens: HashMap::new(),
             agent_session: None,
             scroll: None,
             revision,

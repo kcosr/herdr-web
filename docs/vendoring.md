@@ -10,6 +10,7 @@ Rust crate containing copied or lightly pruned compatibility code needed by `her
 
 - JSON API client, status, request, response, and event schema types.
 - Terminal attach wire protocol messages, framing, protocol constants, and frame data types.
+- Popup size helpers shared with plugin pane schema fields.
 - Local socket connection helpers.
 - Client socket path derivation helpers.
 - Small dependent model shims needed by copied schema/protocol modules.
@@ -32,7 +33,7 @@ The browser app is not vendored into Herdr. It lives at `web/`, and `herdr-web-b
 ## Current Reference
 
 - Upstream checkout: a clean Herdr source checkout outside this repository
-- Upstream release baseline: `v0.7.2`
+- Upstream release baseline: `v0.7.5`
 
 Use the upstream checkout as an external reference for audits and refreshes. It is not required to
 build `herdr-web`.
@@ -84,6 +85,7 @@ src/api/status.rs          -> vendor/herdr-compat/src/api/status.rs
 src/api/schema.rs          -> vendor/herdr-compat/src/api/schema.rs
 src/api/schema/*.rs        -> vendor/herdr-compat/src/api/schema/*.rs
 src/protocol/wire.rs       -> vendor/herdr-compat/src/protocol/wire.rs
+src/popup_size.rs          -> vendor/herdr-compat/src/popup_size.rs
 src/ipc.rs                 -> vendor/herdr-compat/src/ipc.rs
 src/logging.rs             -> vendor/herdr-compat/src/logging.rs
 src/server/socket_paths.rs -> vendor/herdr-compat/src/server/socket_paths.rs
@@ -130,10 +132,11 @@ the refit button after changing browser sizes.
 
 ## Compatibility Policy
 
-The bridge pings Herdr's status API at startup and requires daemon protocol `16` or newer. The
-`v0.7.2` baseline provides the native `session.snapshot` bootstrap API used by `/api/snapshot`, so
-older daemons are rejected before serving the web app. This is not a complete stability guarantee
-because the bridge mirrors private APIs.
+The bridge pings Herdr's status API at startup and requires daemon protocol `16` through the
+vendored `PROTOCOL_VERSION` (`17` as of the `v0.7.5` baseline). The `v0.7.2` floor still applies
+for the native `session.snapshot` bootstrap API used by `/api/snapshot`, so older daemons are
+rejected before serving the web app. This is not a complete stability guarantee because the bridge
+mirrors private APIs.
 
 When updating Herdr:
 

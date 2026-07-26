@@ -10,10 +10,13 @@
 
 - Refreshed the vendored Herdr compatibility baseline to `v0.7.5`, including protocol `17`, so the
   bridge accepts current Herdr daemons while still allowing protocol `16` (`v0.7.2`–`v0.7.4`).
+  [PR #38](https://github.com/kcosr/herdr-web/pull/38)
 - Adapted launcher agent splits to Herdr's pane-first `agent.start` API (split an existing pane,
   then start the agent in it) after `agent.start` stopped creating topology itself.
+  [PR #38](https://github.com/kcosr/herdr-web/pull/38)
 - Stopped reading removed pane `custom_status` fields; activity updates keep a null `custom_status`
   for older web clients and rely on `state_labels` / title / display agent instead.
+  [PR #38](https://github.com/kcosr/herdr-web/pull/38)
 
 ### Fixed
 

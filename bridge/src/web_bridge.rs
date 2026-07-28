@@ -927,12 +927,19 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
     }))
 }
 
-/// Normalizes a `--remote-bridge` value into a canonical `scheme://host[:port]` origin
+/// Normalizes a `--remote-bridge` value into a canonical `http://host[:port]` origin
 /// (adding `http://` when no scheme is given, matching the frontend's bridge URL convention).
+///
+/// Only `http://` is accepted: remote bridges are reached over Tailscale (plain HTTP), and the
+/// bridge's outbound HTTP/WS clients have no TLS backend, so an accepted `https://` URL would
+/// fail every proxy request at runtime instead of failing fast at startup.
 fn normalize_remote_bridge_url(value: &str) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err("remote bridge URL must not be empty".into());
+    }
+    if trimmed.to_ascii_lowercase().starts_with("https://") {
+        return Err("remote bridge URL must use http:// (https is not supported)".into());
     }
     let with_scheme = if trimmed.contains("://") {
         trimmed.to_string()
@@ -940,10 +947,10 @@ fn normalize_remote_bridge_url(value: &str) -> Result<String, String> {
         format!("http://{trimmed}")
     };
     let normalized = with_scheme.trim_end_matches('/').to_ascii_lowercase();
-    let Some(authority) = origin_authority(&normalized) else {
-        return Err("remote bridge URL must be an http or https origin without a path".into());
+    let Some(authority) = normalized.strip_prefix("http://") else {
+        return Err("remote bridge URL must use http:// (https is not supported)".into());
     };
-    if authority.is_empty() || authority.contains('@') {
+    if authority.is_empty() || authority.contains('/') || authority.contains('@') {
         return Err("remote bridge URL must include a host and no credentials".into());
     }
     Ok(normalized)
@@ -5492,6 +5499,108 @@ mod tests {
         assert!(value.contains("connect-src 'self' data: http://srv:8787 ws://srv:8787;"));
         assert!(value.contains("img-src 'self' data: blob:;"));
         assert!(value.contains("frame-ancestors 'none'"));
+    }
+
+    #[test]
+    fn normalize_remote_bridge_url_accepts_http_and_adds_scheme_when_missing() {
+        assert_eq!(
+            normalize_remote_bridge_url("mini2:8787").unwrap(),
+            "http://mini2:8787"
+        );
+        assert_eq!(
+            normalize_remote_bridge_url("HTTP://Mini2:8787/").unwrap(),
+            "http://mini2:8787"
+        );
+    }
+
+    #[test]
+    fn normalize_remote_bridge_url_rejects_https() {
+        let err = normalize_remote_bridge_url("https://mini2:8787").unwrap_err();
+        assert!(err.contains("http://"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn normalize_remote_bridge_url_rejects_unsupported_scheme() {
+        assert!(normalize_remote_bridge_url("ws://mini2:8787").is_err());
+    }
+
+    #[test]
+    fn normalize_remote_bridge_url_rejects_empty_and_missing_host() {
+        assert!(normalize_remote_bridge_url("").is_err());
+        assert!(normalize_remote_bridge_url("   ").is_err());
+        assert!(normalize_remote_bridge_url("http://").is_err());
+    }
+
+    #[test]
+    fn normalize_remote_bridge_url_rejects_credentials() {
+        assert!(normalize_remote_bridge_url("http://user:pass@mini2:8787").is_err());
+    }
+
+    #[test]
+    fn build_remote_bridges_dedups_exact_duplicate_urls() {
+        let urls = vec![
+            "http://mini2:8787".to_string(),
+            "http://mini2:8787".to_string(),
+        ];
+        let bridges = build_remote_bridges(&urls);
+        assert_eq!(bridges.len(), 1);
+        assert_eq!(bridges[0].id, "mini2");
+    }
+
+    #[test]
+    fn build_remote_bridges_disambiguates_id_collisions() {
+        let urls = vec![
+            "http://mini.2:8787".to_string(),
+            "http://mini-2:8787".to_string(),
+            "http://mini_2:8787".to_string(),
+        ];
+        let bridges = build_remote_bridges(&urls);
+        let ids: Vec<&str> = bridges.iter().map(|bridge| bridge.id.as_str()).collect();
+        assert_eq!(ids, vec!["mini-2", "mini-2-2", "mini-2-3"]);
+    }
+
+    #[test]
+    fn axum_and_tungstenite_messages_round_trip() {
+        let text = Message::Text(AxumUtf8Bytes::from("hello"));
+        match tungstenite_message_to_axum(axum_message_to_tungstenite(text)) {
+            Some(Message::Text(value)) => assert_eq!(value.as_str(), "hello"),
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        let binary = Message::Binary(vec![1, 2, 3].into());
+        match tungstenite_message_to_axum(axum_message_to_tungstenite(binary)) {
+            Some(Message::Binary(value)) => assert_eq!(value.as_ref(), &[1, 2, 3]),
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        let ping = Message::Ping(vec![9].into());
+        match tungstenite_message_to_axum(axum_message_to_tungstenite(ping)) {
+            Some(Message::Ping(value)) => assert_eq!(value.as_ref(), &[9]),
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        let pong = Message::Pong(vec![7].into());
+        match tungstenite_message_to_axum(axum_message_to_tungstenite(pong)) {
+            Some(Message::Pong(value)) => assert_eq!(value.as_ref(), &[7]),
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        let close = Message::Close(Some(CloseFrame {
+            code: 1000,
+            reason: AxumUtf8Bytes::from("bye"),
+        }));
+        match tungstenite_message_to_axum(axum_message_to_tungstenite(close)) {
+            Some(Message::Close(Some(frame))) => {
+                assert_eq!(u16::from(frame.code), 1000);
+                assert_eq!(frame.reason.as_str(), "bye");
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        match tungstenite_message_to_axum(axum_message_to_tungstenite(Message::Close(None))) {
+            Some(Message::Close(None)) => {}
+            other => panic!("unexpected message: {other:?}"),
+        }
     }
 
     #[test]

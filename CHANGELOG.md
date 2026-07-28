@@ -21,9 +21,10 @@
   output and save vertical space on mobile. [PR #39](https://github.com/kcosr/herdr-web/pull/39)
 - Added a `--remote-bridge <url>` bridge CLI flag (repeatable) to register other herdr-web bridge
   instances (e.g. reached over Tailscale) as remote bridges. `/api/snapshot` now includes a
-  `bridges` array describing each configured remote bridge (id, label, url). The bridge proxies
-  REST reads (`/api/remote/{bridge_id}/...`) and terminal WebSocket connections
-  (`/ws/remote/{bridge_id}/terminal`) to the corresponding remote bridge.
+  `bridges` array describing each configured remote bridge (id, label, url), and a standalone
+  `GET /api/bridges` endpoint returning the same list (`id`, `url`) without the session-snapshot
+  round trip. The bridge proxies REST reads (`/api/remote/{bridge_id}/...`) and terminal WebSocket
+  connections (`/ws/remote/{bridge_id}/terminal`) to the corresponding remote bridge.
 
 ### Changed
 

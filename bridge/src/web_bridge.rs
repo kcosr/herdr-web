@@ -157,6 +157,12 @@ struct SnapshotBridgeInfo {
 }
 
 #[derive(Debug, Serialize)]
+struct BridgeListEntry {
+    id: String,
+    url: String,
+}
+
+#[derive(Debug, Serialize)]
 struct SnapshotWorkspaceInfo {
     #[serde(flatten)]
     info: WorkspaceInfo,
@@ -1028,7 +1034,7 @@ Use --launcher-presets PATH or HERDR_WEB_LAUNCHER_PRESETS to load custom launch 
 Use --remote-bridge URL (repeatable) to register another herdr-web bridge (e.g. http://mini2:8787)\n\
   to proxy through: reads at /api/remote/<id>/... and terminal sessions at\n\
   /ws/remote/<id>/terminal, where <id> is the remote's hostname as reported in /api/snapshot's\n\
-  bridges array.\n\
+  bridges array (also available standalone at GET /api/bridges).\n\
 Uploads default to HERDR_WEB_UPLOAD_DIR, XDG_DATA_HOME/herdr-web/uploads, or ~/.local/share/herdr-web/uploads."
 }
 
@@ -1165,6 +1171,10 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         .route(
             "/api/capabilities",
             get(capabilities_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/bridges",
+            get(bridges_handler).options(preflight_handler),
         )
         .route(
             "/api/command",
@@ -2685,6 +2695,26 @@ async fn capabilities_handler(
         launcher_presets: LauncherPresetsCapability { version: 1 },
         notes: NotesCapability { version: 1 },
     }))
+}
+
+/// Returns the remote bridges this bridge was launched with (`--remote-bridge`), as a flat
+/// read-only mirror of server-side config. There is no dynamic registration: a bridge only
+/// appears here if the server process itself was started with that URL.
+async fn bridges_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<BridgeListEntry>>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    Ok(Json(
+        state
+            .remote_bridges
+            .iter()
+            .map(|remote| BridgeListEntry {
+                id: remote.id.clone(),
+                url: remote.base_url.clone(),
+            })
+            .collect(),
+    ))
 }
 
 async fn agent_activity_list_handler(

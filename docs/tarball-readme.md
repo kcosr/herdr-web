@@ -58,8 +58,8 @@ bin/herdr-web --remote-bridge http://mini2:8787 --remote-bridge http://mini3:878
 ```
 
 `--remote-bridge` URLs must use `http://`. The bridge derives an id from each URL's hostname and
-lists configured remote bridges in `/api/snapshot`; `/api/remote/{bridge_id}/...` and
-`/ws/remote/{bridge_id}/terminal` proxy to that remote bridge. Only bridges the process was started
-with are reachable this way.
+lists configured remote bridges in `/api/snapshot` and standalone at `GET /api/bridges`;
+`/api/remote/{bridge_id}/...` and `/ws/remote/{bridge_id}/terminal` proxy to that remote bridge. Only
+bridges the process was started with are reachable this way.
 
 Only bind to non-loopback interfaces on networks you trust.

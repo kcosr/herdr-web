@@ -299,10 +299,11 @@ scripts/run-bridge.sh --remote-bridge http://mini2:8787 --remote-bridge http://m
 Each `--remote-bridge` URL must use `http://` (Tailscale traffic is plain HTTP; the bridge's outbound
 client has no TLS backend). The bridge derives a stable id from each URL's hostname, disambiguating
 collisions and dropping exact duplicates, and lists the configured remote bridges (id, label, url) in
-`/api/snapshot`'s `bridges` array. `/api/remote/{bridge_id}/...` and
-`/ws/remote/{bridge_id}/terminal` then proxy REST reads and terminal WebSocket sessions through to
-that remote bridge. Only bridges the process was actually started with are reachable this way; the
-web app does not yet have UI to add or manage remote bridges.
+`/api/snapshot`'s `bridges` array, and standalone at `GET /api/bridges` (a lighter-weight read-only
+mirror of the same `--remote-bridge` config, without the session-snapshot round trip). `/api/remote/
+{bridge_id}/...` and `/ws/remote/{bridge_id}/terminal` then proxy REST reads and terminal WebSocket
+sessions through to that remote bridge. Only bridges the process was actually started with are
+reachable this way; the web app does not yet have UI to add or manage remote bridges.
 
 ## Keyboard Shortcuts
 
@@ -337,6 +338,7 @@ The bridge exposes:
 - `GET /api/mobile-mode` and `POST /api/mobile-mode`: read/toggle a `mobile-mode` presence flag
   file in herdr-web's own data dir, for an external statusline script to check
 - `POST /api/uploads`: save uploaded files into the configured upload directory
+- `GET /api/bridges`: read-only list of `--remote-bridge`-configured remote bridges (`id`, `url`)
 - `GET|POST /api/remote/{bridge_id}/{*rest}`: proxies REST reads to a `--remote-bridge`-configured
   remote bridge's `/api/{rest}`
 - `GET /ws/activity`: bridge-owned pane activity deltas

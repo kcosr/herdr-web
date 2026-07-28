@@ -74,6 +74,8 @@ type Props = {
   onContentInsetBottomPx: (value: number) => void;
   mobileControlsScalePercent: number;
   onMobileControlsScalePercent: (value: number) => void;
+  mobileCompactControls: boolean;
+  onMobileCompactControlsChange: (compact: boolean) => void;
   mobileTerminalTapTarget: MobileTerminalTapTarget;
   onMobileTerminalTapTarget: (target: MobileTerminalTapTarget) => void;
   mobileLongPressBehavior: MobileLongPressBehavior;
@@ -120,6 +122,8 @@ export function BackendSettingsDialog({
   onContentInsetBottomPx,
   mobileControlsScalePercent,
   onMobileControlsScalePercent,
+  mobileCompactControls,
+  onMobileCompactControlsChange,
   mobileTerminalTapTarget,
   onMobileTerminalTapTarget,
   mobileLongPressBehavior,
@@ -621,6 +625,27 @@ export function BackendSettingsDialog({
             {activeArea === "mobile" && showMobileTerminalSettings ? (
               <div className="settings-section settings-section-flat">
                 <div className="settings-label">Mobile terminal</div>
+                <div className="settings-row">
+                  <span>Compact controls</span>
+                  <div className="segmented-control" role="group" aria-label="Compact mobile controls">
+                    <button
+                      type="button"
+                      data-on={!mobileCompactControls}
+                      aria-pressed={!mobileCompactControls}
+                      onClick={() => onMobileCompactControlsChange(false)}
+                    >
+                      Off
+                    </button>
+                    <button
+                      type="button"
+                      data-on={mobileCompactControls}
+                      aria-pressed={mobileCompactControls}
+                      onClick={() => onMobileCompactControlsChange(true)}
+                    >
+                      On
+                    </button>
+                  </div>
+                </div>
                 <div className="settings-row">
                   <span>Terminal tap</span>
                   <div className="segmented-control" role="group" aria-label="Terminal tap target">

@@ -85,12 +85,14 @@ import { fetchWithTimeout } from "./fetchWithTimeout";
 import {
   DEFAULT_MOBILE_COMMAND_ENTER_NEWLINE,
   DEFAULT_MOBILE_COMMAND_EXPANDING_INPUT,
+  DEFAULT_MOBILE_COMPACT_CONTROLS,
   DEFAULT_MOBILE_KEYBOARD_HIDE_REFIT,
   DEFAULT_MOBILE_LONG_PRESS_BEHAVIOR,
   DEFAULT_MOBILE_TOUCH_SELECTION_ENDPOINT_TIMEOUT_MS,
   DEFAULT_MOBILE_TERMINAL_TAP_TARGET,
   parseMobileCommandEnterNewline,
   parseMobileCommandExpandingInput,
+  parseMobileCompactControls,
   parseMobileKeyboardHideRefit,
   parseMobileLongPressBehavior,
   parseMobileTouchSelectionEndpointTimeoutMs,
@@ -343,6 +345,7 @@ type DisplayPrefs = {
   mobileKeyboardHideRefit: boolean;
   mobileCommandExpandingInput: boolean;
   mobileCommandEnterNewline: boolean;
+  mobileCompactControls: boolean;
 };
 type LegacyDisplaySelectionPrefs = {
   activeSpaceId: string | null;
@@ -350,6 +353,7 @@ type LegacyDisplaySelectionPrefs = {
 };
 const COMPACT_LAYOUT_QUERY = "(max-width: 820px)";
 const TOUCH_INPUT_QUERY = "(hover: none) and (pointer: coarse)";
+const SINGLE_PANE_CELL_STYLE: CSSProperties = { left: 0, top: 0, width: "100%", height: "100%" };
 const DISPLAY_PREFS_KEY = "herdr.mobileWeb.displayPrefs.v2";
 const LEGACY_DISPLAY_PREFS_KEY = "herdr.mobileWeb.displayPrefs.v1";
 const MOBILE_SIDEBAR_HISTORY_KEY = "herdrWebMobileSidebar";
@@ -398,6 +402,7 @@ function readDisplayPrefs(): DisplayPrefs {
     mobileKeyboardHideRefit: DEFAULT_MOBILE_KEYBOARD_HIDE_REFIT,
     mobileCommandExpandingInput: DEFAULT_MOBILE_COMMAND_EXPANDING_INPUT,
     mobileCommandEnterNewline: DEFAULT_MOBILE_COMMAND_ENTER_NEWLINE,
+    mobileCompactControls: DEFAULT_MOBILE_COMPACT_CONTROLS,
   };
   try {
     const raw = window.localStorage.getItem(DISPLAY_PREFS_KEY);
@@ -521,6 +526,7 @@ function parseDisplayPrefsValue(
     mobileCommandEnterNewline: parseMobileCommandEnterNewline(
       parsed.mobileCommandEnterNewline,
     ),
+    mobileCompactControls: parseMobileCompactControls(parsed.mobileCompactControls),
   };
 }
 
@@ -830,6 +836,9 @@ export function App() {
   const [mobileCommandEnterNewline, setMobileCommandEnterNewline] = useState(
     initialPrefs.mobileCommandEnterNewline,
   );
+  const [mobileCompactControls, setMobileCompactControls] = useState(
+    initialPrefs.mobileCompactControls,
+  );
   const [launchTarget, setLaunchTarget] = useState<ScopedLaunchTarget | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -896,6 +905,7 @@ export function App() {
       setMobileKeyboardHideRefit(prefs.mobileKeyboardHideRefit);
       setMobileCommandExpandingInput(prefs.mobileCommandExpandingInput);
       setMobileCommandEnterNewline(prefs.mobileCommandEnterNewline);
+      setMobileCompactControls(prefs.mobileCompactControls);
       setDisplayPrefsLoaded(true);
     });
     return () => {
@@ -1377,6 +1387,7 @@ export function App() {
       mobileKeyboardHideRefit,
       mobileCommandExpandingInput,
       mobileCommandEnterNewline,
+      mobileCompactControls,
     });
   }, [
     displayPrefsLoaded,
@@ -1412,6 +1423,7 @@ export function App() {
     mobileKeyboardHideRefit,
     mobileCommandExpandingInput,
     mobileCommandEnterNewline,
+    mobileCompactControls,
   ]);
 
   useEffect(() => {
@@ -3446,6 +3458,8 @@ export function App() {
             touchInput={isTouchInput}
             terminalFontSizePx={terminalFontSizePx}
             mobileControlsScalePercent={mobileControlsScalePercent}
+            mobileCompactControls={mobileCompactControls}
+            onMobileCompactControlsChange={setMobileCompactControls}
             mobileTapTarget={mobileTerminalTapTarget}
             mobileLongPressBehavior={mobileLongPressBehavior}
             mobileTouchSelectionEndpointTimeoutMs={mobileTouchSelectionEndpointTimeoutMs}
@@ -3471,6 +3485,8 @@ export function App() {
             mobileControls={isTouchInput}
             terminalFontSizePx={terminalFontSizePx}
             mobileControlsScalePercent={mobileControlsScalePercent}
+            mobileCompactControls={mobileCompactControls}
+            onMobileCompactControlsChange={setMobileCompactControls}
             mobileTapTarget={mobileTerminalTapTarget}
             mobileLongPressBehavior={mobileLongPressBehavior}
             mobileTouchSelectionEndpointTimeoutMs={mobileTouchSelectionEndpointTimeoutMs}
@@ -3706,6 +3722,8 @@ export function App() {
           onContentInsetBottomPx={setContentInsetBottomPx}
           mobileControlsScalePercent={mobileControlsScalePercent}
           onMobileControlsScalePercent={setMobileControlsScalePercent}
+          mobileCompactControls={mobileCompactControls}
+          onMobileCompactControlsChange={setMobileCompactControls}
           mobileTerminalTapTarget={mobileTerminalTapTarget}
           onMobileTerminalTapTarget={setMobileTerminalTapTarget}
           mobileLongPressBehavior={mobileLongPressBehavior}
@@ -4800,6 +4818,8 @@ function SplitGrid({
   touchInput,
   terminalFontSizePx,
   mobileControlsScalePercent,
+  mobileCompactControls,
+  onMobileCompactControlsChange,
   mobileTapTarget,
   mobileLongPressBehavior,
   mobileTouchSelectionEndpointTimeoutMs,
@@ -4821,6 +4841,8 @@ function SplitGrid({
   touchInput: boolean;
   terminalFontSizePx: number;
   mobileControlsScalePercent: number;
+  mobileCompactControls: boolean;
+  onMobileCompactControlsChange: (compact: boolean) => void;
   mobileTapTarget: MobileTerminalTapTarget;
   mobileLongPressBehavior: MobileLongPressBehavior;
   mobileTouchSelectionEndpointTimeoutMs: MobileTouchSelectionEndpointTimeoutMs;
@@ -4834,16 +4856,37 @@ function SplitGrid({
   httpUrl: (path: string, query?: URLSearchParams) => string;
   wsUrl: (path: string, query?: URLSearchParams) => string;
 }) {
+  // On touch devices, showing every split pane at once (e.g. a small tmux
+  // status pane stacked under the main agent pane) leaves too little room for
+  // any one of them to be usable — collapse to just the selected pane, with an
+  // escape hatch to see the full grid again.
+  const [showAllPanes, setShowAllPanes] = useState(false);
+  const singlePaneMode = touchInput && cells.length > 1 && !showAllPanes;
+
   return (
-    <div className="pane-grid" aria-label="Split panes">
+    <div className="pane-grid" aria-label="Split panes" data-single-pane={singlePaneMode}>
+      {touchInput && cells.length > 1 ? (
+        <button
+          type="button"
+          className="pane-grid-toggle"
+          aria-label={singlePaneMode ? "Show all panes" : "Show only selected pane"}
+          title={singlePaneMode ? "Show all panes" : "Show only selected pane"}
+          onClick={() => setShowAllPanes((value) => !value)}
+        >
+          {singlePaneMode ? <SplitSquareHorizontal size={14} /> : <SquareTerminal size={14} />}
+        </button>
+      ) : null}
       {cells.map(({ pane, style }) => {
         const selected = pane.pane_id === selectedPaneId;
+        if (singlePaneMode && !selected) {
+          return null;
+        }
         return (
           <div
             key={pane.pane_id}
             className="pane-cell"
             data-selected={selected}
-            style={style}
+            style={singlePaneMode ? SINGLE_PANE_CELL_STYLE : style}
             onPointerDown={() => onSelectPane(pane)}
           >
             <TerminalView
@@ -4857,6 +4900,8 @@ function SplitGrid({
               mobileControls={selected && touchInput}
               terminalFontSizePx={terminalFontSizePx}
               mobileControlsScalePercent={mobileControlsScalePercent}
+              mobileCompactControls={mobileCompactControls}
+              onMobileCompactControlsChange={onMobileCompactControlsChange}
               mobileTapTarget={mobileTapTarget}
               mobileLongPressBehavior={mobileLongPressBehavior}
               mobileTouchSelectionEndpointTimeoutMs={mobileTouchSelectionEndpointTimeoutMs}

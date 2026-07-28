@@ -1505,6 +1505,8 @@ function MobileTerminalControls({
   const [expanded, setExpanded] = useState(false);
   const [ctrlLatch, setCtrlLatch] = useState(false);
   const voiceSubmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onSubmitCommandRef = useRef(onSubmitCommand);
+  onSubmitCommandRef.current = onSubmitCommand;
   const setCommandInputNode = (node: HTMLInputElement | HTMLTextAreaElement | null) => {
     commandInputRef.current = node;
   };
@@ -1546,10 +1548,10 @@ function MobileTerminalControls({
       if (!stripped) {
         return;
       }
-      onSubmitCommand(stripped);
+      onSubmitCommandRef.current(stripped);
       setValue("");
     }, VOICE_SUBMIT_TIMER_MS);
-  }, [value, disabled, onSubmitCommand]);
+  }, [value, disabled]);
 
   useEffect(() => {
     return () => {

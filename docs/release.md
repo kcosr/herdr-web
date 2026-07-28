@@ -123,6 +123,8 @@ Open `http://127.0.0.1:8787` and verify:
 - Split right/down can launch Shell, Codex, Claude, and pi.
 - Upload button, paste upload, and drop upload place shell-quoted file paths in the terminal.
 - Pane notes can be created, edited, reloaded, and recovered from the Notes view.
+- If started with `--remote-bridge URL`, `GET /api/bridges` lists it and a terminal opened through
+  `/ws/remote/{bridge_id}/terminal` attaches to that remote bridge's session.
 - Binding to `HOST=0.0.0.0` is only used on a trusted network.
 
 ## Cut

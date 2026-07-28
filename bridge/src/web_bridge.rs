@@ -3077,14 +3077,20 @@ fn percent_decode_segment(segment: &str) -> Option<String> {
 
 /// Rejects `rest` path captures for the remote API proxy that contain `.` or `..` segments
 /// (including percent-encoded forms), which would otherwise let a request escape the
-/// `<remote-url>/api/` prefix once forwarded and resolved by the remote's URL parser.
+/// `<remote-url>/api/` prefix once forwarded and resolved by the remote's URL parser. Backslash
+/// is also treated as a segment separator here because the `url` crate (used by reqwest) treats
+/// backslash as a path separator for special schemes like http/https when parsing the outbound
+/// target URL, so a raw or percent-encoded backslash could otherwise smuggle a `..` segment past
+/// the forward-slash-only check.
 fn rest_path_is_safe(rest: &str) -> bool {
     for segment in rest.split('/') {
         let Some(decoded) = percent_decode_segment(segment) else {
             return false;
         };
-        if decoded == "." || decoded == ".." {
-            return false;
+        for sub_segment in decoded.split('\\') {
+            if sub_segment == "." || sub_segment == ".." {
+                return false;
+            }
         }
     }
     true
@@ -5749,6 +5755,18 @@ mod tests {
     fn rest_path_is_safe_rejects_single_dot_segment() {
         assert!(!rest_path_is_safe("./secret"));
         assert!(!rest_path_is_safe("snapshot/."));
+    }
+
+    #[test]
+    fn rest_path_is_safe_rejects_raw_backslash_traversal() {
+        assert!(!rest_path_is_safe("foo\\..\\..\\secret"));
+        assert!(!rest_path_is_safe("..\\secret"));
+    }
+
+    #[test]
+    fn rest_path_is_safe_rejects_percent_encoded_backslash_traversal() {
+        assert!(!rest_path_is_safe("foo%5C..%5C..%5Csecret"));
+        assert!(!rest_path_is_safe("foo%5c..%5c..%5csecret"));
     }
 
     #[test]

@@ -10,13 +10,13 @@ use std::thread;
 use std::time::Duration;
 
 use axum::body::Bytes;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, State};
+use axum::extract::ws::{CloseFrame, Message, Utf8Bytes as AxumUtf8Bytes, WebSocket, WebSocketUpgrade};
+use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, RawQuery, State};
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
-    ACCESS_CONTROL_MAX_AGE, ACCESS_CONTROL_REQUEST_HEADERS, HOST, ORIGIN, VARY,
+    ACCESS_CONTROL_MAX_AGE, ACCESS_CONTROL_REQUEST_HEADERS, CONTENT_TYPE, HOST, ORIGIN, VARY,
 };
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method as HttpMethod, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -25,6 +25,10 @@ use futures_util::{SinkExt, StreamExt};
 use herdr_compat::TryClone as _;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode as TsCloseCode;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame as TsCloseFrame;
+use tokio_tungstenite::tungstenite::Message as TsMessage;
+use tokio_tungstenite::tungstenite::Utf8Bytes as TsUtf8Bytes;
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
@@ -93,6 +97,16 @@ struct BridgeOptions {
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
     allowed_connect_sources: Vec<String>,
+    remote_bridges: Vec<String>,
+}
+
+/// Another herdr-web bridge instance (typically on a different Tailscale machine) that this
+/// bridge proxies `/api/remote/<id>/...` and `/ws/remote/<id>/terminal` requests through to.
+#[derive(Debug, Clone)]
+struct RemoteBridge {
+    id: String,
+    label: String,
+    base_url: String,
 }
 
 #[derive(Clone)]
@@ -110,6 +124,8 @@ struct BridgeState {
     ui_event_tx: tokio::sync::broadcast::Sender<String>,
     activity_tx: tokio::sync::broadcast::Sender<ActivityMessage>,
     upload_dir: PathBuf,
+    remote_bridges: Arc<Vec<RemoteBridge>>,
+    remote_http_client: reqwest::Client,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +144,14 @@ struct Snapshot {
     panes: Vec<PaneInfo>,
     layouts: Vec<PaneLayoutSnapshot>,
     selected_pane_id: Option<String>,
+    bridges: Vec<SnapshotBridgeInfo>,
+}
+
+#[derive(Debug, Serialize)]
+struct SnapshotBridgeInfo {
+    id: String,
+    label: String,
+    url: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -799,6 +823,7 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
     let mut allowed_hosts = Vec::new();
     let mut allowed_origins = Vec::new();
     let mut allowed_connect_sources = Vec::new();
+    let mut remote_bridges = Vec::new();
     let mut explicit_session = None;
     let mut index = 0;
 
@@ -874,6 +899,13 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
                 allowed_connect_sources.extend(connect_sources_for_origin(value)?);
                 index += 2;
             }
+            "--remote-bridge" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --remote-bridge".into());
+                };
+                remote_bridges.push(normalize_remote_bridge_url(value)?);
+                index += 2;
+            }
             arg => return Err(format!("unknown herdr-web option: {arg}")),
         }
     }
@@ -894,7 +926,77 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
         allowed_hosts,
         allowed_origins,
         allowed_connect_sources,
+        remote_bridges,
     }))
+}
+
+/// Normalizes a `--remote-bridge` value into a canonical `scheme://host[:port]` origin
+/// (adding `http://` when no scheme is given, matching the frontend's bridge URL convention).
+fn normalize_remote_bridge_url(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("remote bridge URL must not be empty".into());
+    }
+    let with_scheme = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{trimmed}")
+    };
+    let normalized = with_scheme.trim_end_matches('/').to_ascii_lowercase();
+    let Some(authority) = origin_authority(&normalized) else {
+        return Err("remote bridge URL must be an http or https origin without a path".into());
+    };
+    if authority.is_empty() || authority.contains('@') {
+        return Err("remote bridge URL must include a host and no credentials".into());
+    }
+    Ok(normalized)
+}
+
+/// Assigns a stable id (derived from hostname) and display label to each configured remote
+/// bridge, deduplicating identical URLs and disambiguating id collisions.
+fn build_remote_bridges(urls: &[String]) -> Vec<RemoteBridge> {
+    let mut seen_urls = HashSet::new();
+    let mut used_ids = HashSet::new();
+    let mut bridges = Vec::new();
+    for url in urls {
+        if !seen_urls.insert(url.clone()) {
+            continue;
+        }
+        let base_id = remote_bridge_id_base(url);
+        let mut id = base_id.clone();
+        let mut suffix = 2;
+        while used_ids.contains(&id) {
+            id = format!("{base_id}-{suffix}");
+            suffix += 1;
+        }
+        used_ids.insert(id.clone());
+        bridges.push(RemoteBridge {
+            id,
+            label: remote_bridge_label(url),
+            base_url: url.clone(),
+        });
+    }
+    bridges
+}
+
+fn remote_bridge_id_base(url: &str) -> String {
+    let host = origin_authority(url).map(host_part).unwrap_or(url);
+    let slug: String = host
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect();
+    if slug.is_empty() {
+        "bridge".to_string()
+    } else {
+        slug
+    }
+}
+
+fn remote_bridge_label(url: &str) -> String {
+    origin_authority(url)
+        .map(host_part)
+        .unwrap_or(url)
+        .to_string()
 }
 
 fn print_help() {
@@ -904,7 +1006,7 @@ fn print_help() {
 fn help_text() -> &'static str {
     "herdr-web-bridge\n\
 \n\
-Usage: herdr-web-bridge [--session NAME] [--host HOST] [--port PORT] [--static-dir DIR] [--upload-dir DIR] [--launcher-presets PATH] [--allow-origin ORIGIN] [--allow-host HOSTNAME] [--allow-connect-origin ORIGIN]\n\
+Usage: herdr-web-bridge [--session NAME] [--host HOST] [--port PORT] [--static-dir DIR] [--upload-dir DIR] [--launcher-presets PATH] [--allow-origin ORIGIN] [--allow-host HOSTNAME] [--allow-connect-origin ORIGIN] [--remote-bridge URL]...\n\
 \n\
 Runs the local HTTP/WebSocket bridge for herdr-web.\n\
 Defaults to the active Herdr daemon sockets and 127.0.0.1:8787.\n\
@@ -914,6 +1016,10 @@ Use --allow-origin http://localhost for bundled Android app access.\n\
 Use --allow-host HOSTNAME to accept that exact DNS hostname in Host headers.\n\
 Use --allow-connect-origin ORIGIN to let the served web app connect to another bridge origin.\n\
 Use --launcher-presets PATH or HERDR_WEB_LAUNCHER_PRESETS to load custom launch presets.\n\
+Use --remote-bridge URL (repeatable) to register another herdr-web bridge (e.g. http://mini2:8787)\n\
+  to proxy through: reads at /api/remote/<id>/... and terminal sessions at\n\
+  /ws/remote/<id>/terminal, where <id> is the remote's hostname as reported in /api/snapshot's\n\
+  bridges array.\n\
 Uploads default to HERDR_WEB_UPLOAD_DIR, XDG_DATA_HOME/herdr-web/uploads, or ~/.local/share/herdr-web/uploads."
 }
 
@@ -947,6 +1053,14 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         protocol = daemon_protocol,
         "herdr-web bridge connected to compatible Herdr daemon"
     );
+    let remote_bridges = build_remote_bridges(&options.remote_bridges);
+    for remote in &remote_bridges {
+        info!(id = %remote.id, url = %remote.base_url, "herdr-web bridge proxying remote bridge");
+    }
+    let remote_http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|err| io::Error::new(ErrorKind::Other, err.to_string()))?;
     let state = BridgeState {
         api,
         client_socket_path: crate::session::active_client_socket_path(),
@@ -961,6 +1075,8 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         ui_event_tx: tokio::sync::broadcast::channel(256).0,
         activity_tx: tokio::sync::broadcast::channel(512).0,
         upload_dir: options.upload_dir.clone(),
+        remote_bridges: Arc::new(remote_bridges),
+        remote_http_client,
     };
     spawn_agent_activity_watcher(state.clone());
     let agent_activity_routes = Router::new().route(
@@ -1053,10 +1169,20 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
             "/api/uploads",
             post(upload_handler).options(preflight_handler),
         )
+        .route(
+            "/api/remote/{bridge_id}/{*rest}",
+            get(remote_api_proxy_handler)
+                .post(remote_api_proxy_handler)
+                .options(preflight_handler),
+        )
         .route("/ws/events", get(events_ws_handler))
         .route("/ws/activity", get(activity_ws_handler))
         .route("/ws/ui-events", get(ui_events_ws_handler))
         .route("/ws/terminal", get(terminal_ws_handler))
+        .route(
+            "/ws/remote/{bridge_id}/terminal",
+            get(remote_terminal_ws_handler),
+        )
         .fallback_service(
             ServiceBuilder::new()
                 .layer(CompressionLayer::new())
@@ -2470,16 +2596,27 @@ async fn snapshot_handler(
         Err(err) => warn!(error = %err, "failed to update pane note observations"),
     }
     let selected_pane_id = shared_selected_pane(&state, &session_snapshot.panes)?;
+    let bridges = state
+        .remote_bridges
+        .iter()
+        .map(|remote| SnapshotBridgeInfo {
+            id: remote.id.clone(),
+            label: remote.label.clone(),
+            url: remote.base_url.clone(),
+        })
+        .collect();
 
     Ok(Json(web_snapshot_from_session_snapshot(
         session_snapshot,
         selected_pane_id,
+        bridges,
     )))
 }
 
 fn web_snapshot_from_session_snapshot(
     snapshot: SessionSnapshot,
     selected_pane_id: Option<String>,
+    bridges: Vec<SnapshotBridgeInfo>,
 ) -> Snapshot {
     let SessionSnapshot {
         workspaces,
@@ -2518,6 +2655,7 @@ fn web_snapshot_from_session_snapshot(
         panes,
         layouts,
         selected_pane_id,
+        bridges,
     }
 }
 
@@ -2871,6 +3009,175 @@ async fn terminal_ws_handler(
     }
     ws.on_upgrade(move |socket| handle_terminal_socket(socket, state, query))
         .into_response()
+}
+
+fn find_remote_bridge(bridges: &[RemoteBridge], id: &str) -> Option<RemoteBridge> {
+    bridges.iter().find(|bridge| bridge.id == id).cloned()
+}
+
+/// Proxies `/api/remote/<bridge_id>/<rest>` requests through to `<remote-url>/api/<rest>` on
+/// another herdr-web bridge, forwarding method, query string, request body, and content type.
+async fn remote_api_proxy_handler(
+    State(state): State<BridgeState>,
+    AxumPath((bridge_id, rest)): AxumPath<(String, String)>,
+    method: HttpMethod,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(err) = ensure_allowed_request(&headers, &state.request_policy) {
+        return err.into_response();
+    }
+    let Some(remote) = find_remote_bridge(&state.remote_bridges, &bridge_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "unknown remote bridge" })),
+        )
+            .into_response();
+    };
+
+    let mut target = format!("{}/api/{}", remote.base_url, rest);
+    if let Some(query) = query.filter(|value| !value.is_empty()) {
+        target.push('?');
+        target.push_str(&query);
+    }
+
+    let Ok(reqwest_method) = reqwest::Method::from_bytes(method.as_str().as_bytes()) else {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    };
+    let mut request = state.remote_http_client.request(reqwest_method, &target);
+    if let Some(content_type) = headers.get(CONTENT_TYPE) {
+        request = request.header(CONTENT_TYPE, content_type.clone());
+    }
+
+    let response = match request.body(body).send().await {
+        Ok(response) => response,
+        Err(err) => {
+            warn!(error = %err, target = %target, "remote bridge proxy request failed");
+            return BridgeError::Protocol(format!("remote bridge unreachable: {err}"))
+                .into_response();
+        }
+    };
+    let status = response.status();
+    let content_type = response.headers().get(CONTENT_TYPE).cloned();
+    let body_bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return BridgeError::Protocol(format!("remote bridge response error: {err}"))
+                .into_response();
+        }
+    };
+    let mut builder = Response::builder().status(status);
+    if let Some(content_type) = content_type {
+        builder = builder.header(CONTENT_TYPE, content_type);
+    }
+    builder
+        .body(axum::body::Body::from(body_bytes))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// Proxies `/ws/remote/<bridge_id>/terminal` websocket upgrades through to
+/// `<remote-url>/ws/terminal` on another herdr-web bridge, preserving the query string
+/// (terminal_id, cols, rows, coalesce_ms, takeover).
+async fn remote_terminal_ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<BridgeState>,
+    AxumPath(bridge_id): AxumPath<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(err) = ensure_allowed_request(&headers, &state.request_policy) {
+        return err.into_response();
+    }
+    let Some(remote) = find_remote_bridge(&state.remote_bridges, &bridge_id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    ws.on_upgrade(move |socket| proxy_terminal_socket(socket, remote, query))
+        .into_response()
+}
+
+async fn proxy_terminal_socket(local: WebSocket, remote: RemoteBridge, query: Option<String>) {
+    let scheme = if remote.base_url.starts_with("https://") {
+        "wss"
+    } else {
+        "ws"
+    };
+    let authority = remote.base_url.splitn(2, "://").nth(1).unwrap_or("");
+    let suffix = query
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("?{value}"))
+        .unwrap_or_default();
+    let target = format!("{scheme}://{authority}/ws/terminal{suffix}");
+
+    let remote_socket = match tokio_tungstenite::connect_async(&target).await {
+        Ok((socket, _response)) => socket,
+        Err(err) => {
+            warn!(error = %err, target = %target, "failed to connect to remote bridge terminal websocket");
+            return;
+        }
+    };
+
+    let (mut local_sink, mut local_stream) = local.split();
+    let (mut remote_sink, mut remote_stream) = remote_socket.split();
+    loop {
+        tokio::select! {
+            message = local_stream.next() => {
+                match message {
+                    Some(Ok(message)) => {
+                        if remote_sink.send(axum_message_to_tungstenite(message)).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            message = remote_stream.next() => {
+                match message {
+                    Some(Ok(message)) => {
+                        let Some(converted) = tungstenite_message_to_axum(message) else {
+                            continue;
+                        };
+                        if local_sink.send(converted).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            else => break,
+        }
+    }
+    let _ = remote_sink.close().await;
+    let _ = local_sink.close().await;
+}
+
+fn axum_message_to_tungstenite(message: Message) -> TsMessage {
+    match message {
+        Message::Text(text) => TsMessage::Text(TsUtf8Bytes::from(text.as_str())),
+        Message::Binary(data) => TsMessage::Binary(data),
+        Message::Ping(data) => TsMessage::Ping(data),
+        Message::Pong(data) => TsMessage::Pong(data),
+        Message::Close(Some(frame)) => TsMessage::Close(Some(TsCloseFrame {
+            code: TsCloseCode::from(frame.code),
+            reason: TsUtf8Bytes::from(frame.reason.as_str()),
+        })),
+        Message::Close(None) => TsMessage::Close(None),
+    }
+}
+
+fn tungstenite_message_to_axum(message: TsMessage) -> Option<Message> {
+    Some(match message {
+        TsMessage::Text(text) => Message::Text(AxumUtf8Bytes::from(text.as_str())),
+        TsMessage::Binary(data) => Message::Binary(data),
+        TsMessage::Ping(data) => Message::Ping(data),
+        TsMessage::Pong(data) => Message::Pong(data),
+        TsMessage::Close(Some(frame)) => Message::Close(Some(CloseFrame {
+            code: frame.code.into(),
+            reason: AxumUtf8Bytes::from(frame.reason.as_str()),
+        })),
+        TsMessage::Close(None) => Message::Close(None),
+        TsMessage::Frame(_) => return None,
+    })
 }
 
 async fn events_ws_handler(
@@ -4761,8 +5068,11 @@ mod tests {
 
     #[test]
     fn web_snapshot_adapter_preserves_web_shape_and_clear_name_flags() {
-        let snapshot =
-            web_snapshot_from_session_snapshot(test_session_snapshot(), Some("pane-2".to_string()));
+        let snapshot = web_snapshot_from_session_snapshot(
+            test_session_snapshot(),
+            Some("pane-2".to_string()),
+            Vec::new(),
+        );
 
         assert_eq!(snapshot.selected_pane_id.as_deref(), Some("pane-2"));
         assert_eq!(snapshot.workspaces.len(), 2);
@@ -4812,6 +5122,7 @@ mod tests {
         let snapshot = web_snapshot_from_session_snapshot(
             test_session_snapshot(),
             Some("missing".to_string()),
+            Vec::new(),
         );
 
         assert_eq!(snapshot.selected_pane_id, None);

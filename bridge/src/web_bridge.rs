@@ -10,7 +10,9 @@ use std::thread;
 use std::time::Duration;
 
 use axum::body::Bytes;
-use axum::extract::ws::{CloseFrame, Message, Utf8Bytes as AxumUtf8Bytes, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{
+    CloseFrame, Message, Utf8Bytes as AxumUtf8Bytes, WebSocket, WebSocketUpgrade,
+};
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, RawQuery, State};
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
@@ -1067,7 +1069,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
     let remote_http_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
-        .map_err(|err| io::Error::new(ErrorKind::Other, err.to_string()))?;
+        .map_err(|err| io::Error::other(err.to_string()))?;
     let state = BridgeState {
         api,
         client_socket_path: crate::session::active_client_socket_path(),
@@ -3109,7 +3111,7 @@ async fn proxy_terminal_socket(local: WebSocket, remote: RemoteBridge, query: Op
     } else {
         "ws"
     };
-    let authority = remote.base_url.splitn(2, "://").nth(1).unwrap_or("");
+    let authority = remote.base_url.split_once("://").map_or("", |x| x.1);
     let suffix = query
         .filter(|value| !value.is_empty())
         .map(|value| format!("?{value}"))

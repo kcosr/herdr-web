@@ -69,12 +69,19 @@ export type LayoutSnapshot = {
   }>;
 };
 
+export type SnapshotBridgeInfo = {
+  id: string;
+  label: string;
+  url: string;
+};
+
 export type Snapshot = {
   workspaces: WorkspaceInfo[];
   tabs: TabInfo[];
   panes: PaneInfo[];
   layouts: LayoutSnapshot[];
   selected_pane_id?: string | null;
+  bridges?: SnapshotBridgeInfo[];
 };
 
 export type PaneAgentStatusChangedMessage = {

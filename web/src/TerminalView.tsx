@@ -5,6 +5,7 @@ import {
   Link,
   Paperclip,
   Send,
+  Smartphone,
   SquareTerminal,
   TextCursorInput,
   X,
@@ -43,13 +44,21 @@ import {
   terminalReconnectPolicy,
 } from "./terminalReconnectPolicy";
 import type { TerminalReconnectMode } from "./terminalReconnectPolicy";
-import { DEFAULT_MOBILE_TOUCH_SELECTION_ENDPOINT_TIMEOUT_MS } from "./mobileTerminalPrefs";
+import {
+  DEFAULT_MOBILE_COMPACT_CONTROLS,
+  DEFAULT_MOBILE_TOUCH_SELECTION_ENDPOINT_TIMEOUT_MS,
+} from "./mobileTerminalPrefs";
 import type {
   MobileLongPressBehavior,
   MobileTerminalTapTarget,
   MobileTouchSelectionEndpointTimeoutMs,
 } from "./mobileTerminalPrefs";
 import type { PaneInfo } from "./types";
+import {
+  matchTrailingVoiceSubmitPhrase,
+  stripVoiceSubmitPhrase,
+  VOICE_SUBMIT_TIMER_MS,
+} from "./voiceSubmitPhrase";
 
 type Props = {
   pane: PaneInfo | null;
@@ -67,6 +76,10 @@ type Props = {
   terminalFontSizePx?: number;
   /** Percentage scale applied to mobile terminal controls. */
   mobileControlsScalePercent?: number;
+  /** Whether the mobile special-keys row is collapsed to save vertical space. */
+  mobileCompactControls?: boolean;
+  /** Called when the captain toggles the mobile compact-controls state. */
+  onMobileCompactControlsChange?: (compact: boolean) => void;
   /** Where terminal taps should send focus on mobile. */
   mobileTapTarget?: MobileTerminalTapTarget;
   /** Gesture behavior for long-presses on touch terminals. */
@@ -138,6 +151,8 @@ export function TerminalView({
   mobileControls = false,
   terminalFontSizePx = DEFAULT_TERMINAL_FONT_SIZE_PX,
   mobileControlsScalePercent = 100,
+  mobileCompactControls = DEFAULT_MOBILE_COMPACT_CONTROLS,
+  onMobileCompactControlsChange = () => {},
   mobileTapTarget = "command-input",
   mobileLongPressBehavior = "off",
   mobileTouchSelectionEndpointTimeoutMs = DEFAULT_MOBILE_TOUCH_SELECTION_ENDPOINT_TIMEOUT_MS,
@@ -183,6 +198,7 @@ export function TerminalView({
   const [uploadConflict, setUploadConflict] = useState<UploadConflictState | null>(null);
   const [mobileSelectionAction, setMobileSelectionAction] =
     useState<MobileSelectionAction | null>(null);
+  const [mobileModeActive, setMobileModeActive] = useState(false);
   // Read at attach time without re-running the effect (which would re-attach the socket).
   const autoFocusRef = useRef(autoFocus);
   autoFocusRef.current = autoFocus;
@@ -1109,6 +1125,49 @@ export function TerminalView({
     };
   }, [mobileControls, pane?.terminal_id, resizeTerminal]);
 
+  useEffect(() => {
+    if (!mobileControls) {
+      return;
+    }
+    // httpUrl() throws while the bridge runtime hasn't connected yet, which
+    // happens routinely on first mount — don't let that escape the effect.
+    let url: string;
+    try {
+      url = httpUrl("/api/mobile-mode");
+    } catch {
+      return;
+    }
+    let cancelled = false;
+    fetch(url)
+      .then((response) => (response.ok ? (response.json() as Promise<{ active?: boolean }>) : null))
+      .then((payload) => {
+        if (!cancelled && payload && typeof payload.active === "boolean") {
+          setMobileModeActive(payload.active);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [mobileControls, httpUrl]);
+
+  const toggleMobileMode = useCallback(() => {
+    let url: string;
+    try {
+      url = httpUrl("/api/mobile-mode");
+    } catch {
+      return;
+    }
+    fetch(url, { method: "POST" })
+      .then((response) => (response.ok ? (response.json() as Promise<{ active?: boolean }>) : null))
+      .then((payload) => {
+        if (payload && typeof payload.active === "boolean") {
+          setMobileModeActive(payload.active);
+        }
+      })
+      .catch(() => {});
+  }, [httpUrl]);
+
   const sendTerminalInput = (data: string) => {
     sendTerminalInputData(data);
   };
@@ -1318,6 +1377,10 @@ export function TerminalView({
           expandingInput={mobileCommandExpandingInput}
           enterNewline={mobileCommandEnterNewline}
           controlsScalePercent={mobileControlsScalePercent}
+          compactControls={mobileCompactControls}
+          onCompactControlsChange={onMobileCompactControlsChange}
+          mobileModeActive={mobileModeActive}
+          onToggleMobileMode={toggleMobileMode}
           onControlsHeightChange={setMobileControlsHeight}
           onInput={sendTerminalInput}
           onTerminalFocus={() => rendererRef.current?.focusTextInput()}
@@ -1409,6 +1472,10 @@ function MobileTerminalControls({
   expandingInput,
   enterNewline,
   controlsScalePercent,
+  compactControls,
+  onCompactControlsChange,
+  mobileModeActive,
+  onToggleMobileMode,
   onControlsHeightChange,
   onInput,
   onTerminalFocus,
@@ -1422,6 +1489,10 @@ function MobileTerminalControls({
   expandingInput: boolean;
   enterNewline: boolean;
   controlsScalePercent: number;
+  compactControls: boolean;
+  onCompactControlsChange: (compact: boolean) => void;
+  mobileModeActive: boolean;
+  onToggleMobileMode: () => void;
   onControlsHeightChange: (heightPx: number | null) => void;
   onInput: (data: string) => void;
   onTerminalFocus: () => void;
@@ -1433,6 +1504,9 @@ function MobileTerminalControls({
   const [value, setValue] = useState("");
   const [expanded, setExpanded] = useState(false);
   const [ctrlLatch, setCtrlLatch] = useState(false);
+  const voiceSubmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onSubmitCommandRef = useRef(onSubmitCommand);
+  onSubmitCommandRef.current = onSubmitCommand;
   const setCommandInputNode = (node: HTMLInputElement | HTMLTextAreaElement | null) => {
     commandInputRef.current = node;
   };
@@ -1453,6 +1527,39 @@ function MobileTerminalControls({
       setCtrlLatch(false);
     }
   };
+
+  useEffect(() => {
+    const matchedTail = disabled ? null : matchTrailingVoiceSubmitPhrase(value);
+    if (!matchedTail) {
+      if (voiceSubmitTimerRef.current) {
+        clearTimeout(voiceSubmitTimerRef.current);
+        voiceSubmitTimerRef.current = null;
+      }
+      return;
+    }
+    if (voiceSubmitTimerRef.current) {
+      clearTimeout(voiceSubmitTimerRef.current);
+    }
+    voiceSubmitTimerRef.current = setTimeout(() => {
+      voiceSubmitTimerRef.current = null;
+      // Re-verify the buffer still ends with what we matched before firing —
+      // dictation may have kept correcting the tail during the arm window.
+      const stripped = stripVoiceSubmitPhrase(value, matchedTail);
+      if (!stripped) {
+        return;
+      }
+      onSubmitCommandRef.current(stripped);
+      setValue("");
+    }, VOICE_SUBMIT_TIMER_MS);
+  }, [value, disabled]);
+
+  useEffect(() => {
+    return () => {
+      if (voiceSubmitTimerRef.current) {
+        clearTimeout(voiceSubmitTimerRef.current);
+      }
+    };
+  }, []);
 
   useLayoutEffect(() => {
     if (expandingInput) {
@@ -1505,102 +1612,106 @@ function MobileTerminalControls({
 
   return (
     <div ref={rootRef} className="terminal-mobile-controls" data-expanded={expanded ? "true" : "false"}>
-      <div className="term-key-strip" aria-label="Common terminal keys">
-        <div className="term-key-group" aria-label="Terminal quick keys">
-          <button
-            className="term-key"
-            type="button"
-            disabled={disabled}
-            onClick={() => sendKey(ESC_KEY)}
-          >
-            {ESC_KEY.label}
-          </button>
-          <button
-            className="term-key"
-            type="button"
-            data-active={ctrlLatch ? "true" : "false"}
-            disabled={disabled}
-            onClick={() => setCtrlLatch((active) => !active)}
-          >
-            Ctrl
-          </button>
-          {COMMON_KEYS.map((key) => (
-            <button
-              key={key.label}
-              className="term-key"
-              type="button"
-              disabled={disabled}
-              onClick={() => sendKey(key)}
-            >
-              {key.label}
-            </button>
-          ))}
-          {QUICK_NUMBER_KEYS.map((key) => (
-            <button
-              key={key.label}
-              className="term-key"
-              type="button"
-              disabled={disabled}
-              onClick={() => sendKey(key)}
-            >
-              {key.label}
-            </button>
-          ))}
-        </div>
-        <div className="term-key-actions" aria-label="Terminal actions">
-          <button
-            className="term-key term-key-icon"
-            type="button"
-            aria-label={expanded ? "Hide special keys" : "Show special keys"}
-            title={expanded ? "Hide keys" : "Keys"}
-            data-active={expanded ? "true" : "false"}
-            onClick={() => setExpanded((open) => !open)}
-          >
-            <Keyboard size={15} />
-          </button>
-          <button
-            className="term-key term-key-icon"
-            type="button"
-            aria-label="Upload file"
-            title="Upload"
-            disabled={uploadDisabled}
-            onClick={onUpload}
-          >
-            <Paperclip size={15} />
-          </button>
-          <button
-            className="term-key term-key-icon"
-            type="button"
-            aria-label="Focus terminal keyboard"
-            title="Terminal keyboard"
-            disabled={disabled}
-            onPointerDown={(event) => {
-              if (event.pointerType === "touch" || event.pointerType === "pen") {
-                event.preventDefault();
-                onTerminalFocus();
-              }
-            }}
-            onClick={onTerminalFocus}
-          >
-            <SquareTerminal size={15} />
-          </button>
-        </div>
-      </div>
+      {!compactControls ? (
+        <>
+          <div className="term-key-strip" aria-label="Common terminal keys">
+            <div className="term-key-group" aria-label="Terminal quick keys">
+              <button
+                className="term-key"
+                type="button"
+                disabled={disabled}
+                onClick={() => sendKey(ESC_KEY)}
+              >
+                {ESC_KEY.label}
+              </button>
+              <button
+                className="term-key"
+                type="button"
+                data-active={ctrlLatch ? "true" : "false"}
+                disabled={disabled}
+                onClick={() => setCtrlLatch((active) => !active)}
+              >
+                Ctrl
+              </button>
+              {COMMON_KEYS.map((key) => (
+                <button
+                  key={key.label}
+                  className="term-key"
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => sendKey(key)}
+                >
+                  {key.label}
+                </button>
+              ))}
+              {QUICK_NUMBER_KEYS.map((key) => (
+                <button
+                  key={key.label}
+                  className="term-key"
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => sendKey(key)}
+                >
+                  {key.label}
+                </button>
+              ))}
+            </div>
+            <div className="term-key-actions" aria-label="Terminal actions">
+              <button
+                className="term-key term-key-icon"
+                type="button"
+                aria-label={expanded ? "Hide special keys" : "Show special keys"}
+                title={expanded ? "Hide keys" : "Keys"}
+                data-active={expanded ? "true" : "false"}
+                onClick={() => setExpanded((open) => !open)}
+              >
+                <Keyboard size={15} />
+              </button>
+              <button
+                className="term-key term-key-icon"
+                type="button"
+                aria-label="Upload file"
+                title="Upload"
+                disabled={uploadDisabled}
+                onClick={onUpload}
+              >
+                <Paperclip size={15} />
+              </button>
+              <button
+                className="term-key term-key-icon"
+                type="button"
+                aria-label="Focus terminal keyboard"
+                title="Terminal keyboard"
+                disabled={disabled}
+                onPointerDown={(event) => {
+                  if (event.pointerType === "touch" || event.pointerType === "pen") {
+                    event.preventDefault();
+                    onTerminalFocus();
+                  }
+                }}
+                onClick={onTerminalFocus}
+              >
+                <SquareTerminal size={15} />
+              </button>
+            </div>
+          </div>
 
-      {expanded ? (
-        <div className="term-key-panel" aria-label="Special terminal keys">
-          {SPECIAL_KEYS.map((key) => (
-            <button
-              key={key.label}
-              className="term-key"
-              type="button"
-              disabled={disabled}
-              onClick={() => sendKey(key)}
-            >
-              {key.label}
-            </button>
-          ))}
-        </div>
+          {expanded ? (
+            <div className="term-key-panel" aria-label="Special terminal keys">
+              {SPECIAL_KEYS.map((key) => (
+                <button
+                  key={key.label}
+                  className="term-key"
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => sendKey(key)}
+                >
+                  {key.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </>
       ) : null}
 
       <form
@@ -1613,6 +1724,26 @@ function MobileTerminalControls({
           }
         }}
       >
+        <button
+          className="term-key term-key-icon term-compact-toggle"
+          type="button"
+          aria-label={compactControls ? "Show terminal keys" : "Hide terminal keys"}
+          title={compactControls ? "Show keys" : "Hide keys"}
+          data-active={compactControls ? "false" : "true"}
+          onClick={() => onCompactControlsChange(!compactControls)}
+        >
+          <Keyboard size={15} />
+        </button>
+        <button
+          className="term-key term-key-icon term-mobile-mode-toggle"
+          type="button"
+          aria-label={mobileModeActive ? "Show Claude Code statusline" : "Hide Claude Code statusline"}
+          title={mobileModeActive ? "Show statusline" : "Hide statusline"}
+          data-active={mobileModeActive ? "true" : "false"}
+          onClick={onToggleMobileMode}
+        >
+          <Smartphone size={15} />
+        </button>
         {expandingInput ? (
           <textarea
             ref={setCommandInputNode}

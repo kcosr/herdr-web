@@ -6,6 +6,20 @@
 
 ### Added
 
+- Added trailing voice-submit phrase detection (`bravely`, `gravely`, `briefly`, `lap`) to the
+  mobile command input, so a spoken magic word sends the buffered dictation after a 1s
+  confirmation delay. [PR #39](https://github.com/kcosr/herdr-web/pull/39)
+- Added a mobile single-pane mode for split-pane tabs: touch devices now show only the selected
+  pane by default, with a toggle to see the full split grid.
+  [PR #39](https://github.com/kcosr/herdr-web/pull/39)
+- Added a compact-controls toggle for the mobile special-keys row, defaulting to collapsed on
+  mobile to save vertical space. [PR #39](https://github.com/kcosr/herdr-web/pull/39)
+- Added a `POST`/`GET /api/mobile-mode` bridge endpoint and a mobile command-row toggle button
+  that flip a `mobile-mode` presence flag in herdr-web's own data dir
+  (`~/.local/share/herdr-web/mobile-mode` by default). herdr-web has no knowledge of what, if
+  anything, reads the flag; a companion statusline script can check it directly to blank its
+  output and save vertical space on mobile. [PR #39](https://github.com/kcosr/herdr-web/pull/39)
+
 ### Changed
 
 ### Fixed

@@ -10,6 +10,7 @@ export const DEFAULT_MOBILE_TOUCH_SELECTION_ENDPOINT_TIMEOUT_MS: MobileTouchSele
 export const DEFAULT_MOBILE_KEYBOARD_HIDE_REFIT = true;
 export const DEFAULT_MOBILE_COMMAND_EXPANDING_INPUT = true;
 export const DEFAULT_MOBILE_COMMAND_ENTER_NEWLINE = false;
+export const DEFAULT_MOBILE_COMPACT_CONTROLS = true;
 
 export function parseMobileTerminalTapTarget(value: unknown): MobileTerminalTapTarget {
   return value === "terminal" || value === "command-input"
@@ -43,4 +44,8 @@ export function parseMobileCommandExpandingInput(value: unknown) {
 
 export function parseMobileCommandEnterNewline(value: unknown) {
   return typeof value === "boolean" ? value : DEFAULT_MOBILE_COMMAND_ENTER_NEWLINE;
+}
+
+export function parseMobileCompactControls(value: unknown) {
+  return typeof value === "boolean" ? value : DEFAULT_MOBILE_COMPACT_CONTROLS;
 }

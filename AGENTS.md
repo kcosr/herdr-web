@@ -24,6 +24,11 @@ This is a lightweight internal onboarding note for agents working in this repo.
 - Keep generated outputs out of commits: `web/dist/`, `bridge/target/`, and
   `vendor/herdr-compat/target/`, `dist-packages/`, and Android build outputs.
 - The bridge is local-first and currently has no full browser authentication. Treat LAN binding and upload behavior as security-sensitive.
+- Persisted mobile display prefs in `web/src/App.tsx` (`DisplayPrefs`) need six touchpoints kept in
+  sync: the type, `readDisplayPrefs()` default, `parseDisplayPrefsValue()`, a `useState`, the
+  restore-on-load effect, and the save effect (object + dependency array). `isCompactLayout` (narrow
+  viewport, `max-width: 820px`) and `isTouchInput`/`mobileControls` (coarse pointer, no hover) are
+  separate signals gating different mobile behaviors — do not assume one implies the other.
 
 ## Testing
 
@@ -75,3 +80,10 @@ This is a lightweight internal onboarding note for agents working in this repo.
   `docs/packaging.md` and `docs/release.md`; do not commit `dist-packages/`, APKs, or generated
   Android outputs.
 - Do not bump npm package versions until package publishing is defined.
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_MOBILE_COMMAND_ENTER_NEWLINE,
   DEFAULT_MOBILE_COMMAND_EXPANDING_INPUT,
+  DEFAULT_MOBILE_COMPACT_CONTROLS,
   DEFAULT_MOBILE_LONG_PRESS_BEHAVIOR,
   DEFAULT_MOBILE_KEYBOARD_HIDE_REFIT,
   DEFAULT_MOBILE_TOUCH_SELECTION_ENDPOINT_TIMEOUT_MS,
@@ -9,6 +10,7 @@ import {
   MOBILE_TOUCH_SELECTION_ENDPOINT_TIMEOUT_OPTIONS_MS,
   parseMobileCommandEnterNewline,
   parseMobileCommandExpandingInput,
+  parseMobileCompactControls,
   parseMobileLongPressBehavior,
   parseMobileKeyboardHideRefit,
   parseMobileTouchSelectionEndpointTimeoutMs,
@@ -68,5 +70,12 @@ describe("mobile terminal preferences", () => {
     expect(parseMobileCommandEnterNewline("false")).toBe(
       DEFAULT_MOBILE_COMMAND_ENTER_NEWLINE,
     );
+  });
+
+  it("parses the compact mobile controls flag", () => {
+    expect(parseMobileCompactControls(true)).toBe(true);
+    expect(parseMobileCompactControls(false)).toBe(false);
+    expect(parseMobileCompactControls("false")).toBe(DEFAULT_MOBILE_COMPACT_CONTROLS);
+    expect(parseMobileCompactControls(undefined)).toBe(DEFAULT_MOBILE_COMPACT_CONTROLS);
   });
 });

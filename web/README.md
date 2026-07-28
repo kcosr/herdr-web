@@ -41,6 +41,7 @@ The app expects these bridge routes:
 - `/api/notes` (and `/api/notes/{note_id}/...` actions)
 - `/api/agent-pins` (and `/api/agent-pins/{pane_id}/pin|unpin`)
 - `/api/agent-activity`
+- `/api/mobile-mode`
 - `/api/uploads`
 - `/ws/activity`
 - `/ws/events`

@@ -1985,6 +1985,28 @@ button {
   padding: 6px 6px 6px 8px;
 }
 
+.pane-grid-toggle {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  display: inline-grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  color: var(--subtext0);
+  background: var(--surface0);
+  opacity: 0.85;
+}
+
+.pane-grid-toggle:hover,
+.pane-grid-toggle:active {
+  opacity: 1;
+  color: var(--text);
+}
+
 .terminal-overlay {
   position: absolute;
   inset: auto 14px 14px auto;

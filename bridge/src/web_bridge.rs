@@ -54,6 +54,9 @@ use crate::notes::{
     AttachNoteRequest, CreateNoteRequest, NoteResponse, NotesError, NotesListQuery,
     NotesListResponse, NotesManager, RevisionRequest, UpdateNoteRequest,
 };
+use crate::store_util::{
+    default_store_dir, ensure_private_dir, set_private_file_permissions, LockFile,
+};
 
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8787;
@@ -1018,11 +1021,18 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
             "/api/launcher-presets/launch",
             post(launcher_preset_launch_handler).options(preflight_handler),
         );
+    let mobile_mode_routes = Router::new().route(
+        "/api/mobile-mode",
+        get(mobile_mode_get_handler)
+            .post(mobile_mode_toggle_handler)
+            .options(preflight_handler),
+    );
     let app = Router::new()
         .merge(agent_activity_routes)
         .merge(agent_pins_routes)
         .merge(notes_routes)
         .merge(launcher_preset_routes)
+        .merge(mobile_mode_routes)
         .route(
             "/api/snapshot",
             get(snapshot_handler).options(preflight_handler),
@@ -2590,6 +2600,52 @@ async fn agent_pins_unpin_handler(
     .await?;
     broadcast_agent_pins_changed(&state, Some(&event_pane_id));
     Ok(Json(response))
+}
+
+// Lives entirely under herdr-web's own data dir; herdr-web has no knowledge of what,
+// if anything, reads this flag. Any presence-checker (e.g. a statusline script) is
+// expected to read this path directly rather than herdr-web reaching into its config.
+fn mobile_mode_flag_path() -> PathBuf {
+    default_store_dir("HERDR_WEB_DATA_DIR", "", "herdr-web-data").join("mobile-mode")
+}
+
+fn mobile_mode_lock_path() -> PathBuf {
+    default_store_dir("HERDR_WEB_DATA_DIR", "", "herdr-web-data").join("mobile-mode.lock")
+}
+
+async fn mobile_mode_get_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let active = mobile_mode_flag_path().is_file();
+    Ok(Json(serde_json::json!({ "active": active })))
+}
+
+async fn mobile_mode_toggle_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let path = mobile_mode_flag_path();
+    let lock_path = mobile_mode_lock_path();
+    let active = tokio::task::spawn_blocking(move || -> io::Result<bool> {
+        let _lock = LockFile::exclusive(&lock_path)?;
+        if path.is_file() {
+            std::fs::remove_file(&path)?;
+            Ok(false)
+        } else {
+            if let Some(parent) = path.parent() {
+                ensure_private_dir(parent)?;
+            }
+            std::fs::File::create(&path)?;
+            set_private_file_permissions(&path)?;
+            Ok(true)
+        }
+    })
+    .await
+    .map_err(|err| BridgeError::Protocol(err.to_string()))??;
+    Ok(Json(serde_json::json!({ "active": active })))
 }
 
 async fn notes_list_handler(
@@ -4831,6 +4887,66 @@ mod tests {
             "event": "pane.agent_status_changed",
             "data": { "pane_id": "pane-1" }
         })));
+    }
+
+    #[test]
+    fn mobile_mode_paths_live_under_herdr_web_data_dir_not_pai() {
+        let _guard = crate::session::TEST_ENV_LOCK.lock().unwrap();
+        let previous = std::env::var("HERDR_WEB_DATA_DIR").ok();
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-web-mobile-mode-path-test-{}",
+            std::process::id()
+        ));
+        std::env::set_var("HERDR_WEB_DATA_DIR", &dir);
+
+        let flag_path = mobile_mode_flag_path();
+        let lock_path = mobile_mode_lock_path();
+
+        assert_eq!(flag_path, dir.join("mobile-mode"));
+        assert_eq!(lock_path, dir.join("mobile-mode.lock"));
+        assert!(!flag_path.to_string_lossy().contains("PAI"));
+        assert!(!flag_path.to_string_lossy().contains(".claude"));
+
+        restore_env("HERDR_WEB_DATA_DIR", previous);
+    }
+
+    #[test]
+    fn mobile_mode_toggle_creates_then_removes_the_flag_file() {
+        let _guard = crate::session::TEST_ENV_LOCK.lock().unwrap();
+        let previous = std::env::var("HERDR_WEB_DATA_DIR").ok();
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-web-mobile-mode-toggle-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("HERDR_WEB_DATA_DIR", &dir);
+
+        let path = mobile_mode_flag_path();
+        let lock_path = mobile_mode_lock_path();
+        assert!(!path.is_file());
+
+        let toggle_once = |path: &PathBuf, lock_path: &PathBuf| -> bool {
+            let _lock = LockFile::exclusive(lock_path).unwrap();
+            if path.is_file() {
+                std::fs::remove_file(path).unwrap();
+                false
+            } else {
+                if let Some(parent) = path.parent() {
+                    ensure_private_dir(parent).unwrap();
+                }
+                std::fs::File::create(path).unwrap();
+                set_private_file_permissions(path).unwrap();
+                true
+            }
+        };
+
+        assert!(toggle_once(&path, &lock_path));
+        assert!(path.is_file());
+        assert!(!toggle_once(&path, &lock_path));
+        assert!(!path.is_file());
+
+        restore_env("HERDR_WEB_DATA_DIR", previous);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn test_session_snapshot() -> SessionSnapshot {

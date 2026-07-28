@@ -3054,6 +3054,42 @@ fn find_remote_bridge(bridges: &[RemoteBridge], id: &str) -> Option<RemoteBridge
     bridges.iter().find(|bridge| bridge.id == id).cloned()
 }
 
+/// Percent-decodes a single path segment for traversal checks. Returns `None` if the segment
+/// contains an incomplete or invalid `%XX` escape, which callers should treat as unsafe.
+fn percent_decode_segment(segment: &str) -> Option<String> {
+    let bytes = segment.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes.get(i + 1..i + 3)?;
+            let hex_str = std::str::from_utf8(hex).ok()?;
+            let value = u8::from_str_radix(hex_str, 16).ok()?;
+            decoded.push(value);
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+/// Rejects `rest` path captures for the remote API proxy that contain `.` or `..` segments
+/// (including percent-encoded forms), which would otherwise let a request escape the
+/// `<remote-url>/api/` prefix once forwarded and resolved by the remote's URL parser.
+fn rest_path_is_safe(rest: &str) -> bool {
+    for segment in rest.split('/') {
+        let Some(decoded) = percent_decode_segment(segment) else {
+            return false;
+        };
+        if decoded == "." || decoded == ".." {
+            return false;
+        }
+    }
+    true
+}
+
 /// Proxies `/api/remote/<bridge_id>/<rest>` requests through to `<remote-url>/api/<rest>` on
 /// another herdr-web bridge, forwarding method, query string, request body, and content type.
 async fn remote_api_proxy_handler(
@@ -3074,6 +3110,9 @@ async fn remote_api_proxy_handler(
         )
             .into_response();
     };
+    if !rest_path_is_safe(&rest) {
+        return BridgeError::BadRequest("invalid remote proxy path".to_string()).into_response();
+    }
 
     let mut target = format!("{}/api/{}", remote.base_url, rest);
     if let Some(query) = query.filter(|value| !value.is_empty()) {
@@ -5682,6 +5721,34 @@ mod tests {
     #[test]
     fn normalize_remote_bridge_url_rejects_credentials() {
         assert!(normalize_remote_bridge_url("http://user:pass@mini2:8787").is_err());
+    }
+
+    #[test]
+    fn rest_path_is_safe_accepts_normal_path() {
+        assert!(rest_path_is_safe("snapshot"));
+        assert!(rest_path_is_safe("tabs/1/panes/2"));
+    }
+
+    #[test]
+    fn rest_path_is_safe_rejects_leading_traversal() {
+        assert!(!rest_path_is_safe("../secret"));
+    }
+
+    #[test]
+    fn rest_path_is_safe_rejects_embedded_traversal() {
+        assert!(!rest_path_is_safe("snapshot/../../secret"));
+    }
+
+    #[test]
+    fn rest_path_is_safe_rejects_percent_encoded_traversal() {
+        assert!(!rest_path_is_safe("%2e%2e/secret"));
+        assert!(!rest_path_is_safe("%2E%2E/secret"));
+    }
+
+    #[test]
+    fn rest_path_is_safe_rejects_single_dot_segment() {
+        assert!(!rest_path_is_safe("./secret"));
+        assert!(!rest_path_is_safe("snapshot/."));
     }
 
     #[test]

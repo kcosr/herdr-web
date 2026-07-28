@@ -1129,8 +1129,16 @@ export function TerminalView({
     if (!mobileControls) {
       return;
     }
+    // httpUrl() throws while the bridge runtime hasn't connected yet, which
+    // happens routinely on first mount — don't let that escape the effect.
+    let url: string;
+    try {
+      url = httpUrl("/api/mobile-mode");
+    } catch {
+      return;
+    }
     let cancelled = false;
-    fetch(httpUrl("/api/mobile-mode"))
+    fetch(url)
       .then((response) => (response.ok ? (response.json() as Promise<{ active?: boolean }>) : null))
       .then((payload) => {
         if (!cancelled && payload && typeof payload.active === "boolean") {
@@ -1144,7 +1152,13 @@ export function TerminalView({
   }, [mobileControls, httpUrl]);
 
   const toggleMobileMode = useCallback(() => {
-    fetch(httpUrl("/api/mobile-mode"), { method: "POST" })
+    let url: string;
+    try {
+      url = httpUrl("/api/mobile-mode");
+    } catch {
+      return;
+    }
+    fetch(url, { method: "POST" })
       .then((response) => (response.ok ? (response.json() as Promise<{ active?: boolean }>) : null))
       .then((payload) => {
         if (payload && typeof payload.active === "boolean") {

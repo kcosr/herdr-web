@@ -18,8 +18,10 @@ navigation, multi-client viewing, mobile input controls, and synchronized pane s
 ## Highlights
 
 - Shared browser terminal viewing with synchronized pane selection across desktop and mobile.
-- Mobile-friendly text input with stage/send actions, configurable tap focus, and extended
-  terminal key controls.
+- Mobile-friendly text input with stage/send actions, configurable tap focus, extended terminal
+  key controls with a compact-controls toggle, and trailing voice-submit phrase detection for
+  hands-free dictation.
+- Single-pane mode for split panes on touch devices, with a toggle to see the full split grid.
 - Agent-focused sidebar with styled icons for detected Codex/OpenAI, Claude, Pi, Grok, and OpenCode panes.
 - Image and file uploads from the terminal toolbar, paste, or drag/drop, with uploaded paths inserted
   into the active terminal input.
@@ -313,6 +315,8 @@ The bridge exposes:
 - `GET /api/notes` and `POST /api/notes...`: bridge-owned pane notes
 - `GET /api/agent-activity`: bridge-tracked agent status transition activity
 - `GET /api/agent-pins` and `POST /api/agent-pins/{pane_id}/pin|unpin`: bridge-owned agent pins
+- `GET /api/mobile-mode` and `POST /api/mobile-mode`: read/toggle a `mobile-mode` presence flag
+  file in herdr-web's own data dir, for an external statusline script to check
 - `POST /api/uploads`: save uploaded files into the configured upload directory
 - `GET /ws/activity`: bridge-owned pane activity deltas
 - `GET /ws/events`: Herdr structural events

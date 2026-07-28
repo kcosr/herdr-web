@@ -114,6 +114,11 @@ Open `http://127.0.0.1:8787` and verify:
 - Multiple browser clients can attach to the same terminal.
 - Pane selection syncs between browser clients.
 - Typing, mobile text input, stage-only input, tap-focus setting, scrolling, and refit work.
+- Mobile compact-controls toggle collapses/restores the special-keys row, a trailing voice-submit
+  phrase (e.g. "bravely") sends buffered dictation, and the mobile-mode toggle flips
+  `~/.local/share/herdr-web/mobile-mode`.
+- On a touch device with a split pane, the single-pane toggle switches between the selected pane
+  and the full split grid.
 - New tabs can launch Shell, Codex, Claude, and pi.
 - Split right/down can launch Shell, Codex, Claude, and pi.
 - Upload button, paste upload, and drop upload place shell-quoted file paths in the terminal.

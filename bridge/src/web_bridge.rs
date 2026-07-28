@@ -54,6 +54,7 @@ use crate::notes::{
     AttachNoteRequest, CreateNoteRequest, NoteResponse, NotesError, NotesListQuery,
     NotesListResponse, NotesManager, RevisionRequest, UpdateNoteRequest,
 };
+use crate::store_util::{default_store_dir, ensure_private_dir, set_private_file_permissions};
 
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8787;
@@ -2599,12 +2600,11 @@ async fn agent_pins_unpin_handler(
     Ok(Json(response))
 }
 
+// Lives entirely under herdr-web's own data dir; herdr-web has no knowledge of what,
+// if anything, reads this flag. Any presence-checker (e.g. a statusline script) is
+// expected to read this path directly rather than herdr-web reaching into its config.
 fn mobile_mode_flag_path() -> PathBuf {
-    let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
-        .join(".claude")
-        .join("PAI")
-        .join(".mobile-mode")
+    default_store_dir("HERDR_WEB_DATA_DIR", "", "herdr-web-data").join("mobile-mode")
 }
 
 async fn mobile_mode_get_handler(
@@ -2628,9 +2628,10 @@ async fn mobile_mode_toggle_handler(
             Ok(false)
         } else {
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
+                ensure_private_dir(parent)?;
             }
             std::fs::File::create(&path)?;
+            set_private_file_permissions(&path)?;
             Ok(true)
         }
     })

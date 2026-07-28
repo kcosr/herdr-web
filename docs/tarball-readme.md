@@ -50,4 +50,16 @@ bin/herdr-web --host 0.0.0.0 --allow-host host-a --allow-connect-origin http://h
 bin/herdr-web --host 0.0.0.0 --allow-host host-b --allow-origin http://host-a:8787
 ```
 
+As an alternative, a bridge can proxy another herdr-web bridge server-side (for example, reaching
+other machines over Tailscale) with a repeatable `--remote-bridge URL` flag:
+
+```bash
+bin/herdr-web --remote-bridge http://mini2:8787 --remote-bridge http://mini3:8787
+```
+
+`--remote-bridge` URLs must use `http://`. The bridge derives an id from each URL's hostname and
+lists configured remote bridges in `/api/snapshot`; `/api/remote/{bridge_id}/...` and
+`/ws/remote/{bridge_id}/terminal` proxy to that remote bridge. Only bridges the process was started
+with are reachable this way.
+
 Only bind to non-loopback interfaces on networks you trust.

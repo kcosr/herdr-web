@@ -288,6 +288,22 @@ HOST=0.0.0.0 scripts/run-bridge.sh --allow-host host-a --allow-connect-origin ht
 HOST=0.0.0.0 scripts/run-bridge.sh --allow-host host-b --allow-origin http://host-a:8787
 ```
 
+As an alternative to that browser-side CORS setup, a bridge can proxy another herdr-web bridge
+server-side with a repeatable `--remote-bridge URL` flag (for example, reaching other machines over
+Tailscale):
+
+```bash
+scripts/run-bridge.sh --remote-bridge http://mini2:8787 --remote-bridge http://mini3:8787
+```
+
+Each `--remote-bridge` URL must use `http://` (Tailscale traffic is plain HTTP; the bridge's outbound
+client has no TLS backend). The bridge derives a stable id from each URL's hostname, disambiguating
+collisions and dropping exact duplicates, and lists the configured remote bridges (id, label, url) in
+`/api/snapshot`'s `bridges` array. `/api/remote/{bridge_id}/...` and
+`/ws/remote/{bridge_id}/terminal` then proxy REST reads and terminal WebSocket sessions through to
+that remote bridge. Only bridges the process was actually started with are reachable this way; the
+web app does not yet have UI to add or manage remote bridges.
+
 ## Keyboard Shortcuts
 
 These app shortcuts are ignored while dialogs, menus, and normal text inputs are active. They still
@@ -311,7 +327,8 @@ work when the terminal's hidden keyboard input has focus. OS-reserved shortcuts 
 The bridge exposes:
 
 - `GET /api/capabilities`: bridge feature flags and allow-listed browser commands
-- `GET /api/snapshot`: workspaces, tabs, panes, layouts, and shared web selection
+- `GET /api/snapshot`: workspaces, tabs, panes, layouts, shared web selection, and configured
+  remote bridges
 - `POST /api/command`: allow-listed workspace/tab/pane commands
 - `POST /api/selection`: bridge-owned selected pane for syncing browser clients
 - `GET /api/notes` and `POST /api/notes...`: bridge-owned pane notes
@@ -320,10 +337,14 @@ The bridge exposes:
 - `GET /api/mobile-mode` and `POST /api/mobile-mode`: read/toggle a `mobile-mode` presence flag
   file in herdr-web's own data dir, for an external statusline script to check
 - `POST /api/uploads`: save uploaded files into the configured upload directory
+- `GET|POST /api/remote/{bridge_id}/{*rest}`: proxies REST reads to a `--remote-bridge`-configured
+  remote bridge's `/api/{rest}`
 - `GET /ws/activity`: bridge-owned pane activity deltas
 - `GET /ws/events`: Herdr structural events
 - `GET /ws/ui-events`: bridge-local UI events such as selection changes
 - `GET /ws/terminal`: terminal attach stream
+- `GET /ws/remote/{bridge_id}/terminal`: proxies a terminal attach stream to a `--remote-bridge`-
+  configured remote bridge
 
 Herdr core currently allows only one terminal attach owner per terminal. The bridge works around
 that by opening one Herdr terminal attach per `terminal_id` and broadcasting output to all browser

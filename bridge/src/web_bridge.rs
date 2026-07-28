@@ -4889,6 +4889,66 @@ mod tests {
         })));
     }
 
+    #[test]
+    fn mobile_mode_paths_live_under_herdr_web_data_dir_not_pai() {
+        let _guard = crate::session::TEST_ENV_LOCK.lock().unwrap();
+        let previous = std::env::var("HERDR_WEB_DATA_DIR").ok();
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-web-mobile-mode-path-test-{}",
+            std::process::id()
+        ));
+        std::env::set_var("HERDR_WEB_DATA_DIR", &dir);
+
+        let flag_path = mobile_mode_flag_path();
+        let lock_path = mobile_mode_lock_path();
+
+        assert_eq!(flag_path, dir.join("mobile-mode"));
+        assert_eq!(lock_path, dir.join("mobile-mode.lock"));
+        assert!(!flag_path.to_string_lossy().contains("PAI"));
+        assert!(!flag_path.to_string_lossy().contains(".claude"));
+
+        restore_env("HERDR_WEB_DATA_DIR", previous);
+    }
+
+    #[test]
+    fn mobile_mode_toggle_creates_then_removes_the_flag_file() {
+        let _guard = crate::session::TEST_ENV_LOCK.lock().unwrap();
+        let previous = std::env::var("HERDR_WEB_DATA_DIR").ok();
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-web-mobile-mode-toggle-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("HERDR_WEB_DATA_DIR", &dir);
+
+        let path = mobile_mode_flag_path();
+        let lock_path = mobile_mode_lock_path();
+        assert!(!path.is_file());
+
+        let toggle_once = |path: &PathBuf, lock_path: &PathBuf| -> bool {
+            let _lock = LockFile::exclusive(lock_path).unwrap();
+            if path.is_file() {
+                std::fs::remove_file(path).unwrap();
+                false
+            } else {
+                if let Some(parent) = path.parent() {
+                    ensure_private_dir(parent).unwrap();
+                }
+                std::fs::File::create(path).unwrap();
+                set_private_file_permissions(path).unwrap();
+                true
+            }
+        };
+
+        assert!(toggle_once(&path, &lock_path));
+        assert!(path.is_file());
+        assert!(!toggle_once(&path, &lock_path));
+        assert!(!path.is_file());
+
+        restore_env("HERDR_WEB_DATA_DIR", previous);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn test_session_snapshot() -> SessionSnapshot {
         SessionSnapshot {
             version: "0.7.2".to_string(),

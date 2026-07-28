@@ -22,6 +22,8 @@ navigation, multi-client viewing, mobile input controls, and synchronized pane s
   key controls with a compact-controls toggle, and trailing voice-submit phrase detection for
   hands-free dictation.
 - Single-pane mode for split panes on touch devices, with a toggle to see the full split grid.
+- A mobile-mode toggle button that flips a presence flag in herdr-web's own data dir, for an
+  external statusline script to check.
 - Agent-focused sidebar with styled icons for detected Codex/OpenAI, Claude, Pi, Grok, and OpenCode panes.
 - Image and file uploads from the terminal toolbar, paste, or drag/drop, with uploaded paths inserted
   into the active terminal input.

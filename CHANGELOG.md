@@ -6,6 +6,14 @@
 
 ### Added
 
+- Added trailing voice-submit phrase detection (`bravely`, `gravely`, `briefly`, `lap`) to the
+  mobile command input, so a spoken magic word sends the buffered dictation after a 1s
+  confirmation delay.
+- Added a mobile single-pane mode for split-pane tabs: touch devices now show only the selected
+  pane by default, with a toggle to see the full split grid.
+- Added a compact-controls toggle for the mobile special-keys row, defaulting to collapsed on
+  mobile to save vertical space.
+
 ### Changed
 
 ### Fixed

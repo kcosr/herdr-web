@@ -1018,11 +1018,18 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
             "/api/launcher-presets/launch",
             post(launcher_preset_launch_handler).options(preflight_handler),
         );
+    let mobile_mode_routes = Router::new().route(
+        "/api/mobile-mode",
+        get(mobile_mode_get_handler)
+            .post(mobile_mode_toggle_handler)
+            .options(preflight_handler),
+    );
     let app = Router::new()
         .merge(agent_activity_routes)
         .merge(agent_pins_routes)
         .merge(notes_routes)
         .merge(launcher_preset_routes)
+        .merge(mobile_mode_routes)
         .route(
             "/api/snapshot",
             get(snapshot_handler).options(preflight_handler),
@@ -2590,6 +2597,46 @@ async fn agent_pins_unpin_handler(
     .await?;
     broadcast_agent_pins_changed(&state, Some(&event_pane_id));
     Ok(Json(response))
+}
+
+fn mobile_mode_flag_path() -> PathBuf {
+    let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".claude")
+        .join("PAI")
+        .join(".mobile-mode")
+}
+
+async fn mobile_mode_get_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let active = mobile_mode_flag_path().is_file();
+    Ok(Json(serde_json::json!({ "active": active })))
+}
+
+async fn mobile_mode_toggle_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let path = mobile_mode_flag_path();
+    let active = tokio::task::spawn_blocking(move || -> io::Result<bool> {
+        if path.is_file() {
+            std::fs::remove_file(&path)?;
+            Ok(false)
+        } else {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::File::create(&path)?;
+            Ok(true)
+        }
+    })
+    .await
+    .map_err(|err| BridgeError::Protocol(err.to_string()))??;
+    Ok(Json(serde_json::json!({ "active": active })))
 }
 
 async fn notes_list_handler(

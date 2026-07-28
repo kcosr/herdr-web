@@ -14,6 +14,11 @@
   [PR #39](https://github.com/kcosr/herdr-web/pull/39)
 - Added a compact-controls toggle for the mobile special-keys row, defaulting to collapsed on
   mobile to save vertical space. [PR #39](https://github.com/kcosr/herdr-web/pull/39)
+- Added a `POST`/`GET /api/mobile-mode` bridge endpoint and a mobile command-row toggle button
+  that flip a `~/.claude/PAI/.mobile-mode` presence flag, letting a companion PAI statusline
+  script blank its output on mobile to save vertical space. Requires the matching guard in
+  `~/.claude/PAI/statusline-command.sh.full` (outside this repo) to have a visible effect.
+  [PR #39](https://github.com/kcosr/herdr-web/pull/39)
 
 ### Changed
 

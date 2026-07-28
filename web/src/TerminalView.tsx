@@ -5,6 +5,7 @@ import {
   Link,
   Paperclip,
   Send,
+  Smartphone,
   SquareTerminal,
   TextCursorInput,
   X,
@@ -197,6 +198,7 @@ export function TerminalView({
   const [uploadConflict, setUploadConflict] = useState<UploadConflictState | null>(null);
   const [mobileSelectionAction, setMobileSelectionAction] =
     useState<MobileSelectionAction | null>(null);
+  const [mobileModeActive, setMobileModeActive] = useState(false);
   // Read at attach time without re-running the effect (which would re-attach the socket).
   const autoFocusRef = useRef(autoFocus);
   autoFocusRef.current = autoFocus;
@@ -1123,6 +1125,35 @@ export function TerminalView({
     };
   }, [mobileControls, pane?.terminal_id, resizeTerminal]);
 
+  useEffect(() => {
+    if (!mobileControls) {
+      return;
+    }
+    let cancelled = false;
+    fetch(httpUrl("/api/mobile-mode"))
+      .then((response) => (response.ok ? (response.json() as Promise<{ active?: boolean }>) : null))
+      .then((payload) => {
+        if (!cancelled && payload && typeof payload.active === "boolean") {
+          setMobileModeActive(payload.active);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [mobileControls, httpUrl]);
+
+  const toggleMobileMode = useCallback(() => {
+    fetch(httpUrl("/api/mobile-mode"), { method: "POST" })
+      .then((response) => (response.ok ? (response.json() as Promise<{ active?: boolean }>) : null))
+      .then((payload) => {
+        if (payload && typeof payload.active === "boolean") {
+          setMobileModeActive(payload.active);
+        }
+      })
+      .catch(() => {});
+  }, [httpUrl]);
+
   const sendTerminalInput = (data: string) => {
     sendTerminalInputData(data);
   };
@@ -1334,6 +1365,8 @@ export function TerminalView({
           controlsScalePercent={mobileControlsScalePercent}
           compactControls={mobileCompactControls}
           onCompactControlsChange={onMobileCompactControlsChange}
+          mobileModeActive={mobileModeActive}
+          onToggleMobileMode={toggleMobileMode}
           onControlsHeightChange={setMobileControlsHeight}
           onInput={sendTerminalInput}
           onTerminalFocus={() => rendererRef.current?.focusTextInput()}
@@ -1427,6 +1460,8 @@ function MobileTerminalControls({
   controlsScalePercent,
   compactControls,
   onCompactControlsChange,
+  mobileModeActive,
+  onToggleMobileMode,
   onControlsHeightChange,
   onInput,
   onTerminalFocus,
@@ -1442,6 +1477,8 @@ function MobileTerminalControls({
   controlsScalePercent: number;
   compactControls: boolean;
   onCompactControlsChange: (compact: boolean) => void;
+  mobileModeActive: boolean;
+  onToggleMobileMode: () => void;
   onControlsHeightChange: (heightPx: number | null) => void;
   onInput: (data: string) => void;
   onTerminalFocus: () => void;
@@ -1680,6 +1717,16 @@ function MobileTerminalControls({
           onClick={() => onCompactControlsChange(!compactControls)}
         >
           <Keyboard size={15} />
+        </button>
+        <button
+          className="term-key term-key-icon term-mobile-mode-toggle"
+          type="button"
+          aria-label={mobileModeActive ? "Show Claude Code statusline" : "Hide Claude Code statusline"}
+          title={mobileModeActive ? "Show statusline" : "Hide statusline"}
+          data-active={mobileModeActive ? "true" : "false"}
+          onClick={onToggleMobileMode}
+        >
+          <Smartphone size={15} />
         </button>
         {expandingInput ? (
           <textarea

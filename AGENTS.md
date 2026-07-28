@@ -24,6 +24,11 @@ This is a lightweight internal onboarding note for agents working in this repo.
 - Keep generated outputs out of commits: `web/dist/`, `bridge/target/`, and
   `vendor/herdr-compat/target/`, `dist-packages/`, and Android build outputs.
 - The bridge is local-first and currently has no full browser authentication. Treat LAN binding and upload behavior as security-sensitive.
+- Remote bridges (`--remote-bridge <url>`, proxied under `/api/remote/{bridge_id}/...` and
+  `/ws/remote/{bridge_id}/terminal`) are only reachable if the local bridge process was started with
+  that URL — bridge ids are derived server-side from the URL hostname. Any client-side UI for adding
+  remote bridges must either mirror what the server actually has configured or call a registration
+  API; a purely client-local list of URLs cannot work standalone.
 
 ## Testing
 
@@ -75,3 +80,10 @@ This is a lightweight internal onboarding note for agents working in this repo.
   `docs/packaging.md` and `docs/release.md`; do not commit `dist-packages/`, APKs, or generated
   Android outputs.
 - Do not bump npm package versions until package publishing is defined.
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.

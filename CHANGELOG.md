@@ -6,6 +6,12 @@
 
 ### Added
 
+- Added a `--remote-bridge <url>` bridge CLI flag (repeatable) to register other herdr-web bridge
+  instances (e.g. reached over Tailscale) as remote bridges. `/api/snapshot` now includes a
+  `bridges` array describing each configured remote bridge (id, label, url). The bridge proxies
+  REST reads (`/api/remote/{bridge_id}/...`) and terminal WebSocket connections
+  (`/ws/remote/{bridge_id}/terminal`) to the corresponding remote bridge.
+
 ### Changed
 
 ### Fixed

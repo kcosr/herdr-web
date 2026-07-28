@@ -354,6 +354,13 @@ type LegacyDisplaySelectionPrefs = {
 const COMPACT_LAYOUT_QUERY = "(max-width: 820px)";
 const TOUCH_INPUT_QUERY = "(hover: none) and (pointer: coarse)";
 const SINGLE_PANE_CELL_STYLE: CSSProperties = { left: 0, top: 0, width: "100%", height: "100%" };
+const HIDDEN_PANE_CELL_STYLE: CSSProperties = {
+  left: 0,
+  top: 0,
+  width: "100%",
+  height: "100%",
+  display: "none",
+};
 const DISPLAY_PREFS_KEY = "herdr.mobileWeb.displayPrefs.v2";
 const LEGACY_DISPLAY_PREFS_KEY = "herdr.mobileWeb.displayPrefs.v1";
 const MOBILE_SIDEBAR_HISTORY_KEY = "herdrWebMobileSidebar";
@@ -4878,15 +4885,19 @@ function SplitGrid({
       ) : null}
       {cells.map(({ pane, style }) => {
         const selected = pane.pane_id === selectedPaneId;
-        if (singlePaneMode && !selected) {
-          return null;
-        }
+        const hiddenInSinglePaneMode = singlePaneMode && !selected;
+        const cellStyle = hiddenInSinglePaneMode
+          ? HIDDEN_PANE_CELL_STYLE
+          : singlePaneMode
+            ? SINGLE_PANE_CELL_STYLE
+            : style;
         return (
           <div
             key={pane.pane_id}
             className="pane-cell"
             data-selected={selected}
-            style={singlePaneMode ? SINGLE_PANE_CELL_STYLE : style}
+            style={cellStyle}
+            aria-hidden={hiddenInSinglePaneMode}
             onPointerDown={() => onSelectPane(pane)}
           >
             <TerminalView

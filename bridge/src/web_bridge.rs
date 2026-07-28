@@ -54,7 +54,9 @@ use crate::notes::{
     AttachNoteRequest, CreateNoteRequest, NoteResponse, NotesError, NotesListQuery,
     NotesListResponse, NotesManager, RevisionRequest, UpdateNoteRequest,
 };
-use crate::store_util::{default_store_dir, ensure_private_dir, set_private_file_permissions};
+use crate::store_util::{
+    default_store_dir, ensure_private_dir, set_private_file_permissions, LockFile,
+};
 
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8787;
@@ -2607,6 +2609,10 @@ fn mobile_mode_flag_path() -> PathBuf {
     default_store_dir("HERDR_WEB_DATA_DIR", "", "herdr-web-data").join("mobile-mode")
 }
 
+fn mobile_mode_lock_path() -> PathBuf {
+    default_store_dir("HERDR_WEB_DATA_DIR", "", "herdr-web-data").join("mobile-mode.lock")
+}
+
 async fn mobile_mode_get_handler(
     State(state): State<BridgeState>,
     headers: HeaderMap,
@@ -2622,7 +2628,9 @@ async fn mobile_mode_toggle_handler(
 ) -> Result<Json<serde_json::Value>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
     let path = mobile_mode_flag_path();
+    let lock_path = mobile_mode_lock_path();
     let active = tokio::task::spawn_blocking(move || -> io::Result<bool> {
+        let _lock = LockFile::exclusive(&lock_path)?;
         if path.is_file() {
             std::fs::remove_file(&path)?;
             Ok(false)

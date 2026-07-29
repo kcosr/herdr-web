@@ -46,6 +46,8 @@ Install dependencies first:
 - npm
 - Rust stable
 - a platform C toolchain usable by Cargo
+- the local `web/local-deps/parlay-client` symlink from [web/README.md](../web/README.md), needed
+  before `npm ci --prefix web` can resolve `@parlay/client`
 
 ```bash
 npm ci
@@ -89,7 +91,8 @@ Confirm the archive contains the expected root directory, `bin/herdr-web`,
 
 ## Build Android APK
 
-Follow [docs/android.md](android.md) for SDK prerequisites, then build:
+Follow [docs/android.md](android.md) for SDK prerequisites, then build (the
+`web/local-deps/parlay-client` symlink noted above is required here too):
 
 ```bash
 npm ci

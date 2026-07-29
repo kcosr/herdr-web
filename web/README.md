@@ -30,6 +30,19 @@ npm run dev:web
 the debug `herdr-dev` socket. Override `HERDR_SOCKET_PATH` when targeting a named or development
 session.
 
+`@parlay/client` (used by the optional parlay-backed mobile command input, see
+`src/ParlayMobileInput.tsx`) is a local, unpublished sibling package, not an npm registry
+dependency. It resolves via `file:./local-deps/parlay-client`, a path kept at a fixed depth so it
+doesn't break for checkouts at a different on-disk location. Before `npm install`, point it at your
+local parlay checkout:
+
+```bash
+mkdir -p local-deps
+ln -s /path/to/parlay/packages/client local-deps/parlay-client
+```
+
+`local-deps/` is gitignored; each developer creates this symlink once, locally.
+
 The app expects these bridge routes:
 
 - `/api/capabilities`

@@ -19,6 +19,8 @@
   (`~/.local/share/herdr-web/mobile-mode` by default). herdr-web has no knowledge of what, if
   anything, reads the flag; a companion statusline script can check it directly to blank its
   output and save vertical space on mobile. [PR #39](https://github.com/kcosr/herdr-web/pull/39)
+- The mobile command input is now backed by a locally running parlay server for phrase-triggered
+  voice submit, replacing the previous native text input.
 
 ### Changed
 

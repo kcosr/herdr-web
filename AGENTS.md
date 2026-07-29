@@ -32,7 +32,8 @@ This is a lightweight internal onboarding note for agents working in this repo.
 
 ## Testing
 
-- Run `npm install --prefix web` if dependencies are missing.
+- Run `npm install --prefix web` if dependencies are missing. This requires the local
+  `web/local-deps/parlay-client` symlink described in `web/README.md`.
 - Run `npm run vendor:check` to verify the vendored layout.
 - Run `npm run lint:web` for ESLint.
 - Run `npm run test:web` for Vitest.

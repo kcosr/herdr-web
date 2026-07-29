@@ -10,7 +10,16 @@ import {
   TextCursorInput,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent, RefObject } from "react";
 import { autosizeMobileCommandTextarea } from "./mobileCommandTextarea";
 import { ConfirmDialog } from "./overlays";
@@ -54,11 +63,10 @@ import type {
   MobileTouchSelectionEndpointTimeoutMs,
 } from "./mobileTerminalPrefs";
 import type { PaneInfo } from "./types";
-import {
-  matchTrailingVoiceSubmitPhrase,
-  stripVoiceSubmitPhrase,
-  VOICE_SUBMIT_TIMER_MS,
-} from "./voiceSubmitPhrase";
+
+const ParlayMobileInput = lazy(() =>
+  import("./ParlayMobileInput").then((mod) => ({ default: mod.ParlayMobileInput })),
+);
 
 type Props = {
   pane: PaneInfo | null;
@@ -1504,9 +1512,6 @@ function MobileTerminalControls({
   const [value, setValue] = useState("");
   const [expanded, setExpanded] = useState(false);
   const [ctrlLatch, setCtrlLatch] = useState(false);
-  const voiceSubmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const onSubmitCommandRef = useRef(onSubmitCommand);
-  onSubmitCommandRef.current = onSubmitCommand;
   const setCommandInputNode = (node: HTMLInputElement | HTMLTextAreaElement | null) => {
     commandInputRef.current = node;
   };
@@ -1527,39 +1532,6 @@ function MobileTerminalControls({
       setCtrlLatch(false);
     }
   };
-
-  useEffect(() => {
-    const matchedTail = disabled ? null : matchTrailingVoiceSubmitPhrase(value);
-    if (!matchedTail) {
-      if (voiceSubmitTimerRef.current) {
-        clearTimeout(voiceSubmitTimerRef.current);
-        voiceSubmitTimerRef.current = null;
-      }
-      return;
-    }
-    if (voiceSubmitTimerRef.current) {
-      clearTimeout(voiceSubmitTimerRef.current);
-    }
-    voiceSubmitTimerRef.current = setTimeout(() => {
-      voiceSubmitTimerRef.current = null;
-      // Re-verify the buffer still ends with what we matched before firing —
-      // dictation may have kept correcting the tail during the arm window.
-      const stripped = stripVoiceSubmitPhrase(value, matchedTail);
-      if (!stripped) {
-        return;
-      }
-      onSubmitCommandRef.current(stripped);
-      setValue("");
-    }, VOICE_SUBMIT_TIMER_MS);
-  }, [value, disabled]);
-
-  useEffect(() => {
-    return () => {
-      if (voiceSubmitTimerRef.current) {
-        clearTimeout(voiceSubmitTimerRef.current);
-      }
-    };
-  }, []);
 
   useLayoutEffect(() => {
     if (expandingInput) {
@@ -1744,37 +1716,22 @@ function MobileTerminalControls({
         >
           <Smartphone size={15} />
         </button>
-        {expandingInput ? (
-          <textarea
-            ref={setCommandInputNode}
-            className="term-native-input mono"
-            rows={1}
-            data-expanding="true"
-            autoCapitalize="none"
-            autoComplete="off"
-            autoCorrect="off"
-            spellCheck={false}
-            enterKeyHint={enterNewline ? "enter" : "send"}
-            disabled={disabled}
+        <Suspense fallback={null}>
+          <ParlayMobileInput
             value={value}
-            onChange={(event) => setValue(event.target.value)}
+            onValueChange={setValue}
+            onVoiceSubmit={(text) => {
+              onSubmitCommand(text);
+              setValue("");
+            }}
+            disabled={disabled}
+            expandingInput={expandingInput}
+            enterNewline={enterNewline}
+            controlsScalePercent={controlsScalePercent}
             onKeyDown={onCommandTextareaKeyDown}
+            inputRef={setCommandInputNode}
           />
-        ) : (
-          <input
-            ref={setCommandInputNode}
-            className="term-native-input mono"
-            type="text"
-            autoCapitalize="none"
-            autoComplete="off"
-            autoCorrect="off"
-            spellCheck={false}
-            enterKeyHint="send"
-            disabled={disabled}
-            value={value}
-            onChange={(event) => setValue(event.target.value)}
-          />
-        )}
+        </Suspense>
         <button
           className="term-send term-stage-command"
           type="button"

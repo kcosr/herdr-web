@@ -39,8 +39,6 @@ import { autosizeMobileCommandTextarea } from "./mobileCommandTextarea";
 // required before `npm install`.
 
 const PARLAY_SERVER_URL = "http://localhost:4242";
-const PARLAY_DEVICE_ID = "herdr-web-mobile";
-const PARLAY_STREAM_ID = "herdr-web-mobile-command";
 
 setEvalServerBaseUrl(PARLAY_SERVER_URL);
 
@@ -71,9 +69,23 @@ export function ParlayMobileInput({
   const valueRef = useRef(value);
   const onValueChangeRef = useRef(onValueChange);
   const onVoiceSubmitRef = useRef(onVoiceSubmit);
+  const disabledRef = useRef(disabled);
   valueRef.current = value;
   onValueChangeRef.current = onValueChange;
   onVoiceSubmitRef.current = onVoiceSubmit;
+  disabledRef.current = disabled;
+
+  // Session-scoped so one browser tab can't receive or replay another tab's
+  // SSE-broadcast actions (the server's /api/chat/events stream is otherwise
+  // unauthenticated and keyed only by these IDs).
+  const idsRef = useRef<{ device: string; stream: string } | undefined>(undefined);
+  if (!idsRef.current) {
+    idsRef.current = {
+      device: `herdr-web-mobile-${crypto.randomUUID()}`,
+      stream: `herdr-web-mobile-command-${crypto.randomUUID()}`,
+    };
+  }
+  const { device: deviceId, stream: streamId } = idsRef.current;
 
   const setCommandInputNode = (node: HTMLInputElement | HTMLTextAreaElement | null) => {
     nodeRef.current = node;
@@ -100,6 +112,7 @@ export function ParlayMobileInput({
           onValueChangeRef.current("");
         },
         submit(text: string) {
+          if (disabledRef.current) return;
           const trimmed = text.trim();
           valueRef.current = "";
           onValueChangeRef.current("");
@@ -139,15 +152,15 @@ export function ParlayMobileInput({
       voiceEnabled: true,
       settleMs: PARLAY_SETTINGS_DEFAULTS.voiceSettleMs,
       tabs: [],
-      device: PARLAY_DEVICE_ID,
-      streamId: PARLAY_STREAM_ID,
+      device: deviceId,
+      streamId: streamId,
     });
     const resync = (reason: string) => {
       bumpInputVersion();
       scheduleEval(() => valueRef.current, evalCtx, true, reason);
     };
     const es = new EventSource(
-      `${PARLAY_SERVER_URL}/api/chat/events?device=${encodeURIComponent(PARLAY_DEVICE_ID)}`,
+      `${PARLAY_SERVER_URL}/api/chat/events?device=${encodeURIComponent(deviceId)}`,
     );
     const onInputAction = (event: MessageEvent<string>) => {
       let env: ActionEnvelope;
@@ -159,7 +172,7 @@ export function ParlayMobileInput({
       // Only act on envelopes addressed to this component's own stream — the
       // server's SSE broadcast is otherwise unauthenticated, and applyEnvelope
       // can drive a submit straight into the terminal pty.
-      if (env.streamId !== PARLAY_STREAM_ID) return;
+      if (env.streamId !== streamId) return;
       try {
         applyEnvelope(env, resync);
       } catch {
@@ -183,8 +196,8 @@ export function ParlayMobileInput({
         voiceEnabled: true,
         settleMs: PARLAY_SETTINGS_DEFAULTS.voiceSettleMs,
         tabs: [],
-        device: PARLAY_DEVICE_ID,
-        streamId: PARLAY_STREAM_ID,
+        device: deviceId,
+        streamId: streamId,
       }),
       false,
       "input",

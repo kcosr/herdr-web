@@ -296,14 +296,17 @@ Tailscale):
 scripts/run-bridge.sh --remote-bridge http://mini2:8787 --remote-bridge http://mini3:8787
 ```
 
-Each `--remote-bridge` URL must use `http://` (Tailscale traffic is plain HTTP; the bridge's outbound
-client has no TLS backend). The bridge derives a stable id from each URL's hostname, disambiguating
-collisions and dropping exact duplicates, and lists the configured remote bridges (id, label, url) in
-`/api/snapshot`'s `bridges` array, and standalone at `GET /api/bridges` (a lighter-weight read-only
-mirror of the same `--remote-bridge` config, without the session-snapshot round trip). `/api/remote/
-{bridge_id}/...` and `/ws/remote/{bridge_id}/terminal` then proxy REST reads and terminal WebSocket
-sessions through to that remote bridge. Only bridges the process was actually started with are
-reachable this way; the web app does not yet have UI to add or manage remote bridges.
+Each `--remote-bridge` value may be a full `http://host[:port]` URL or a bare `host[:port]`
+(the bridge adds `http://` automatically). `https://` is not accepted (Tailscale traffic is plain
+HTTP; the bridge's outbound client has no TLS backend). The bridge derives a stable id from each
+URL's hostname, disambiguating collisions and dropping exact duplicates, and lists the configured
+remote bridges (id, label, url) in `/api/snapshot`'s `bridges` array, and standalone at
+`GET /api/bridges` (a lighter-weight read-only mirror of the same `--remote-bridge` config, without
+the session-snapshot round trip). `/api/remote/{bridge_id}/...` and
+`/ws/remote/{bridge_id}/terminal` then proxy REST requests (to an explicit allow-list of endpoints)
+and terminal WebSocket sessions through to that remote bridge. Only bridges the process was actually
+started with are reachable this way; the web app does not yet have UI to add or manage remote
+bridges.
 
 ## Keyboard Shortcuts
 

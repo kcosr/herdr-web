@@ -57,9 +57,11 @@ other machines over Tailscale) with a repeatable `--remote-bridge URL` flag:
 bin/herdr-web --remote-bridge http://mini2:8787 --remote-bridge http://mini3:8787
 ```
 
-`--remote-bridge` URLs must use `http://`. The bridge derives an id from each URL's hostname and
-lists configured remote bridges in `/api/snapshot` and standalone at `GET /api/bridges`;
-`/api/remote/{bridge_id}/...` and `/ws/remote/{bridge_id}/terminal` proxy to that remote bridge. Only
-bridges the process was started with are reachable this way.
+`--remote-bridge` accepts a full `http://host[:port]` URL or a bare `host[:port]` (the bridge adds
+`http://` automatically); `https://` is not accepted. The bridge derives an id from each URL's
+hostname and lists configured remote bridges in `/api/snapshot` and standalone at `GET /api/bridges`;
+`/api/remote/{bridge_id}/...` and `/ws/remote/{bridge_id}/terminal` proxy REST requests (to an
+explicit allow-list of endpoints) and terminal WebSocket sessions to that remote bridge. Only bridges
+the process was started with are reachable this way.
 
 Only bind to non-loopback interfaces on networks you trust.

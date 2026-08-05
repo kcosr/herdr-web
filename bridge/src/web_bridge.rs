@@ -3140,6 +3140,96 @@ fn rest_path_is_safe(rest: &str) -> bool {
     true
 }
 
+/// Checks whether a decoded `rest` path is on the explicit proxy allow-list.
+///
+/// The proxy may only forward to the read-oriented API endpoints the web UI needs to display a
+/// remote bridge's workspace state. Write-capable endpoints that could execute commands or
+/// modify the remote host filesystem (`command`, `uploads`) are never forwarded regardless of
+/// the HTTP method used.
+///
+/// Allowed (GET and POST):
+///   - `snapshot`         — workspace snapshot (App.tsx:7631)
+///   - `capabilities`     — bridge feature detection (bridge.tsx:1000)
+///   - `agent-activity`   — agent monitoring feed (agentActivity.ts:42)
+///   - `agent-pins`       — pinned-agent list; sub-paths cover pin/unpin mutations
+///                          (agentPins.ts:48, 53, 57)
+///   - `notes`            — notes list and per-note operations (notes.ts:117, 122, 227)
+///   - `launcher-presets` — presets list, exact only; `launcher-presets/launch` is blocked
+///                          (launcherPresets.ts:66)
+///
+/// Blocked (anything not listed above, including):
+///   - `command`           — executes arbitrary shell commands on the remote
+///   - `uploads`           — writes files to the remote filesystem
+///   - `selection`         — sets terminal selection state
+///   - `mobile-mode`       — sets a local-filesystem flag on the remote
+///   - `bridges`           — not meaningful as a proxy target
+///   - `launcher-presets/launch` — POST that executes a launcher preset on the remote
+fn is_proxy_path_allowed(rest: &str) -> bool {
+    let path = rest.trim_start_matches('/');
+    // Exact match only (no sub-paths allowed for these):
+    if path == "launcher-presets" {
+        return true;
+    }
+    // Exact match or prefix match for paths that have sub-path variants:
+    const ALLOWED: &[&str] = &["snapshot", "capabilities", "agent-activity", "agent-pins", "notes"];
+    for &prefix in ALLOWED {
+        if path == prefix || path.starts_with(&format!("{prefix}/")) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Re-encodes a single path segment that axum has already percent-decoded.
+///
+/// axum's `Path` extractor decodes all `%XX` sequences in wildcard captures before the handler
+/// receives them. If the decoded segment contains bytes that are URL structural characters
+/// (`?`, `#`, space, …), concatenating it directly into a target URL string would let those
+/// bytes be re-interpreted by reqwest as query/fragment delimiters, enabling query-parameter
+/// injection. This function re-encodes every byte that is not an RFC 3986 `pchar` unreserved
+/// character or sub-delimiter before the segment is embedded in the forwarded URL.
+fn encode_url_path_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len() * 3 / 2);
+    for b in segment.bytes() {
+        if b.is_ascii_alphanumeric()
+            || matches!(
+                b,
+                b'-' | b'_'
+                    | b'.'
+                    | b'~'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b'+'
+                    | b','
+                    | b';'
+                    | b'='
+                    | b':'
+                    | b'@'
+            )
+        {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push(char::from_digit((b >> 4) as u32, 16).unwrap().to_ascii_uppercase());
+            out.push(char::from_digit((b & 0xf) as u32, 16).unwrap().to_ascii_uppercase());
+        }
+    }
+    out
+}
+
+/// Re-encodes a decoded rest path for safe inclusion in the forwarded URL.
+///
+/// Splits on `/` and re-encodes each segment with [`encode_url_path_segment`], then rejoins.
+/// Slash separators are preserved; only within-segment bytes are escaped.
+fn encode_rest_for_url(rest: &str) -> String {
+    rest.split('/').map(encode_url_path_segment).collect::<Vec<_>>().join("/")
+}
+
 /// Proxies `/api/remote/<bridge_id>/<rest>` requests through to `<remote-url>/api/<rest>` on
 /// another herdr-web bridge, forwarding method, query string, request body, and content type.
 async fn remote_api_proxy_handler(
@@ -3163,8 +3253,15 @@ async fn remote_api_proxy_handler(
     if !rest_path_is_safe(&rest) {
         return BridgeError::BadRequest("invalid remote proxy path".to_string()).into_response();
     }
+    if !is_proxy_path_allowed(&rest) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "path not permitted by proxy allow-list" })),
+        )
+            .into_response();
+    }
 
-    let mut target = format!("{}/api/{}", remote.base_url, rest);
+    let mut target = format!("{}/api/{}", remote.base_url, encode_rest_for_url(&rest));
     if let Some(query) = query.filter(|value| !value.is_empty()) {
         target.push('?');
         target.push_str(&query);
@@ -5817,6 +5914,47 @@ mod tests {
     fn rest_path_is_safe_rejects_percent_encoded_backslash_traversal() {
         assert!(!rest_path_is_safe("foo%5C..%5C..%5Csecret"));
         assert!(!rest_path_is_safe("foo%5c..%5c..%5csecret"));
+    }
+
+    #[test]
+    fn proxy_allow_list_accepts_allowed_paths() {
+        assert!(is_proxy_path_allowed("snapshot"));
+        assert!(is_proxy_path_allowed("capabilities"));
+        assert!(is_proxy_path_allowed("agent-activity"));
+        assert!(is_proxy_path_allowed("agent-pins"));
+        assert!(is_proxy_path_allowed("agent-pins/pane-1/pin"));
+        assert!(is_proxy_path_allowed("agent-pins/pane-1/unpin"));
+        assert!(is_proxy_path_allowed("notes"));
+        assert!(is_proxy_path_allowed("notes/abc123/revision"));
+        assert!(is_proxy_path_allowed("launcher-presets"));
+    }
+
+    #[test]
+    fn proxy_allow_list_rejects_blocked_paths() {
+        assert!(!is_proxy_path_allowed("command"));
+        assert!(!is_proxy_path_allowed("uploads"));
+        assert!(!is_proxy_path_allowed("selection"));
+        assert!(!is_proxy_path_allowed("mobile-mode"));
+        assert!(!is_proxy_path_allowed("bridges"));
+        assert!(!is_proxy_path_allowed("launcher-presets/launch"));
+        assert!(!is_proxy_path_allowed("unknown-endpoint"));
+        assert!(!is_proxy_path_allowed(""));
+    }
+
+    #[test]
+    fn encode_rest_for_url_preserves_safe_chars() {
+        assert_eq!(encode_rest_for_url("snapshot"), "snapshot");
+        assert_eq!(encode_rest_for_url("agent-pins/pane-1/pin"), "agent-pins/pane-1/pin");
+        assert_eq!(encode_rest_for_url("notes/abc_123"), "notes/abc_123");
+    }
+
+    #[test]
+    fn encode_rest_for_url_encodes_query_injection_chars() {
+        // A decoded '?' in a path segment must not become a query delimiter in the forwarded URL.
+        // '=' is an RFC 3986 sub-delimiter and is preserved in path segments.
+        assert_eq!(encode_rest_for_url("snapshot?inject=bad"), "snapshot%3Finject=bad");
+        assert_eq!(encode_rest_for_url("notes#fragment"), "notes%23fragment");
+        assert_eq!(encode_rest_for_url("notes/hello world"), "notes/hello%20world");
     }
 
     #[test]

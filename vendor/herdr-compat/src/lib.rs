@@ -7,6 +7,7 @@ pub mod config;
 pub mod input;
 pub mod ipc;
 pub mod logging;
+pub mod popup_size;
 pub mod protocol;
 pub mod raw_input;
 pub mod server;

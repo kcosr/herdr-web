@@ -921,6 +921,22 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
     allowed_connect_sources.sort();
     allowed_connect_sources.dedup();
 
+    // Workaround for herdr 0.8.0+ CORS origin check:
+    // herdr 0.8.0 added a CORS origin check that only allows localhost/127.0.0.1.
+    // When herdr-web is served from a non-localhost origin (e.g., machine hostname,
+    // Tailscale name, or remote IP), requests with non-localhost Origin headers
+    // get rejected with 403 "cross-origin requests are not allowed".
+    // We mitigate this by always allowing localhost as an origin, and instructing
+    // users to either (a) pass --allow-origin with their serving hostname, or
+    // (b) start herdr with an --allow-origin flag for their hostname.
+    // This ensures localhost-to-localhost communication always works.
+    if !allowed_origins
+        .iter()
+        .any(|o| o.starts_with("http://localhost"))
+    {
+        allowed_origins.push("http://localhost".to_string());
+    }
+
     if let Some(name) = explicit_session {
         crate::session::configure_explicit_session(&name)?;
     }
@@ -1027,6 +1043,7 @@ Runs the local HTTP/WebSocket bridge for herdr-web.\n\
 Defaults to the active Herdr daemon sockets and 127.0.0.1:8787.\n\
 Use --session NAME to target a named Herdr session and ignore HERDR_SOCKET_PATH.\n\
 Use --host 0.0.0.0 to listen on non-loopback interfaces.\n\
+Use --allow-origin http://HOSTNAME:PORT when serving from a non-localhost address to work around herdr 0.8.0+ CORS checks.\n\
 Use --allow-origin http://localhost for bundled Android app access.\n\
 Use --allow-host HOSTNAME to accept that exact DNS hostname in Host headers.\n\
 Use --allow-connect-origin ORIGIN to let the served web app connect to another bridge origin.\n\
@@ -2079,7 +2096,7 @@ fn launch_preset_blocking(
             if preset.is_builtin_shell() {
                 launch_builtin_shell_split(api, preset, title, target_pane_id, direction)
             } else if preset.agent_hint.is_some() {
-                launch_agent_split(api, preset, title, tab_id, direction)
+                launch_agent_split(api, preset, title, target_pane_id, direction)
             } else {
                 launch_layout_split(api, preset, title, tab_id, target_pane_id, direction)
             }
@@ -2169,25 +2186,52 @@ fn launch_agent_split(
     api: &ApiClient,
     preset: &ResolvedLauncherPreset,
     title: &str,
-    tab_id: String,
+    target_pane_id: String,
     direction: SplitDirection,
 ) -> Result<LauncherPresetLaunchResponse, LauncherPresetError> {
     let argv = preset
         .argv
         .clone()
         .ok_or_else(|| LauncherPresetError::invalid("preset argv is required"))?;
+    let kind = preset
+        .agent_hint
+        .clone()
+        .ok_or_else(|| LauncherPresetError::invalid("preset agent kind is required"))?;
+
+    // Herdr protocol 19's `agent.start` starts a managed agent inside an
+    // existing pane and no longer creates or places the pane itself (the
+    // v0.7.2 `cwd`/`workspace_id`/`tab_id`/`split`/`focus`/`env` fields are
+    // gone). Create the split pane first, carrying the preset cwd/env, then
+    // start the agent kind in the resulting pane.
+    let split = api_request(
+        api,
+        "herdr-web:launcher:agent-split:pane",
+        Method::PaneSplit(PaneSplitParams {
+            workspace_id: None,
+            target_pane_id: Some(target_pane_id),
+            direction,
+            ratio: None,
+            cwd: preset.cwd.clone(),
+            focus: true,
+            env: preset.launch_env(),
+        }),
+    )
+    .map_err(|err| LauncherPresetError::launch_failed(err.to_string()))?;
+    let ResponseResult::PaneInfo { pane } = split else {
+        return Err(LauncherPresetError::launch_failed(
+            "unexpected response for agent split pane creation",
+        ));
+    };
+
     let result = api_request(
         api,
-        "herdr-web:launcher:agent-split",
+        "herdr-web:launcher:agent-split:start",
         Method::AgentStart(AgentStartParams {
             name: title.into(),
-            cwd: preset.cwd.clone(),
-            workspace_id: None,
-            tab_id: Some(tab_id),
-            split: Some(direction),
-            focus: true,
-            argv,
-            env: preset.launch_env(),
+            kind,
+            pane_id: pane.pane_id,
+            args: argv,
+            timeout_ms: None,
         }),
     )
     .map_err(|err| LauncherPresetError::launch_failed(err.to_string()))?;
@@ -4129,7 +4173,10 @@ fn activity_message_from_subscription_value(value: serde_json::Value) -> Option<
         agent: event.agent,
         title: event.title,
         display_agent: event.display_agent,
-        custom_status: event.custom_status,
+        // Herdr protocol 19 removed `custom_status` from pane agent-status
+        // events (superseded by `state_labels`). The bridge keeps the field in
+        // its own activity payload for frontend compatibility, always null now.
+        custom_status: None,
         state_labels: event.state_labels,
     })
 }
@@ -4409,6 +4456,7 @@ fn open_terminal_attach(
                 | ServerMessage::WindowTitle { .. }
                 | ServerMessage::ReloadSoundConfig
                 | ServerMessage::MouseCapture { .. }
+                | ServerMessage::KittyKeyboardReportAll { .. }
                 | ServerMessage::PrefixInputSource { .. }
                 | ServerMessage::Frame(_)
                 | ServerMessage::Graphics { .. } => {}
@@ -5482,8 +5530,10 @@ mod tests {
             title: None,
             display_agent: None,
             agent_status: AgentStatus::Idle,
-            custom_status: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
             state_labels: HashMap::new(),
+            tokens: HashMap::new(),
             agent_session: None,
             scroll: None,
             revision: 1,
@@ -6118,6 +6168,36 @@ mod tests {
             MIN_TERMINAL_ATTACH_PROTOCOL - 1
         ));
         assert!(!supported_terminal_attach_protocol(PROTOCOL_VERSION + 1));
+    }
+
+    #[test]
+    fn terminal_attach_accepts_daemon_protocol_19() {
+        // The Herdr v0.8.0 daemon speaks wire protocol 19. After the compat
+        // refresh, `PROTOCOL_VERSION` is 19 and the accept range is 16..=19, so
+        // a live protocol-19 daemon must attach without the "newer than this
+        // herdr-web bridge supports" rejection.
+        assert_eq!(PROTOCOL_VERSION, 19);
+        assert_eq!(MIN_TERMINAL_ATTACH_PROTOCOL, 16);
+
+        assert!(supported_terminal_attach_protocol(19));
+        assert!(supported_terminal_attach_protocol(16));
+        assert!(supported_terminal_attach_protocol(17));
+
+        // A protocol-19 daemon status resolves to protocol 19 and is accepted.
+        assert_eq!(daemon_protocol_from_status(runtime_status(19)).unwrap(), 19);
+
+        // Boundaries: 15 is too old, 20 is too new, each with exact wording.
+        assert!(!supported_terminal_attach_protocol(15));
+        assert_eq!(
+            unsupported_daemon_protocol_message(15),
+            "Herdr daemon protocol 15 is too old for herdr-web; need protocol 16 or newer"
+        );
+
+        assert!(!supported_terminal_attach_protocol(20));
+        assert_eq!(
+            unsupported_daemon_protocol_message(20),
+            "Herdr daemon protocol 20 is newer than this herdr-web bridge supports; need protocol 19 or older"
+        );
     }
 
     #[test]

@@ -32,7 +32,7 @@ The browser app is not vendored into Herdr. It lives at `web/`, and `herdr-web-b
 ## Current Reference
 
 - Upstream checkout: a clean Herdr source checkout outside this repository
-- Upstream release baseline: `v0.7.2`
+- Upstream release baseline: `v0.8.0` (herdr-oss tag `v0.8.0`, wire protocol `19`)
 
 Use the upstream checkout as an external reference for audits and refreshes. It is not required to
 build `herdr-web`.
@@ -89,6 +89,19 @@ src/logging.rs             -> vendor/herdr-compat/src/logging.rs
 src/server/socket_paths.rs -> vendor/herdr-compat/src/server/socket_paths.rs
 ```
 
+When the exact-compared `schema/*.rs` or the `wire.rs` body reference upstream
+types that are not otherwise vendored, add only a **minimal supporting shim**
+for the referenced type — do not import the full upstream tree. Current shims:
+
+- `src/input.rs` / `src/raw_input.rs` — the `TerminalKey`, `WindowsKeyRecord`,
+  `TextCommit`, and `RawInputEvent` subset that `wire.rs` references (upstream
+  keeps these in `src/input/model.rs` and `src/raw_input.rs`). The grouping and
+  release-clamping semantics are copied faithfully so the exact-compared
+  `wire.rs` tests pass.
+- `src/popup_size.rs` — the `PopupSize` wire/schema type referenced by
+  `schema/plugins.rs` (upstream `src/popup_size.rs`). The terminal geometry
+  helpers are intentionally omitted.
+
 3. Preserve intentional local adaptations:
 
 - `ApiClient` takes concrete socket paths; it must not know bridge session rules.
@@ -130,10 +143,18 @@ the refit button after changing browser sizes.
 
 ## Compatibility Policy
 
-The bridge pings Herdr's status API at startup and requires daemon protocol `16` or newer. The
-`v0.7.2` baseline provides the native `session.snapshot` bootstrap API used by `/api/snapshot`, so
+The bridge pings Herdr's status API at startup and accepts daemon protocol `16` through
+`PROTOCOL_VERSION` (currently `19`, the `v0.8.0` baseline). The accept range is
+`MIN_TERMINAL_ATTACH_PROTOCOL..=PROTOCOL_VERSION` in `bridge/src/web_bridge.rs`; because
+`PROTOCOL_VERSION` is imported from `herdr_compat`, refreshing the vendored `wire.rs` protocol
+constant widens the accepted range automatically without a hardcoded bridge change. The `16`
+baseline still provides the native `session.snapshot` bootstrap API used by `/api/snapshot`, so
 older daemons are rejected before serving the web app. This is not a complete stability guarantee
 because the bridge mirrors private APIs.
+
+When the daemon's wire format evolves, keep `MIN_TERMINAL_ATTACH_PROTOCOL` at `16` unless a wire or
+schema change genuinely breaks compatibility with older daemons; only then raise it and justify the
+bump.
 
 When updating Herdr:
 

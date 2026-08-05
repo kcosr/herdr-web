@@ -425,8 +425,10 @@ mod tests {
             title: None,
             display_agent: Some("Codex".to_string()),
             agent_status: AgentStatus::Idle,
-            custom_status: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
             state_labels: HashMap::new(),
+            tokens: HashMap::new(),
             scroll: None,
             revision: 1,
         }

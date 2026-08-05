@@ -38,7 +38,10 @@ import { autosizeMobileCommandTextarea } from "./mobileCommandTextarea";
 // web/README.md for the one-time `local-deps/parlay-client` symlink setup
 // required before `npm install`.
 
-const PARLAY_SERVER_URL = "http://localhost:4242";
+// "localhost" would resolve to the client device itself when this page is
+// loaded remotely (e.g. over Tailscale/LAN from a phone), not the machine
+// serving it — derive the host from the page's own origin instead.
+const PARLAY_SERVER_URL = `${window.location.protocol}//${window.location.hostname}:4242`;
 
 setEvalServerBaseUrl(PARLAY_SERVER_URL);
 

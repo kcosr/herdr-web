@@ -43,6 +43,15 @@ ln -s /path/to/parlay/packages/client local-deps/parlay-client
 
 `local-deps/` is gitignored; each developer creates this symlink once, locally.
 
+Vite dev server environment variables:
+
+- `HERDR_WEB_BRIDGE` — bridge URL the dev server proxies `/api` and `/ws` to. Defaults to
+  `http://127.0.0.1:8787`.
+- `HERDR_WEB_ALLOWED_HOSTS` — comma-separated list of hostnames the Vite dev server accepts `Host`
+  headers from, e.g. `dev.example.ts.net`. Useful when reaching the dev server over Tailscale, a
+  tunnel, or a reverse proxy. Set to `*` to allow any host. Unset by default (Vite's standard host
+  restrictions apply).
+
 The app expects these bridge routes:
 
 - `/api/capabilities`

@@ -10,13 +10,15 @@ use std::thread;
 use std::time::Duration;
 
 use axum::body::Bytes;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, State};
+use axum::extract::ws::{
+    CloseFrame, Message, Utf8Bytes as AxumUtf8Bytes, WebSocket, WebSocketUpgrade,
+};
+use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, RawQuery, State};
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
-    ACCESS_CONTROL_MAX_AGE, ACCESS_CONTROL_REQUEST_HEADERS, HOST, ORIGIN, VARY,
+    ACCESS_CONTROL_MAX_AGE, ACCESS_CONTROL_REQUEST_HEADERS, CONTENT_TYPE, HOST, ORIGIN, VARY,
 };
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method as HttpMethod, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -25,6 +27,10 @@ use futures_util::{SinkExt, StreamExt};
 use herdr_compat::TryClone as _;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode as TsCloseCode;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame as TsCloseFrame;
+use tokio_tungstenite::tungstenite::Message as TsMessage;
+use tokio_tungstenite::tungstenite::Utf8Bytes as TsUtf8Bytes;
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
@@ -93,6 +99,16 @@ struct BridgeOptions {
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
     allowed_connect_sources: Vec<String>,
+    remote_bridges: Vec<String>,
+}
+
+/// Another herdr-web bridge instance (typically on a different Tailscale machine) that this
+/// bridge proxies `/api/remote/<id>/...` and `/ws/remote/<id>/terminal` requests through to.
+#[derive(Debug, Clone)]
+struct RemoteBridge {
+    id: String,
+    label: String,
+    base_url: String,
 }
 
 #[derive(Clone)]
@@ -110,6 +126,8 @@ struct BridgeState {
     ui_event_tx: tokio::sync::broadcast::Sender<String>,
     activity_tx: tokio::sync::broadcast::Sender<ActivityMessage>,
     upload_dir: PathBuf,
+    remote_bridges: Arc<Vec<RemoteBridge>>,
+    remote_http_client: reqwest::Client,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +146,20 @@ struct Snapshot {
     panes: Vec<PaneInfo>,
     layouts: Vec<PaneLayoutSnapshot>,
     selected_pane_id: Option<String>,
+    bridges: Vec<SnapshotBridgeInfo>,
+}
+
+#[derive(Debug, Serialize)]
+struct SnapshotBridgeInfo {
+    id: String,
+    label: String,
+    url: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BridgeListEntry {
+    id: String,
+    url: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -799,6 +831,7 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
     let mut allowed_hosts = Vec::new();
     let mut allowed_origins = Vec::new();
     let mut allowed_connect_sources = Vec::new();
+    let mut remote_bridges = Vec::new();
     let mut explicit_session = None;
     let mut index = 0;
 
@@ -874,6 +907,13 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
                 allowed_connect_sources.extend(connect_sources_for_origin(value)?);
                 index += 2;
             }
+            "--remote-bridge" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --remote-bridge".into());
+                };
+                remote_bridges.push(normalize_remote_bridge_url(value)?);
+                index += 2;
+            }
             arg => return Err(format!("unknown herdr-web option: {arg}")),
         }
     }
@@ -910,7 +950,84 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
         allowed_hosts,
         allowed_origins,
         allowed_connect_sources,
+        remote_bridges,
     }))
+}
+
+/// Normalizes a `--remote-bridge` value into a canonical `http://host[:port]` origin
+/// (adding `http://` when no scheme is given, matching the frontend's bridge URL convention).
+///
+/// Only `http://` is accepted: remote bridges are reached over Tailscale (plain HTTP), and the
+/// bridge's outbound HTTP/WS clients have no TLS backend, so an accepted `https://` URL would
+/// fail every proxy request at runtime instead of failing fast at startup.
+fn normalize_remote_bridge_url(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("remote bridge URL must not be empty".into());
+    }
+    if trimmed.to_ascii_lowercase().starts_with("https://") {
+        return Err("remote bridge URL must use http:// (https is not supported)".into());
+    }
+    let with_scheme = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{trimmed}")
+    };
+    let normalized = with_scheme.trim_end_matches('/').to_ascii_lowercase();
+    let Some(authority) = normalized.strip_prefix("http://") else {
+        return Err("remote bridge URL must use http:// (https is not supported)".into());
+    };
+    if authority.is_empty() || authority.contains('/') || authority.contains('@') {
+        return Err("remote bridge URL must include a host and no credentials".into());
+    }
+    Ok(normalized)
+}
+
+/// Assigns a stable id (derived from hostname) and display label to each configured remote
+/// bridge, deduplicating identical URLs and disambiguating id collisions.
+fn build_remote_bridges(urls: &[String]) -> Vec<RemoteBridge> {
+    let mut seen_urls = HashSet::new();
+    let mut used_ids = HashSet::new();
+    let mut bridges = Vec::new();
+    for url in urls {
+        if !seen_urls.insert(url.clone()) {
+            continue;
+        }
+        let base_id = remote_bridge_id_base(url);
+        let mut id = base_id.clone();
+        let mut suffix = 2;
+        while used_ids.contains(&id) {
+            id = format!("{base_id}-{suffix}");
+            suffix += 1;
+        }
+        used_ids.insert(id.clone());
+        bridges.push(RemoteBridge {
+            id,
+            label: remote_bridge_label(url),
+            base_url: url.clone(),
+        });
+    }
+    bridges
+}
+
+fn remote_bridge_id_base(url: &str) -> String {
+    let host = origin_authority(url).map(host_part).unwrap_or(url);
+    let slug: String = host
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect();
+    if slug.is_empty() {
+        "bridge".to_string()
+    } else {
+        slug
+    }
+}
+
+fn remote_bridge_label(url: &str) -> String {
+    origin_authority(url)
+        .map(host_part)
+        .unwrap_or(url)
+        .to_string()
 }
 
 fn print_help() {
@@ -920,7 +1037,7 @@ fn print_help() {
 fn help_text() -> &'static str {
     "herdr-web-bridge\n\
 \n\
-Usage: herdr-web-bridge [--session NAME] [--host HOST] [--port PORT] [--static-dir DIR] [--upload-dir DIR] [--launcher-presets PATH] [--allow-origin ORIGIN] [--allow-host HOSTNAME] [--allow-connect-origin ORIGIN]\n\
+Usage: herdr-web-bridge [--session NAME] [--host HOST] [--port PORT] [--static-dir DIR] [--upload-dir DIR] [--launcher-presets PATH] [--allow-origin ORIGIN] [--allow-host HOSTNAME] [--allow-connect-origin ORIGIN] [--remote-bridge URL]...\n\
 \n\
 Runs the local HTTP/WebSocket bridge for herdr-web.\n\
 Defaults to the active Herdr daemon sockets and 127.0.0.1:8787.\n\
@@ -931,6 +1048,10 @@ Use --allow-origin http://localhost for bundled Android app access.\n\
 Use --allow-host HOSTNAME to accept that exact DNS hostname in Host headers.\n\
 Use --allow-connect-origin ORIGIN to let the served web app connect to another bridge origin.\n\
 Use --launcher-presets PATH or HERDR_WEB_LAUNCHER_PRESETS to load custom launch presets.\n\
+Use --remote-bridge URL (repeatable) to register another herdr-web bridge (e.g. http://mini2:8787)\n\
+  to proxy through: reads at /api/remote/<id>/... and terminal sessions at\n\
+  /ws/remote/<id>/terminal, where <id> is the remote's hostname as reported in /api/snapshot's\n\
+  bridges array (also available standalone at GET /api/bridges).\n\
 Uploads default to HERDR_WEB_UPLOAD_DIR, XDG_DATA_HOME/herdr-web/uploads, or ~/.local/share/herdr-web/uploads."
 }
 
@@ -964,6 +1085,14 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         protocol = daemon_protocol,
         "herdr-web bridge connected to compatible Herdr daemon"
     );
+    let remote_bridges = build_remote_bridges(&options.remote_bridges);
+    for remote in &remote_bridges {
+        info!(id = %remote.id, url = %remote.base_url, "herdr-web bridge proxying remote bridge");
+    }
+    let remote_http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|err| io::Error::other(err.to_string()))?;
     let state = BridgeState {
         api,
         client_socket_path: crate::session::active_client_socket_path(),
@@ -978,6 +1107,8 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         ui_event_tx: tokio::sync::broadcast::channel(256).0,
         activity_tx: tokio::sync::broadcast::channel(512).0,
         upload_dir: options.upload_dir.clone(),
+        remote_bridges: Arc::new(remote_bridges),
+        remote_http_client,
     };
     spawn_agent_activity_watcher(state.clone());
     let agent_activity_routes = Router::new().route(
@@ -1059,6 +1190,10 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
             get(capabilities_handler).options(preflight_handler),
         )
         .route(
+            "/api/bridges",
+            get(bridges_handler).options(preflight_handler),
+        )
+        .route(
             "/api/command",
             post(command_handler).options(preflight_handler),
         )
@@ -1070,10 +1205,20 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
             "/api/uploads",
             post(upload_handler).options(preflight_handler),
         )
+        .route(
+            "/api/remote/{bridge_id}/{*rest}",
+            get(remote_api_proxy_handler)
+                .post(remote_api_proxy_handler)
+                .options(preflight_handler),
+        )
         .route("/ws/events", get(events_ws_handler))
         .route("/ws/activity", get(activity_ws_handler))
         .route("/ws/ui-events", get(ui_events_ws_handler))
         .route("/ws/terminal", get(terminal_ws_handler))
+        .route(
+            "/ws/remote/{bridge_id}/terminal",
+            get(remote_terminal_ws_handler),
+        )
         .fallback_service(
             ServiceBuilder::new()
                 .layer(CompressionLayer::new())
@@ -2514,16 +2659,27 @@ async fn snapshot_handler(
         Err(err) => warn!(error = %err, "failed to update pane note observations"),
     }
     let selected_pane_id = shared_selected_pane(&state, &session_snapshot.panes)?;
+    let bridges = state
+        .remote_bridges
+        .iter()
+        .map(|remote| SnapshotBridgeInfo {
+            id: remote.id.clone(),
+            label: remote.label.clone(),
+            url: remote.base_url.clone(),
+        })
+        .collect();
 
     Ok(Json(web_snapshot_from_session_snapshot(
         session_snapshot,
         selected_pane_id,
+        bridges,
     )))
 }
 
 fn web_snapshot_from_session_snapshot(
     snapshot: SessionSnapshot,
     selected_pane_id: Option<String>,
+    bridges: Vec<SnapshotBridgeInfo>,
 ) -> Snapshot {
     let SessionSnapshot {
         workspaces,
@@ -2562,6 +2718,7 @@ fn web_snapshot_from_session_snapshot(
         panes,
         layouts,
         selected_pane_id,
+        bridges,
     }
 }
 
@@ -2582,6 +2739,26 @@ async fn capabilities_handler(
         launcher_presets: LauncherPresetsCapability { version: 1 },
         notes: NotesCapability { version: 1 },
     }))
+}
+
+/// Returns the remote bridges this bridge was launched with (`--remote-bridge`), as a flat
+/// read-only mirror of server-side config. There is no dynamic registration: a bridge only
+/// appears here if the server process itself was started with that URL.
+async fn bridges_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<BridgeListEntry>>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    Ok(Json(
+        state
+            .remote_bridges
+            .iter()
+            .map(|remote| BridgeListEntry {
+                id: remote.id.clone(),
+                url: remote.base_url.clone(),
+            })
+            .collect(),
+    ))
 }
 
 async fn agent_activity_list_handler(
@@ -2915,6 +3092,317 @@ async fn terminal_ws_handler(
     }
     ws.on_upgrade(move |socket| handle_terminal_socket(socket, state, query))
         .into_response()
+}
+
+fn find_remote_bridge(bridges: &[RemoteBridge], id: &str) -> Option<RemoteBridge> {
+    bridges.iter().find(|bridge| bridge.id == id).cloned()
+}
+
+/// Percent-decodes a single path segment for traversal checks. Returns `None` if the segment
+/// contains an incomplete or invalid `%XX` escape, which callers should treat as unsafe.
+fn percent_decode_segment(segment: &str) -> Option<String> {
+    let bytes = segment.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes.get(i + 1..i + 3)?;
+            let hex_str = std::str::from_utf8(hex).ok()?;
+            let value = u8::from_str_radix(hex_str, 16).ok()?;
+            decoded.push(value);
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+/// Rejects `rest` path captures for the remote API proxy that contain `.` or `..` segments
+/// (including percent-encoded forms), which would otherwise let a request escape the
+/// `<remote-url>/api/` prefix once forwarded and resolved by the remote's URL parser. Backslash
+/// is also treated as a segment separator here because the `url` crate (used by reqwest) treats
+/// backslash as a path separator for special schemes like http/https when parsing the outbound
+/// target URL, so a raw or percent-encoded backslash could otherwise smuggle a `..` segment past
+/// the forward-slash-only check.
+fn rest_path_is_safe(rest: &str) -> bool {
+    for segment in rest.split('/') {
+        let Some(decoded) = percent_decode_segment(segment) else {
+            return false;
+        };
+        for sub_segment in decoded.split('\\') {
+            if sub_segment == "." || sub_segment == ".." {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Checks whether a decoded `rest` path is on the explicit proxy allow-list.
+///
+/// The proxy may only forward to the read-oriented API endpoints the web UI needs to display a
+/// remote bridge's workspace state. Write-capable endpoints that could execute commands or
+/// modify the remote host filesystem (`command`, `uploads`) are never forwarded regardless of
+/// the HTTP method used.
+///
+/// Allowed (GET and POST):
+///   - `snapshot`         — workspace snapshot (App.tsx:7631)
+///   - `capabilities`     — bridge feature detection (bridge.tsx:1000)
+///   - `agent-activity`   — agent monitoring feed (agentActivity.ts:42)
+///   - `agent-pins`       — pinned-agent list; sub-paths cover pin/unpin mutations
+///                          (agentPins.ts:48, 53, 57)
+///   - `notes`            — notes list and per-note operations (notes.ts:117, 122, 227)
+///   - `launcher-presets` — presets list, exact only; `launcher-presets/launch` is blocked
+///                          (launcherPresets.ts:66)
+///
+/// Blocked (anything not listed above, including):
+///   - `command`           — executes arbitrary shell commands on the remote
+///   - `uploads`           — writes files to the remote filesystem
+///   - `selection`         — sets terminal selection state
+///   - `mobile-mode`       — sets a local-filesystem flag on the remote
+///   - `bridges`           — not meaningful as a proxy target
+///   - `launcher-presets/launch` — POST that executes a launcher preset on the remote
+fn is_proxy_path_allowed(rest: &str) -> bool {
+    let path = rest.trim_start_matches('/');
+    // Exact match only (no sub-paths allowed for these):
+    if path == "launcher-presets" {
+        return true;
+    }
+    // Exact match or prefix match for paths that have sub-path variants:
+    const ALLOWED: &[&str] = &["snapshot", "capabilities", "agent-activity", "agent-pins", "notes"];
+    for &prefix in ALLOWED {
+        if path == prefix || path.starts_with(&format!("{prefix}/")) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Re-encodes a single path segment that axum has already percent-decoded.
+///
+/// axum's `Path` extractor decodes all `%XX` sequences in wildcard captures before the handler
+/// receives them. If the decoded segment contains bytes that are URL structural characters
+/// (`?`, `#`, space, …), concatenating it directly into a target URL string would let those
+/// bytes be re-interpreted by reqwest as query/fragment delimiters, enabling query-parameter
+/// injection. This function re-encodes every byte that is not an RFC 3986 `pchar` unreserved
+/// character or sub-delimiter before the segment is embedded in the forwarded URL.
+fn encode_url_path_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len() * 3 / 2);
+    for b in segment.bytes() {
+        if b.is_ascii_alphanumeric()
+            || matches!(
+                b,
+                b'-' | b'_'
+                    | b'.'
+                    | b'~'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b'+'
+                    | b','
+                    | b';'
+                    | b'='
+                    | b':'
+                    | b'@'
+            )
+        {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push(char::from_digit((b >> 4) as u32, 16).unwrap().to_ascii_uppercase());
+            out.push(char::from_digit((b & 0xf) as u32, 16).unwrap().to_ascii_uppercase());
+        }
+    }
+    out
+}
+
+/// Re-encodes a decoded rest path for safe inclusion in the forwarded URL.
+///
+/// Splits on `/` and re-encodes each segment with [`encode_url_path_segment`], then rejoins.
+/// Slash separators are preserved; only within-segment bytes are escaped.
+fn encode_rest_for_url(rest: &str) -> String {
+    rest.split('/').map(encode_url_path_segment).collect::<Vec<_>>().join("/")
+}
+
+/// Proxies `/api/remote/<bridge_id>/<rest>` requests through to `<remote-url>/api/<rest>` on
+/// another herdr-web bridge, forwarding method, query string, request body, and content type.
+async fn remote_api_proxy_handler(
+    State(state): State<BridgeState>,
+    AxumPath((bridge_id, rest)): AxumPath<(String, String)>,
+    method: HttpMethod,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(err) = ensure_allowed_request(&headers, &state.request_policy) {
+        return err.into_response();
+    }
+    let Some(remote) = find_remote_bridge(&state.remote_bridges, &bridge_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "unknown remote bridge" })),
+        )
+            .into_response();
+    };
+    if !rest_path_is_safe(&rest) {
+        return BridgeError::BadRequest("invalid remote proxy path".to_string()).into_response();
+    }
+    if !is_proxy_path_allowed(&rest) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "path not permitted by proxy allow-list" })),
+        )
+            .into_response();
+    }
+
+    let mut target = format!("{}/api/{}", remote.base_url, encode_rest_for_url(&rest));
+    if let Some(query) = query.filter(|value| !value.is_empty()) {
+        target.push('?');
+        target.push_str(&query);
+    }
+
+    let Ok(reqwest_method) = reqwest::Method::from_bytes(method.as_str().as_bytes()) else {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    };
+    let mut request = state.remote_http_client.request(reqwest_method, &target);
+    if let Some(content_type) = headers.get(CONTENT_TYPE) {
+        request = request.header(CONTENT_TYPE, content_type.clone());
+    }
+
+    let response = match request.body(body).send().await {
+        Ok(response) => response,
+        Err(err) => {
+            warn!(error = %err, target = %target, "remote bridge proxy request failed");
+            return BridgeError::Protocol(format!("remote bridge unreachable: {err}"))
+                .into_response();
+        }
+    };
+    let status = response.status();
+    let content_type = response.headers().get(CONTENT_TYPE).cloned();
+    let body_bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return BridgeError::Protocol(format!("remote bridge response error: {err}"))
+                .into_response();
+        }
+    };
+    let mut builder = Response::builder().status(status);
+    if let Some(content_type) = content_type {
+        builder = builder.header(CONTENT_TYPE, content_type);
+    }
+    builder
+        .body(axum::body::Body::from(body_bytes))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// Proxies `/ws/remote/<bridge_id>/terminal` websocket upgrades through to
+/// `<remote-url>/ws/terminal` on another herdr-web bridge, preserving the query string
+/// (terminal_id, cols, rows, coalesce_ms, takeover).
+async fn remote_terminal_ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<BridgeState>,
+    AxumPath(bridge_id): AxumPath<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(err) = ensure_allowed_request(&headers, &state.request_policy) {
+        return err.into_response();
+    }
+    let Some(remote) = find_remote_bridge(&state.remote_bridges, &bridge_id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    ws.on_upgrade(move |socket| proxy_terminal_socket(socket, remote, query))
+        .into_response()
+}
+
+async fn proxy_terminal_socket(local: WebSocket, remote: RemoteBridge, query: Option<String>) {
+    let scheme = if remote.base_url.starts_with("https://") {
+        "wss"
+    } else {
+        "ws"
+    };
+    let authority = remote.base_url.split_once("://").map_or("", |x| x.1);
+    let suffix = query
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("?{value}"))
+        .unwrap_or_default();
+    let target = format!("{scheme}://{authority}/ws/terminal{suffix}");
+
+    let remote_socket = match tokio_tungstenite::connect_async(&target).await {
+        Ok((socket, _response)) => socket,
+        Err(err) => {
+            warn!(error = %err, target = %target, "failed to connect to remote bridge terminal websocket");
+            return;
+        }
+    };
+
+    let (mut local_sink, mut local_stream) = local.split();
+    let (mut remote_sink, mut remote_stream) = remote_socket.split();
+    loop {
+        tokio::select! {
+            message = local_stream.next() => {
+                match message {
+                    Some(Ok(message)) => {
+                        if remote_sink.send(axum_message_to_tungstenite(message)).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            message = remote_stream.next() => {
+                match message {
+                    Some(Ok(message)) => {
+                        let Some(converted) = tungstenite_message_to_axum(message) else {
+                            continue;
+                        };
+                        if local_sink.send(converted).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            else => break,
+        }
+    }
+    let _ = remote_sink.close().await;
+    let _ = local_sink.close().await;
+}
+
+fn axum_message_to_tungstenite(message: Message) -> TsMessage {
+    match message {
+        Message::Text(text) => TsMessage::Text(TsUtf8Bytes::from(text.as_str())),
+        Message::Binary(data) => TsMessage::Binary(data),
+        Message::Ping(data) => TsMessage::Ping(data),
+        Message::Pong(data) => TsMessage::Pong(data),
+        Message::Close(Some(frame)) => TsMessage::Close(Some(TsCloseFrame {
+            code: TsCloseCode::from(frame.code),
+            reason: TsUtf8Bytes::from(frame.reason.as_str()),
+        })),
+        Message::Close(None) => TsMessage::Close(None),
+    }
+}
+
+fn tungstenite_message_to_axum(message: TsMessage) -> Option<Message> {
+    Some(match message {
+        TsMessage::Text(text) => Message::Text(AxumUtf8Bytes::from(text.as_str())),
+        TsMessage::Binary(data) => Message::Binary(data),
+        TsMessage::Ping(data) => Message::Ping(data),
+        TsMessage::Pong(data) => Message::Pong(data),
+        TsMessage::Close(Some(frame)) => Message::Close(Some(CloseFrame {
+            code: frame.code.into(),
+            reason: AxumUtf8Bytes::from(frame.reason.as_str()),
+        })),
+        TsMessage::Close(None) => Message::Close(None),
+        TsMessage::Frame(_) => return None,
+    })
 }
 
 async fn events_ws_handler(
@@ -4809,8 +5297,11 @@ mod tests {
 
     #[test]
     fn web_snapshot_adapter_preserves_web_shape_and_clear_name_flags() {
-        let snapshot =
-            web_snapshot_from_session_snapshot(test_session_snapshot(), Some("pane-2".to_string()));
+        let snapshot = web_snapshot_from_session_snapshot(
+            test_session_snapshot(),
+            Some("pane-2".to_string()),
+            Vec::new(),
+        );
 
         assert_eq!(snapshot.selected_pane_id.as_deref(), Some("pane-2"));
         assert_eq!(snapshot.workspaces.len(), 2);
@@ -4860,6 +5351,7 @@ mod tests {
         let snapshot = web_snapshot_from_session_snapshot(
             test_session_snapshot(),
             Some("missing".to_string()),
+            Vec::new(),
         );
 
         assert_eq!(snapshot.selected_pane_id, None);
@@ -5347,6 +5839,189 @@ mod tests {
         assert!(value.contains("connect-src 'self' data: http://srv:8787 ws://srv:8787;"));
         assert!(value.contains("img-src 'self' data: blob:;"));
         assert!(value.contains("frame-ancestors 'none'"));
+    }
+
+    #[test]
+    fn normalize_remote_bridge_url_accepts_http_and_adds_scheme_when_missing() {
+        assert_eq!(
+            normalize_remote_bridge_url("mini2:8787").unwrap(),
+            "http://mini2:8787"
+        );
+        assert_eq!(
+            normalize_remote_bridge_url("HTTP://Mini2:8787/").unwrap(),
+            "http://mini2:8787"
+        );
+    }
+
+    #[test]
+    fn normalize_remote_bridge_url_rejects_https() {
+        let err = normalize_remote_bridge_url("https://mini2:8787").unwrap_err();
+        assert!(err.contains("http://"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn normalize_remote_bridge_url_rejects_unsupported_scheme() {
+        assert!(normalize_remote_bridge_url("ws://mini2:8787").is_err());
+    }
+
+    #[test]
+    fn normalize_remote_bridge_url_rejects_empty_and_missing_host() {
+        assert!(normalize_remote_bridge_url("").is_err());
+        assert!(normalize_remote_bridge_url("   ").is_err());
+        assert!(normalize_remote_bridge_url("http://").is_err());
+    }
+
+    #[test]
+    fn normalize_remote_bridge_url_rejects_credentials() {
+        assert!(normalize_remote_bridge_url("http://user:pass@mini2:8787").is_err());
+    }
+
+    #[test]
+    fn rest_path_is_safe_accepts_normal_path() {
+        assert!(rest_path_is_safe("snapshot"));
+        assert!(rest_path_is_safe("tabs/1/panes/2"));
+    }
+
+    #[test]
+    fn rest_path_is_safe_rejects_leading_traversal() {
+        assert!(!rest_path_is_safe("../secret"));
+    }
+
+    #[test]
+    fn rest_path_is_safe_rejects_embedded_traversal() {
+        assert!(!rest_path_is_safe("snapshot/../../secret"));
+    }
+
+    #[test]
+    fn rest_path_is_safe_rejects_percent_encoded_traversal() {
+        assert!(!rest_path_is_safe("%2e%2e/secret"));
+        assert!(!rest_path_is_safe("%2E%2E/secret"));
+    }
+
+    #[test]
+    fn rest_path_is_safe_rejects_single_dot_segment() {
+        assert!(!rest_path_is_safe("./secret"));
+        assert!(!rest_path_is_safe("snapshot/."));
+    }
+
+    #[test]
+    fn rest_path_is_safe_rejects_raw_backslash_traversal() {
+        assert!(!rest_path_is_safe("foo\\..\\..\\secret"));
+        assert!(!rest_path_is_safe("..\\secret"));
+    }
+
+    #[test]
+    fn rest_path_is_safe_rejects_percent_encoded_backslash_traversal() {
+        assert!(!rest_path_is_safe("foo%5C..%5C..%5Csecret"));
+        assert!(!rest_path_is_safe("foo%5c..%5c..%5csecret"));
+    }
+
+    #[test]
+    fn proxy_allow_list_accepts_allowed_paths() {
+        assert!(is_proxy_path_allowed("snapshot"));
+        assert!(is_proxy_path_allowed("capabilities"));
+        assert!(is_proxy_path_allowed("agent-activity"));
+        assert!(is_proxy_path_allowed("agent-pins"));
+        assert!(is_proxy_path_allowed("agent-pins/pane-1/pin"));
+        assert!(is_proxy_path_allowed("agent-pins/pane-1/unpin"));
+        assert!(is_proxy_path_allowed("notes"));
+        assert!(is_proxy_path_allowed("notes/abc123/revision"));
+        assert!(is_proxy_path_allowed("launcher-presets"));
+    }
+
+    #[test]
+    fn proxy_allow_list_rejects_blocked_paths() {
+        assert!(!is_proxy_path_allowed("command"));
+        assert!(!is_proxy_path_allowed("uploads"));
+        assert!(!is_proxy_path_allowed("selection"));
+        assert!(!is_proxy_path_allowed("mobile-mode"));
+        assert!(!is_proxy_path_allowed("bridges"));
+        assert!(!is_proxy_path_allowed("launcher-presets/launch"));
+        assert!(!is_proxy_path_allowed("unknown-endpoint"));
+        assert!(!is_proxy_path_allowed(""));
+    }
+
+    #[test]
+    fn encode_rest_for_url_preserves_safe_chars() {
+        assert_eq!(encode_rest_for_url("snapshot"), "snapshot");
+        assert_eq!(encode_rest_for_url("agent-pins/pane-1/pin"), "agent-pins/pane-1/pin");
+        assert_eq!(encode_rest_for_url("notes/abc_123"), "notes/abc_123");
+    }
+
+    #[test]
+    fn encode_rest_for_url_encodes_query_injection_chars() {
+        // A decoded '?' in a path segment must not become a query delimiter in the forwarded URL.
+        // '=' is an RFC 3986 sub-delimiter and is preserved in path segments.
+        assert_eq!(encode_rest_for_url("snapshot?inject=bad"), "snapshot%3Finject=bad");
+        assert_eq!(encode_rest_for_url("notes#fragment"), "notes%23fragment");
+        assert_eq!(encode_rest_for_url("notes/hello world"), "notes/hello%20world");
+    }
+
+    #[test]
+    fn build_remote_bridges_dedups_exact_duplicate_urls() {
+        let urls = vec![
+            "http://mini2:8787".to_string(),
+            "http://mini2:8787".to_string(),
+        ];
+        let bridges = build_remote_bridges(&urls);
+        assert_eq!(bridges.len(), 1);
+        assert_eq!(bridges[0].id, "mini2");
+    }
+
+    #[test]
+    fn build_remote_bridges_disambiguates_id_collisions() {
+        let urls = vec![
+            "http://mini.2:8787".to_string(),
+            "http://mini-2:8787".to_string(),
+            "http://mini_2:8787".to_string(),
+        ];
+        let bridges = build_remote_bridges(&urls);
+        let ids: Vec<&str> = bridges.iter().map(|bridge| bridge.id.as_str()).collect();
+        assert_eq!(ids, vec!["mini-2", "mini-2-2", "mini-2-3"]);
+    }
+
+    #[test]
+    fn axum_and_tungstenite_messages_round_trip() {
+        let text = Message::Text(AxumUtf8Bytes::from("hello"));
+        match tungstenite_message_to_axum(axum_message_to_tungstenite(text)) {
+            Some(Message::Text(value)) => assert_eq!(value.as_str(), "hello"),
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        let binary = Message::Binary(vec![1, 2, 3].into());
+        match tungstenite_message_to_axum(axum_message_to_tungstenite(binary)) {
+            Some(Message::Binary(value)) => assert_eq!(value.as_ref(), &[1, 2, 3]),
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        let ping = Message::Ping(vec![9].into());
+        match tungstenite_message_to_axum(axum_message_to_tungstenite(ping)) {
+            Some(Message::Ping(value)) => assert_eq!(value.as_ref(), &[9]),
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        let pong = Message::Pong(vec![7].into());
+        match tungstenite_message_to_axum(axum_message_to_tungstenite(pong)) {
+            Some(Message::Pong(value)) => assert_eq!(value.as_ref(), &[7]),
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        let close = Message::Close(Some(CloseFrame {
+            code: 1000,
+            reason: AxumUtf8Bytes::from("bye"),
+        }));
+        match tungstenite_message_to_axum(axum_message_to_tungstenite(close)) {
+            Some(Message::Close(Some(frame))) => {
+                assert_eq!(u16::from(frame.code), 1000);
+                assert_eq!(frame.reason.as_str(), "bye");
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        match tungstenite_message_to_axum(axum_message_to_tungstenite(Message::Close(None))) {
+            Some(Message::Close(None)) => {}
+            other => panic!("unexpected message: {other:?}"),
+        }
     }
 
     #[test]

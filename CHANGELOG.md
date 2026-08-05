@@ -22,6 +22,15 @@ Files: CHANGELOG.md, AGENTS.md, web/src/App.tsx, web/src/paneSearch.ts, bridge/s
   (`~/.local/share/herdr-web/mobile-mode` by default). herdr-web has no knowledge of what, if
   anything, reads the flag; a companion statusline script can check it directly to blank its
   output and save vertical space on mobile. [PR #39](https://github.com/kcosr/herdr-web/pull/39)
+- Added a `--remote-bridge <url>` bridge CLI flag (repeatable) to register other herdr-web bridge
+  instances (e.g. reached over Tailscale) as remote bridges. `/api/snapshot` now includes a
+  `bridges` array describing each configured remote bridge (id, label, url), and a standalone
+  `GET /api/bridges` endpoint returning the same list (`id`, `url`) without the session-snapshot
+  round trip. The bridge proxies REST requests to an explicit allow-list of endpoints
+  (`/api/remote/{bridge_id}/...`, GET and POST) and terminal WebSocket connections
+  (`/ws/remote/{bridge_id}/terminal`) to the corresponding remote bridge. Paths outside the
+  allow-list are rejected locally with 403; command-execution and upload endpoints are never
+  forwarded.
 - The mobile command input is now backed by a locally running parlay server for phrase-triggered
   voice submit, replacing the previous native text input.
 

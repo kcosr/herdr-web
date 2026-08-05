@@ -178,6 +178,20 @@ bin/herdr-web --host 0.0.0.0 --allow-host host-b --allow-origin http://host-a:87
 served page's Content Security Policy so that page can connect to another bridge over HTTP and
 WebSocket.
 
+As an alternative, a bridge can proxy another herdr-web bridge server-side (for example, reaching
+other machines over Tailscale) with a repeatable `--remote-bridge URL` flag:
+
+```bash
+bin/herdr-web --remote-bridge http://mini2:8787 --remote-bridge http://mini3:8787
+```
+
+`--remote-bridge` accepts a full `http://host[:port]` URL or a bare `host[:port]` (the bridge adds
+`http://` automatically); `https://` is not accepted. The bridge derives an id from each URL's
+hostname and lists configured remote bridges in `/api/snapshot` and standalone at `GET /api/bridges`;
+`/api/remote/{bridge_id}/...` and `/ws/remote/{bridge_id}/terminal` proxy REST requests (to an
+explicit allow-list of endpoints) and terminal WebSocket sessions to that remote bridge. Only bridges
+the process was started with are reachable this way.
+
 ## Manual Release Upload
 
 The release script creates the GitHub release from changelog notes. Separately packaged tarballs and

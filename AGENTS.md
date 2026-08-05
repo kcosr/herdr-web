@@ -29,6 +29,15 @@ This is a lightweight internal onboarding note for agents working in this repo.
   restore-on-load effect, and the save effect (object + dependency array). `isCompactLayout` (narrow
   viewport, `max-width: 820px`) and `isTouchInput`/`mobileControls` (coarse pointer, no hover) are
   separate signals gating different mobile behaviors — do not assume one implies the other.
+- Remote bridges (`--remote-bridge <url>`, proxied under `/api/remote/{bridge_id}/...` and
+  `/ws/remote/{bridge_id}/terminal`) are only reachable if the local bridge process was started with
+  that URL — bridge ids are derived server-side from the URL hostname. Any client-side UI for adding
+  remote bridges must either mirror what the server actually has configured or call a registration
+  API; a purely client-local list of URLs cannot work standalone.
+- The REST proxy (`remote_api_proxy_handler`) enforces an explicit allow-list via
+  `is_proxy_path_allowed()`. Only the paths in that list are forwarded; command-execution and upload
+  endpoints are never proxied. Add new proxied paths there; do not widen the allow-list without
+  review.
 
 ## Testing
 

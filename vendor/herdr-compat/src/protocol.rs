@@ -8,7 +8,7 @@ mod bridge_fixture_tests {
 
     #[test]
     fn protocol_version_matches_reviewed_herdr_snapshot() {
-        assert_eq!(PROTOCOL_VERSION, 16);
+        assert_eq!(PROTOCOL_VERSION, 19);
     }
 
     #[test]
@@ -26,7 +26,7 @@ mod bridge_fixture_tests {
         let mut frame = Vec::new();
         write_message(&mut frame, &msg).unwrap();
 
-        assert_eq!(frame, vec![9, 0, 0, 0, 0, 16, 80, 24, 8, 16, 0, 0, 1]);
+        assert_eq!(frame, vec![9, 0, 0, 0, 0, 19, 80, 24, 8, 16, 0, 0, 1]);
         let decoded: ClientMessage = read_message(&mut frame.as_slice(), MAX_FRAME_SIZE).unwrap();
         assert_eq!(decoded, msg);
     }
@@ -41,7 +41,7 @@ mod bridge_fixture_tests {
         let mut frame = Vec::new();
         write_message(&mut frame, &msg).unwrap();
 
-        assert_eq!(frame, vec![4, 0, 0, 0, 0, 16, 1, 0]);
+        assert_eq!(frame, vec![4, 0, 0, 0, 0, 19, 1, 0]);
         let decoded: ServerMessage = read_message(&mut frame.as_slice(), MAX_FRAME_SIZE).unwrap();
         assert_eq!(decoded, msg);
     }

@@ -27,6 +27,29 @@ pub enum IntegrationTarget {
     Qodercli,
     Cursor,
     Mastracode,
+    AntigravityCli,
+    Grok,
+}
+
+impl IntegrationTarget {
+    pub(crate) const ALL: [Self; 16] = [
+        Self::Pi,
+        Self::Omp,
+        Self::Claude,
+        Self::Codex,
+        Self::Copilot,
+        Self::Devin,
+        Self::Droid,
+        Self::Kimi,
+        Self::Opencode,
+        Self::Kilo,
+        Self::Hermes,
+        Self::Qodercli,
+        Self::Cursor,
+        Self::Mastracode,
+        Self::AntigravityCli,
+        Self::Grok,
+    ];
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

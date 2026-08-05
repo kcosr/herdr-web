@@ -20,10 +20,14 @@ pub enum Subscription {
     WorkspaceCreated {},
     #[serde(rename = "workspace.updated")]
     WorkspaceUpdated {},
+    #[serde(rename = "workspace.metadata_updated")]
+    WorkspaceMetadataUpdated {},
     #[serde(rename = "workspace.renamed")]
     WorkspaceRenamed {},
     #[serde(rename = "workspace.moved")]
     WorkspaceMoved {},
+    #[serde(rename = "workspace.reordered")]
+    WorkspaceReordered {},
     #[serde(rename = "workspace.closed")]
     WorkspaceClosed {},
     #[serde(rename = "workspace.focused")]
@@ -48,6 +52,8 @@ pub enum Subscription {
     PaneCreated {},
     #[serde(rename = "pane.closed")]
     PaneClosed {},
+    #[serde(rename = "pane.updated")]
+    PaneUpdated {},
     #[serde(rename = "pane.focused")]
     PaneFocused {},
     #[serde(rename = "pane.moved")]
@@ -188,9 +194,11 @@ pub enum EventMatch {
 pub enum EventKind {
     WorkspaceCreated,
     WorkspaceUpdated,
+    WorkspaceMetadataUpdated,
     WorkspaceClosed,
     WorkspaceRenamed,
     WorkspaceMoved,
+    WorkspaceReordered,
     WorkspaceFocused,
     WorktreeCreated,
     WorktreeOpened,
@@ -202,6 +210,7 @@ pub enum EventKind {
     TabFocused,
     PaneCreated,
     PaneClosed,
+    PaneUpdated,
     PaneFocused,
     PaneMoved,
     PaneOutputChanged,
@@ -216,9 +225,11 @@ impl EventKind {
         match self {
             EventKind::WorkspaceCreated => "workspace.created",
             EventKind::WorkspaceUpdated => "workspace.updated",
+            EventKind::WorkspaceMetadataUpdated => "workspace.metadata_updated",
             EventKind::WorkspaceClosed => "workspace.closed",
             EventKind::WorkspaceRenamed => "workspace.renamed",
             EventKind::WorkspaceMoved => "workspace.moved",
+            EventKind::WorkspaceReordered => "workspace.reordered",
             EventKind::WorkspaceFocused => "workspace.focused",
             EventKind::WorktreeCreated => "worktree.created",
             EventKind::WorktreeOpened => "worktree.opened",
@@ -230,6 +241,7 @@ impl EventKind {
             EventKind::TabFocused => "tab.focused",
             EventKind::PaneCreated => "pane.created",
             EventKind::PaneClosed => "pane.closed",
+            EventKind::PaneUpdated => "pane.updated",
             EventKind::PaneFocused => "pane.focused",
             EventKind::PaneMoved => "pane.moved",
             EventKind::PaneOutputChanged => "pane.output_changed",
@@ -245,9 +257,11 @@ impl EventKind {
 pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::WorkspaceCreated,
     EventKind::WorkspaceUpdated,
+    EventKind::WorkspaceMetadataUpdated,
     EventKind::WorkspaceClosed,
     EventKind::WorkspaceRenamed,
     EventKind::WorkspaceMoved,
+    EventKind::WorkspaceReordered,
     EventKind::WorkspaceFocused,
     EventKind::WorktreeCreated,
     EventKind::WorktreeOpened,
@@ -259,6 +273,7 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::TabFocused,
     EventKind::PaneCreated,
     EventKind::PaneClosed,
+    EventKind::PaneUpdated,
     EventKind::PaneFocused,
     EventKind::PaneMoved,
     EventKind::PaneOutputChanged,
@@ -274,6 +289,7 @@ pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
     EventKind::WorkspaceClosed,
     EventKind::WorkspaceRenamed,
     EventKind::WorkspaceMoved,
+    EventKind::WorkspaceReordered,
     EventKind::WorkspaceFocused,
     EventKind::WorktreeCreated,
     EventKind::WorktreeOpened,
@@ -336,6 +352,8 @@ mod known_event_name_tests {
         let names = plugin_hook_event_names();
         assert!(!names.contains(&"pane.output_changed"));
         assert!(!names.contains(&"layout.updated"));
+        assert!(!names.contains(&"workspace.metadata_updated"));
+        assert!(!names.contains(&"pane.updated"));
         assert!(names.contains(&"pane.moved"));
     }
 }
@@ -385,8 +403,6 @@ pub struct PaneAgentStatusChangedEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_status: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_agent: Option<String>,
@@ -410,6 +426,9 @@ pub enum EventData {
     WorkspaceUpdated {
         workspace: WorkspaceInfo,
     },
+    WorkspaceMetadataUpdated {
+        workspace: WorkspaceInfo,
+    },
     WorkspaceClosed {
         workspace_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -422,6 +441,12 @@ pub enum EventData {
     WorkspaceMoved {
         workspace_id: String,
         insert_index: usize,
+        workspaces: Vec<WorkspaceInfo>,
+    },
+    WorkspaceReordered {
+        workspace_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_workspace_id: Option<String>,
         workspaces: Vec<WorkspaceInfo>,
     },
     WorkspaceFocused {
@@ -472,6 +497,9 @@ pub enum EventData {
         pane_id: String,
         workspace_id: String,
     },
+    PaneUpdated {
+        pane: PaneInfo,
+    },
     PaneFocused {
         pane_id: String,
         workspace_id: String,
@@ -504,6 +532,10 @@ pub enum EventData {
         workspace_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        released: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        final_status: Option<AgentStatus>,
     },
     PaneAgentStatusChanged {
         pane_id: String,
@@ -515,8 +547,6 @@ pub enum EventData {
         title: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         display_agent: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        custom_status: Option<String>,
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         state_labels: HashMap<String, String>,
     },

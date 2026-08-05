@@ -101,8 +101,18 @@ pub enum ResponseResult {
         agent: AgentInfo,
         argv: Vec<String>,
     },
+    AgentPrompted {
+        agent: AgentInfo,
+    },
     AgentList {
         agents: Vec<AgentInfo>,
+    },
+    AgentView {
+        active: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
     },
     PaneInfo {
         pane: PaneInfo,
@@ -151,6 +161,10 @@ pub enum ResponseResult {
     },
     PaneRead {
         read: PaneReadResult,
+    },
+    PaneGraphicsInfo {
+        cell_width_px: u32,
+        cell_height_px: u32,
     },
     AgentExplain {
         explain: serde_json::Value,

@@ -30,7 +30,7 @@ Files: CHANGELOG.md, AGENTS.md, web/src/App.tsx, web/src/paneSearch.ts, bridge/s
   (`/api/remote/{bridge_id}/...`, GET and POST) and terminal WebSocket connections
   (`/ws/remote/{bridge_id}/terminal`) to the corresponding remote bridge. Paths outside the
   allow-list are rejected locally with 403; command-execution and upload endpoints are never
-  forwarded.
+  forwarded. [PR #11](https://github.com/trillium/herdr-web/pull/11)
 - The mobile command input is now backed by a locally running parlay server for phrase-triggered
   voice submit, replacing the previous native text input.
 

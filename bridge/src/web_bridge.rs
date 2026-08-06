@@ -974,8 +974,8 @@ fn normalize_remote_bridge_url(value: &str) -> Result<String, String> {
     let Some(authority) = normalized.strip_prefix("http://") else {
         return Err("remote bridge URL must use http:// (https is not supported)".into());
     };
-    if authority.is_empty() || authority.contains('/') || authority.contains('@') {
-        return Err("remote bridge URL must include a host and no credentials".into());
+    if authority.is_empty() || authority.contains('/') || authority.contains('@') || authority.contains('?') || authority.contains('#') {
+        return Err("remote bridge URL must include a host and no credentials, query string, or fragments".into());
     }
     Ok(normalized)
 }
@@ -3331,10 +3331,19 @@ async fn proxy_terminal_socket(local: WebSocket, remote: RemoteBridge, query: Op
         .unwrap_or_default();
     let target = format!("{scheme}://{authority}/ws/terminal{suffix}");
 
-    let remote_socket = match tokio_tungstenite::connect_async(&target).await {
-        Ok((socket, _response)) => socket,
-        Err(err) => {
+    let remote_socket = match tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio_tungstenite::connect_async(&target),
+    )
+    .await
+    {
+        Ok(Ok((socket, _response))) => socket,
+        Ok(Err(err)) => {
             warn!(error = %err, target = %target, "failed to connect to remote bridge terminal websocket");
+            return;
+        }
+        Err(_) => {
+            warn!(target = %target, "timeout connecting to remote bridge terminal websocket (5s)");
             return;
         }
     };
@@ -6511,6 +6520,19 @@ mod tests {
         let parent = PathBuf::from("/tmp/herdr-web/uploads");
         assert!(is_direct_child(&parent, &parent.join("file.png")));
         assert!(!is_direct_child(&parent, &parent.join("nested/file.png")));
+    }
+
+    #[test]
+    fn remote_bridge_url_validation_rejects_query_strings_and_fragments() {
+        assert!(normalize_remote_bridge_url("http://remote1:8787").is_ok());
+        assert!(normalize_remote_bridge_url("http://remote1:8787/").is_ok());
+        assert!(normalize_remote_bridge_url("remote1:8787").is_ok());
+        assert!(normalize_remote_bridge_url("http://remote1:8787?query=value").is_err());
+        assert!(normalize_remote_bridge_url("http://remote1:8787#fragment").is_err());
+        assert!(normalize_remote_bridge_url("remote1:8787?x").is_err());
+        assert!(normalize_remote_bridge_url("remote1:8787#x").is_err());
+        assert!(normalize_remote_bridge_url("http://testuser@remote1:8787").is_err());
+        assert!(normalize_remote_bridge_url("http://remote1:8787/path").is_err());
     }
 
     fn origin_headers(host: &str, origin: Option<&str>) -> HeaderMap {

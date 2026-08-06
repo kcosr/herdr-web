@@ -29,4 +29,15 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    rolldownOptions: {
+      external: ["@parlay/client"],
+      onwarn(warning: any) {
+        // Suppress warning for unresolved @parlay/client — it's optional.
+        if (warning.message?.includes("@parlay/client")) {
+          return;
+        }
+      },
+    },
+  },
 });

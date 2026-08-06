@@ -1247,7 +1247,7 @@ async fn add_security_headers(
     );
     headers.insert(
         HeaderName::from_static("content-security-policy"),
-        content_security_policy(&policy),
+        content_security_policy(&policy, posthog_enabled()),
     );
     if let Some(origin) = cors_origin {
         insert_cors_headers(headers, origin);
@@ -1557,8 +1557,20 @@ fn connect_sources_for_origin(origin: &str) -> Result<Vec<String>, String> {
     Ok(vec![origin, websocket_origin])
 }
 
-fn content_security_policy(policy: &RequestPolicy) -> HeaderValue {
-    let mut connect_src = vec!["'self'".to_string(), "data:".to_string()];
+fn posthog_enabled() -> bool {
+    std::env::var("HERDR_POSTHOG_ENABLED").is_ok()
+}
+
+fn content_security_policy(policy: &RequestPolicy, posthog_enabled: bool) -> HeaderValue {
+    let mut connect_src = vec![
+        "'self'".to_string(),
+        "data:".to_string(),
+    ];
+    // Only allow PostHog hosts if explicitly enabled
+    if posthog_enabled {
+        connect_src.push("https://us.i.posthog.com".to_string());
+        connect_src.push("https://us-assets.i.posthog.com".to_string());
+    }
     connect_src.extend(policy.allowed_connect_sources.iter().cloned());
     let value = format!(
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src {}; \
@@ -5835,14 +5847,33 @@ mod tests {
     }
 
     #[test]
-    fn content_security_policy_includes_configured_connect_sources() {
+    fn content_security_policy_excludes_posthog_when_disabled() {
         let mut policy = test_policy("0.0.0.0", 8787);
         policy.allowed_connect_sources = connect_sources_for_origin("http://srv:8787").unwrap();
 
-        let header = content_security_policy(&policy);
+        let header = content_security_policy(&policy, false);
         let value = header.to_str().unwrap();
 
+        // PostHog should NOT be in CSP when disabled
+        assert!(!value.contains("posthog.com"));
         assert!(value.contains("connect-src 'self' data: http://srv:8787 ws://srv:8787;"));
+        assert!(value.contains("img-src 'self' data: blob:;"));
+        assert!(value.contains("frame-ancestors 'none'"));
+    }
+
+    #[test]
+    fn content_security_policy_includes_posthog_when_enabled() {
+        let mut policy = test_policy("0.0.0.0", 8787);
+        policy.allowed_connect_sources = connect_sources_for_origin("http://srv:8787").unwrap();
+
+        let header = content_security_policy(&policy, true);
+        let value = header.to_str().unwrap();
+
+        // PostHog hosts should be in CSP when enabled
+        assert!(value.contains(
+            "connect-src 'self' data: https://us.i.posthog.com https://us-assets.i.posthog.com \
+             http://srv:8787 ws://srv:8787;"
+        ));
         assert!(value.contains("img-src 'self' data: blob:;"));
         assert!(value.contains("frame-ancestors 'none'"));
     }

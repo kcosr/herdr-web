@@ -21,6 +21,7 @@
     "@uiw/react-color-wheel": "^2.10.3",
     "ghostty-web": "0.4.0",
     "lucide-react": "^0.562.0",
+    "posthog-js": "^1.409.5",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "react-markdown": "^10.1.0",

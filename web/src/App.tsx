@@ -9,6 +9,7 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
+  Search,
   Settings,
   SplitSquareHorizontal,
   SplitSquareVertical,
@@ -75,6 +76,8 @@ import {
 import { LaunchDialog } from "./LaunchDialog";
 import { resolveLaunchSpec } from "./launch";
 import type { LaunchTarget } from "./launch";
+import { PaneSearchDialog } from "./PaneSearchDialog";
+import type { PaneSearchEntry } from "./paneSearch";
 import {
   FALLBACK_LAUNCHER_PRESETS,
   fetchLauncherPresets,
@@ -802,6 +805,7 @@ export function App() {
   const [showDetail, setShowDetail] = useState(false);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [dialog, setDialog] = useState<DialogState | null>(null);
+  const [showPaneSearch, setShowPaneSearch] = useState(false);
   const [noteDeleteTarget, setNoteDeleteTarget] = useState<ScopedNoteEntry | null>(null);
   const [deletingNote, setDeletingNote] = useState(false);
   const [backendSettingsOpen, setBackendSettingsOpen] = useState(false);
@@ -1299,6 +1303,43 @@ export function App() {
   useEffect(() => {
     showDetailRef.current = showDetail;
   }, [showDetail]);
+
+  // Sync current bridge/pane/workspace selection to URL for persistence
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const hasUrlSelection =
+      params.has("bridge") || params.has("pane") || params.has("workspace");
+    if (hasUrlSelection) {
+      return; // Don't overwrite URL-seeded selection
+    }
+    if (selectedRuntime && selectedPaneRefState) {
+      const urlParams = new URLSearchParams(window.location.search);
+      urlParams.set("bridge", selectedRuntime.id);
+      urlParams.set("pane", selectedPaneRefState.paneId);
+      if (activeWorkspaceRefState?.workspaceId) {
+        urlParams.set("workspace", activeWorkspaceRefState.workspaceId);
+      } else {
+        urlParams.delete("workspace");
+      }
+      const newUrl = `${window.location.pathname}?${urlParams.toString()}${window.location.hash}`;
+      window.history.replaceState(null, "", newUrl);
+    }
+  }, [selectedRuntime?.id, selectedPaneRefState, activeWorkspaceRefState?.workspaceId]);
+
+  // Seed selection from URL params on initial load
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const urlBridgeId = params.get("bridge");
+    const urlPaneId = params.get("pane");
+    const urlWorkspaceId = params.get("workspace");
+    if (urlBridgeId && urlPaneId) {
+      setSelectedBridgeId(urlBridgeId);
+      setSelectedPaneRefState({ bridgeId: urlBridgeId, paneId: urlPaneId });
+      if (urlWorkspaceId) {
+        setActiveWorkspaceRefState({ bridgeId: urlBridgeId, workspaceId: urlWorkspaceId });
+      }
+    }
+  }, []); // Only run on mount
 
   useEffect(() => {
     if (!selectedRuntime) {
@@ -1909,6 +1950,31 @@ export function App() {
     if (isCompactLayout) {
       openMobileDetail();
     }
+  };
+
+  const paneSearchEntries = useMemo<PaneSearchEntry[]>(() => {
+    const entries: PaneSearchEntry[] = [];
+    for (const bridgeView of bridgeViews) {
+      const snapshotData = bridgeView.snapshot;
+      if (!snapshotData) continue;
+      for (const pane of snapshotData.panes) {
+        const workspace = snapshotData.workspaces.find((w) => w.workspace_id === pane.workspace_id);
+        const tab = snapshotData.tabs.find((t) => t.tab_id === pane.tab_id);
+        const path = workspace && tab ? `${workspace.label}/${tab.label}` : "unknown";
+        entries.push({
+          bridgeId: bridgeView.runtime.id,
+          bridgeLabel: bridgeView.runtime.label,
+          pane,
+          path,
+        });
+      }
+    }
+    return entries;
+  }, [bridgeViews]);
+
+  const handlePaneSearchSelect = (bridgeId: BridgeId, pane: PaneInfo) => {
+    setShowPaneSearch(false);
+    openPane(bridgeId, pane);
   };
 
   const requestTerminalFocus = () => setTerminalFocusToken((token) => token + 1);
@@ -3365,6 +3431,15 @@ export function App() {
               {stageBreadcrumb(snapshot, selectedPane, loadState, selectedRuntime?.canConnect ?? false)}
             </span>
           </div>
+          <button
+            className="icon-btn"
+            type="button"
+            aria-label="Search panes"
+            title="Search panes across all bridges"
+            onClick={() => setShowPaneSearch(true)}
+          >
+            <Search size={18} />
+          </button>
           {splitSupported && selectedPane && !isCompactLayout ? (
             <>
               <button
@@ -3696,6 +3771,14 @@ export function App() {
             }
           }}
           onConfirm={() => void confirmDeleteNote()}
+        />
+      ) : null}
+
+      {showPaneSearch ? (
+        <PaneSearchDialog
+          entries={paneSearchEntries}
+          onCancel={() => setShowPaneSearch(false)}
+          onSelect={handlePaneSearchSelect}
         />
       ) : null}
 

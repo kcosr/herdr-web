@@ -2,8 +2,13 @@ import { useEffect, useRef } from "react";
 import type { KeyboardEvent } from "react";
 import { autosizeMobileCommandTextarea } from "./mobileCommandTextarea";
 
-// @parlay/client is optional — it requires web/local-deps/parlay-client (local symlink).
-// If unavailable, this component degrades to a plain input. See web/README.md for setup.
+// `@parlay/client` is an intentionally OPTIONAL, LOCAL-ONLY, NEVER-PUBLISHED dependency. It
+// resolves only via the gitignored symlink `web/local-deps/parlay-client` (see web/README.md);
+// it is deliberately absent from package.json/package-lock.json so `npm ci` never fetches it.
+// This guarded dynamic import must stay in a try/catch: in production builds the specifier is
+// externalized (vite.config.ts `build.rolldownOptions.external`), so it rejects at runtime when
+// the package is absent and the component degrades to a plain input. Do NOT convert this to a
+// static top-level `import` or add a registry version.
 let parlayAvailable = false;
 let parlay: any = null;
 

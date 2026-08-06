@@ -41,11 +41,10 @@ mkdir -p web/local-deps
 ln -s /path/to/parlay/packages/client web/local-deps/parlay-client
 ```
 
-Then reinstall to pick up the local dependency:
-
-```bash
-npm ci
-```
+`@parlay/client` is intentionally NOT listed in `package.json`/`package-lock.json` (it is never
+published and never fetched from a registry). The Vite resolver in `vite.config.ts` picks up the
+symlink directly, so no reinstall is needed — just restart the dev server / rebuild after creating
+it.
 
 Parlay requires the eval engine and server running locally:
 

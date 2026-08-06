@@ -15,42 +15,31 @@ export function parseAllowedHosts(value: string | undefined): string[] | true | 
 
 const allowedHosts = parseAllowedHosts(process.env.HERDR_WEB_ALLOWED_HOSTS);
 
-// Plugin to resolve @parlay/client when available, or provide a stub when missing.
-// This allows the bundle to include parlay when present, and gracefully degrade when absent.
-function parlayClientPlugin(): Plugin {
+// `@parlay/client` is an intentionally OPTIONAL, LOCAL-ONLY, NEVER-PUBLISHED dependency.
+// It resolves only when the gitignored symlink `web/local-deps/parlay-client` is present,
+// which enables the parlay voice-submit path in `vite dev`/tests. It is deliberately absent
+// from package.json/package-lock.json so `npm ci` never fetches it from a registry.
+//
+// In production (`vite build`) the specifier is externalized (see build.rolldownOptions.external
+// below), so parlay is never bundled; ParlayMobileInput's guarded `try { await import(...) }`
+// then falls back to a plain input when the module cannot be resolved at runtime. This resolver
+// only serves the symlink-present dev/test path — do not add a registry version.
+function parlayClientResolver(): Plugin {
   const parlayPath = resolve(__dirname, "local-deps/parlay-client");
-  const isParlayCli = existsSync(parlayPath);
+  const hasLocalParlay = existsSync(parlayPath);
 
   return {
     name: "parlay-client-resolver",
     resolveId(id) {
-      if (id === "@parlay/client") {
-        if (isParlayCli) {
-          // Resolve to the actual local package when available.
-          return parlayPath;
-        }
-        // Return virtual module when parlay is missing.
-        return "\0parlay-stub-client";
-      }
-    },
-    load(id) {
-      // Provide a stub module that exports empty implementations when parlay is missing.
-      if (id === "\0parlay-stub-client") {
-        return `
-export const PARLAY_SETTINGS_DEFAULTS = { voiceSettleMs: 500 };
-export async function applyEnvelope() {}
-export function bumpInputVersion() {}
-export function scheduleEval() {}
-export function setDispatcherContext() {}
-export function setEvalServerBaseUrl() {}
-        `;
+      if (id === "@parlay/client" && hasLocalParlay) {
+        return parlayPath;
       }
     },
   };
 }
 
 export default defineConfig({
-  plugins: [react(), parlayClientPlugin()],
+  plugins: [react(), parlayClientResolver()],
   test: {
     exclude: [...configDefaults.exclude, "local-deps/**"],
     setupFiles: ["./src/testSetup.ts"],

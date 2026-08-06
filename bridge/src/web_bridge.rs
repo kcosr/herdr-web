@@ -930,10 +930,7 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
     // users to either (a) pass --allow-origin with their serving hostname, or
     // (b) start herdr with an --allow-origin flag for their hostname.
     // This ensures localhost-to-localhost communication always works.
-    if !allowed_origins
-        .iter()
-        .any(|o| o.starts_with("http://localhost"))
-    {
+    if !allowed_origins.iter().any(|o| o.starts_with("http://localhost")) {
         allowed_origins.push("http://localhost".to_string());
     }
 

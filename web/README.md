@@ -30,20 +30,39 @@ npm run dev:web
 the debug `herdr-dev` socket. Override `HERDR_SOCKET_PATH` when targeting a named or development
 session.
 
-`@parlay/client` (used by the optional parlay-backed mobile command input, see
-`src/ParlayMobileInput.tsx`) is a local, unpublished sibling package, not an npm registry
-dependency. It resolves via `file:./local-deps/parlay-client`, a path kept at a fixed depth so it
-doesn't break for checkouts at a different on-disk location. Before `npm install`, point it at your
-local parlay checkout:
+## Optional: Enable Parlay-backed Mobile Voice Input
+
+The `ParlayMobileInput` component (`src/ParlayMobileInput.tsx`) is optional and degrades gracefully
+to a plain text input when parlay is unavailable. To enable parlay voice-submit phrase detection,
+set up a local symlink to your parlay checkout:
 
 ```bash
-mkdir -p local-deps
-ln -s /path/to/parlay/packages/client local-deps/parlay-client
+mkdir -p web/local-deps
+ln -s /path/to/parlay/packages/client web/local-deps/parlay-client
 ```
 
-`local-deps/` is gitignored; each developer creates this symlink once, locally.
+Then reinstall to pick up the local dependency:
 
-Vite dev server environment variables:
+```bash
+npm ci
+```
+
+Parlay requires the eval engine and server running locally:
+
+```bash
+# Terminal 1: eval engine
+cd /path/to/parlay/packages/eval-engine && ./parlay-eval-engine
+
+# Terminal 2: parlay server
+cd /path/to/parlay/packages/server && bun run start  # :4242
+```
+
+Voice-submit phrases are configured in parlay (defaults: "bravely", "gravely", "briefly", "lap").
+
+If the symlink is missing or stale, the app will still build and run with the plain-text mobile
+input — no special action needed. `web/local-deps/` is gitignored.
+
+## Vite dev server environment variables:
 
 - `HERDR_WEB_BRIDGE` — bridge URL the dev server proxies `/api` and `/ws` to. Defaults to
   `http://127.0.0.1:8787`.

@@ -7,7 +7,9 @@ import {
   capabilityRetryDelayMs,
   configuredBridgeConnectionKey,
   duplicateBackend,
+  fetchDiscoveredBridges,
   loadBackendStore,
+  mergeBridges,
   normalizeBridgeBaseUrl,
   normalizeBackendColor,
   parseBackendStore,
@@ -359,5 +361,242 @@ describe("capabilities", () => {
     await expect(probeBridgeBaseUrl("192.168.1.20:4000")).rejects.toThrow(/not compatible/iu);
 
     fetchMock.mockRestore();
+  });
+});
+
+describe("bridge discovery", () => {
+  it("fetches discovered bridges from /api/bridges", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          { id: "bridge1", url: "http://192.168.1.20:4000" },
+          { id: "bridge2", url: "http://192.168.1.21:4000" },
+        ]),
+        { status: 200 },
+      ),
+    );
+
+    const discovered = await fetchDiscoveredBridges();
+
+    expect(discovered).toHaveLength(2);
+    expect(discovered[0]).toMatchObject({
+      name: "192.168.1.20:4000",
+      baseUrl: "http://192.168.1.20:4000",
+      discovered: true,
+    });
+    expect(discovered[1]).toMatchObject({
+      name: "192.168.1.21:4000",
+      baseUrl: "http://192.168.1.21:4000",
+      discovered: true,
+    });
+    expect(fetchMock).toHaveBeenCalledWith("/api/bridges", expect.any(Object));
+
+    fetchMock.mockRestore();
+  });
+
+  it("degrades gracefully when /api/bridges returns 404 (older bridge)", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("Not Found", { status: 404 }),
+    );
+
+    const discovered = await fetchDiscoveredBridges();
+
+    expect(discovered).toEqual([]);
+
+    fetchMock.mockRestore();
+  });
+
+  it("degrades gracefully on network errors", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network down"));
+
+    const discovered = await fetchDiscoveredBridges();
+
+    expect(discovered).toEqual([]);
+
+    fetchMock.mockRestore();
+  });
+
+  it("ignores malformed entries in discovered bridges", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          { id: "bridge1", url: "http://192.168.1.20:4000" },
+          { id: "bridge2" },
+          { url: "http://192.168.1.22:4000" },
+          { id: "bridge3", url: "not a valid url" },
+          { id: "bridge4", url: "http://192.168.1.21:4000" },
+        ]),
+        { status: 200 },
+      ),
+    );
+
+    const discovered = await fetchDiscoveredBridges();
+
+    expect(discovered).toHaveLength(2);
+    expect(discovered[0].baseUrl).toBe("http://192.168.1.20:4000");
+    expect(discovered[1].baseUrl).toBe("http://192.168.1.21:4000");
+
+    fetchMock.mockRestore();
+  });
+
+  it("returns empty array when response is not an array", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ bridges: [] }), { status: 200 }),
+    );
+
+    const discovered = await fetchDiscoveredBridges();
+
+    expect(discovered).toEqual([]);
+
+    fetchMock.mockRestore();
+  });
+
+  it("merges discovered bridges without duplicating stored backends", () => {
+    const stored = [
+      { id: "one", name: "Home", baseUrl: "http://192.168.1.20:4000" },
+      { id: "two", name: "Work", baseUrl: "http://192.168.1.21:4000" },
+    ];
+    const discovered = [
+      {
+        id: "disc1",
+        name: "192.168.1.21:4000",
+        baseUrl: "http://192.168.1.21:4000",
+        discovered: true,
+      },
+      {
+        id: "disc2",
+        name: "192.168.1.22:4000",
+        baseUrl: "http://192.168.1.22:4000",
+        discovered: true,
+      },
+    ];
+
+    const merged = mergeBridges(stored, discovered);
+
+    expect(merged).toHaveLength(3);
+    expect(merged.map((b) => b.baseUrl)).toEqual([
+      "http://192.168.1.20:4000",
+      "http://192.168.1.21:4000",
+      "http://192.168.1.22:4000",
+    ]);
+    expect(merged[0].id).toBe("one");
+    expect(merged[1].id).toBe("two");
+    expect(merged[2].discovered).toBe(true);
+  });
+
+  it("prioritizes stored backends over discovered ones with the same URL", () => {
+    const stored = [
+      { id: "stored", name: "My Home", baseUrl: "http://192.168.1.20:4000", color: "#89b4fa" },
+    ];
+    const discovered = [
+      {
+        id: "disc",
+        name: "192.168.1.20:4000",
+        baseUrl: "http://192.168.1.20:4000",
+        discovered: true,
+      },
+    ];
+
+    const merged = mergeBridges(stored, discovered);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].id).toBe("stored");
+    expect(merged[0].name).toBe("My Home");
+    expect(merged[0].color).toBe("#89b4fa");
+  });
+
+  it("loads backend store with discovered bridges merged in", async () => {
+    const storedData = {
+      version: 2,
+      enabledBridgeIds: ["one"],
+      lastSelectedBridgeId: "one",
+      backends: [{ id: "one", name: "Home", baseUrl: "http://192.168.1.20:4000" }],
+    };
+    const discoveredData = [
+      { id: "bridge-2", url: "http://192.168.1.21:4000" },
+      { id: "bridge-3", url: "http://192.168.1.22:4000" },
+    ];
+
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn((key: string) =>
+        key === "herdrWeb.bridgeBackends.v2" ? JSON.stringify(storedData) : null,
+      ),
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(discoveredData), { status: 200 }),
+    );
+
+    const loaded = await loadBackendStore();
+
+    expect(loaded.backends).toHaveLength(3);
+    expect(loaded.backends[0].id).toBe("one");
+    expect(loaded.backends[1]).toMatchObject({
+      name: "192.168.1.21:4000",
+      baseUrl: "http://192.168.1.21:4000",
+      discovered: true,
+    });
+    expect(loaded.backends[2]).toMatchObject({
+      name: "192.168.1.22:4000",
+      baseUrl: "http://192.168.1.22:4000",
+      discovered: true,
+    });
+
+    fetchMock.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
+  it("loads empty storage with only discovered bridges", async () => {
+    const discoveredData = [
+      { id: "bridge-1", url: "http://192.168.1.20:4000" },
+      { id: "bridge-2", url: "http://192.168.1.21:4000" },
+    ];
+
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn(() => null),
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(discoveredData), { status: 200 }),
+    );
+
+    const loaded = await loadBackendStore();
+
+    expect(loaded.backends).toHaveLength(2);
+    expect(loaded.backends[0]).toMatchObject({
+      name: "192.168.1.20:4000",
+      baseUrl: "http://192.168.1.20:4000",
+      discovered: true,
+    });
+    expect(loaded.backends[1]).toMatchObject({
+      name: "192.168.1.21:4000",
+      baseUrl: "http://192.168.1.21:4000",
+      discovered: true,
+    });
+
+    fetchMock.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
+  it("handles discovery errors gracefully without blocking store load", async () => {
+    const storedData = {
+      version: 2,
+      enabledBridgeIds: ["one"],
+      lastSelectedBridgeId: "one",
+      backends: [{ id: "one", name: "Home", baseUrl: "http://192.168.1.20:4000" }],
+    };
+
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn((key: string) =>
+        key === "herdrWeb.bridgeBackends.v2" ? JSON.stringify(storedData) : null,
+      ),
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("timeout"));
+
+    const loaded = await loadBackendStore();
+
+    expect(loaded.backends).toHaveLength(1);
+    expect(loaded.backends[0].id).toBe("one");
+
+    fetchMock.mockRestore();
+    vi.unstubAllGlobals();
   });
 });

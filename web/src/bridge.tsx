@@ -23,6 +23,7 @@ export type BridgeBackendProfile = {
   baseUrl: string;
   color?: string;
   lastConnectedAt?: string;
+  discovered?: boolean;
 };
 
 export type BridgeBackendStore = {
@@ -611,12 +612,69 @@ function createBridgeRuntime({
   };
 }
 
+export type BridgeListEntry = {
+  id: string;
+  url: string;
+};
+
+export async function fetchDiscoveredBridges(): Promise<BridgeBackendProfile[]> {
+  try {
+    const response = await fetchWithTimeout("/api/bridges");
+    if (!response.ok) {
+      return [];
+    }
+    const data = await response.json();
+    if (!Array.isArray(data)) {
+      return [];
+    }
+    const profiles: BridgeBackendProfile[] = [];
+    for (const entry of data) {
+      if (!isRecord(entry) || typeof entry.id !== "string" || typeof entry.url !== "string") {
+        continue;
+      }
+      try {
+        const baseUrl = normalizeBridgeBaseUrl(entry.url);
+        profiles.push({
+          id: createBackendId(),
+          name: displayNameFromUrl(baseUrl),
+          baseUrl,
+          discovered: true,
+        });
+      } catch {
+        // Ignore invalid entries
+      }
+    }
+    return profiles;
+  } catch {
+    return [];
+  }
+}
+
+export function mergeBridges(
+  stored: readonly BridgeBackendProfile[],
+  discovered: readonly BridgeBackendProfile[],
+): BridgeBackendProfile[] {
+  const result = [...stored];
+  const storedUrls = new Set(stored.map((b) => b.baseUrl));
+
+  for (const discovered_backend of discovered) {
+    if (!storedUrls.has(discovered_backend.baseUrl)) {
+      result.push(discovered_backend);
+    }
+  }
+
+  return result;
+}
+
 export async function loadBackendStore(): Promise<BridgeBackendStore> {
   if (isNativeApp()) {
     try {
       const { value } = await Preferences.get({ key: STORE_KEY });
       if (value) {
-        return parseBackendStore(JSON.parse(value));
+        const store = parseBackendStore(JSON.parse(value));
+        const discovered = await fetchDiscoveredBridges();
+        const merged = mergeBridges(store.backends, discovered);
+        return { ...store, backends: merged };
       }
     } catch {
       // Fall through to browser storage and legacy migration.
@@ -625,20 +683,29 @@ export async function loadBackendStore(): Promise<BridgeBackendStore> {
 
   const localStore = readBackendStoreKey(STORE_KEY);
   if (localStore) {
+    const discovered = await fetchDiscoveredBridges();
+    const merged = mergeBridges(localStore.backends, discovered);
+    const storeWithDiscovered = { ...localStore, backends: merged };
     if (isNativeApp()) {
-      await writeBackendStore(localStore);
+      await writeBackendStore(storeWithDiscovered);
     }
-    return localStore;
+    return storeWithDiscovered;
   }
 
   const legacyStore = await loadLegacyBackendStore();
   if (legacyStore) {
-    await writeBackendStore(legacyStore);
+    const discovered = await fetchDiscoveredBridges();
+    const merged = mergeBridges(legacyStore.backends, discovered);
+    const storeWithDiscovered = { ...legacyStore, backends: merged };
+    await writeBackendStore(storeWithDiscovered);
     await removeLegacyBackendStore();
-    return legacyStore;
+    return storeWithDiscovered;
   }
 
-  return fallbackStore();
+  const store = fallbackStore();
+  const discovered = await fetchDiscoveredBridges();
+  const merged = mergeBridges(store.backends, discovered);
+  return { ...store, backends: merged };
 }
 
 export function readBackendStore(): BridgeBackendStore {

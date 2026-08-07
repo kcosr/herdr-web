@@ -23,6 +23,10 @@ export interface ParlayMobileInputProps {
   value: string;
   onValueChange: (next: string) => void;
   onVoiceSubmit: (text: string) => void;
+  /** Advance to the next agent pane ("next agent"/"next tab" parlay command). */
+  onNextAgent?: () => void;
+  /** Return to the previous agent pane ("previous agent" parlay command). */
+  onPrevAgent?: () => void;
   disabled: boolean;
   expandingInput: boolean;
   enterNewline: boolean;
@@ -35,6 +39,8 @@ export function ParlayMobileInput({
   value,
   onValueChange,
   onVoiceSubmit,
+  onNextAgent,
+  onPrevAgent,
   disabled,
   expandingInput,
   enterNewline,
@@ -46,10 +52,14 @@ export function ParlayMobileInput({
   const valueRef = useRef(value);
   const onValueChangeRef = useRef(onValueChange);
   const onVoiceSubmitRef = useRef(onVoiceSubmit);
+  const onNextAgentRef = useRef(onNextAgent);
+  const onPrevAgentRef = useRef(onPrevAgent);
   const disabledRef = useRef(disabled);
   valueRef.current = value;
   onValueChangeRef.current = onValueChange;
   onVoiceSubmitRef.current = onVoiceSubmit;
+  onNextAgentRef.current = onNextAgent;
+  onPrevAgentRef.current = onPrevAgent;
   disabledRef.current = disabled;
 
   const setCommandInputNode = (node: HTMLInputElement | HTMLTextAreaElement | null) => {
@@ -153,8 +163,8 @@ export function ParlayMobileInput({
         active: () => null,
         switch: () => false,
         archive: () => false,
-        next: () => {},
-        prev: () => {},
+        next: () => onNextAgentRef.current?.(),
+        prev: () => onPrevAgentRef.current?.(),
       },
       drawer: { open: () => {} },
       speech: { stop: () => {} },

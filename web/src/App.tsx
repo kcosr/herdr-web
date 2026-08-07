@@ -2054,6 +2054,47 @@ export function App() {
     requestTerminalFocus();
   };
 
+  // Advance the selected agent pane by one visible entry, wrapping at the ends.
+  // Shared by the desktop ArrowUp/ArrowDown shortcut and the mobile "next agent"/
+  // "previous agent" command (parlay text/voice trigger). Reuses the same tested
+  // `nextVisibleAgentPaneEntry` + `focusPane` path as the keyboard so mobile stays
+  // in lockstep with desktop wrap behavior. Returns whether a pane was focused.
+  const focusAdjacentAgentPane = (step: -1 | 1): boolean => {
+    const agentEntries = buildVisibleAgentPaneEntries(
+      buildVisibleScopedWorkspaces(
+        bridgeViews,
+        selectedRuntime?.id ?? null,
+        hostScope,
+        scope,
+        activeSpace,
+        activeWorkspacesByBridgeId,
+      ),
+      bridgeViews,
+      hostScope,
+      agentGroup,
+      agentSort,
+      pinnedAgentKeys,
+      effectiveAgentPinnedOnly,
+      agentActivityTransitions,
+      agentActiveOnly,
+    );
+    if (agentEntries.length === 0) {
+      return false;
+    }
+    const selectedBridgeIdForShortcut = selectedRuntime?.id ?? null;
+    const currentIndex =
+      selectedBridgeIdForShortcut && selectedPane
+        ? agentEntries.findIndex(
+            (entry) =>
+              entry.bridgeId === selectedBridgeIdForShortcut &&
+              entry.pane.pane_id === selectedPane.pane_id,
+          )
+        : -1;
+    const next = nextVisibleAgentPaneEntry(agentEntries, currentIndex, step);
+    focusPane(next.bridgeId, next.pane);
+    return true;
+  };
+
   const selectNote = (bridgeId: BridgeId, noteId: string) => {
     if (!notesEnabled) {
       return;
@@ -2617,41 +2658,11 @@ export function App() {
       }
 
       if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-        const agentEntries = buildVisibleAgentPaneEntries(
-          buildVisibleScopedWorkspaces(
-            bridgeViews,
-            selectedRuntime?.id ?? null,
-            hostScope,
-            scope,
-            activeSpace,
-            activeWorkspacesByBridgeId,
-          ),
-          bridgeViews,
-          hostScope,
-          agentGroup,
-          agentSort,
-          pinnedAgentKeys,
-          effectiveAgentPinnedOnly,
-          agentActivityTransitions,
-          agentActiveOnly,
-        );
-        if (agentEntries.length === 0) {
-          return;
-        }
-        event.preventDefault();
-        event.stopPropagation();
-        const selectedBridgeIdForShortcut = selectedRuntime?.id ?? null;
-        const currentIndex =
-          selectedBridgeIdForShortcut && selectedPane
-            ? agentEntries.findIndex(
-                (entry) =>
-                  entry.bridgeId === selectedBridgeIdForShortcut &&
-                  entry.pane.pane_id === selectedPane.pane_id,
-              )
-            : -1;
         const step = event.key === "ArrowDown" ? 1 : -1;
-        const next = nextVisibleAgentPaneEntry(agentEntries, currentIndex, step);
-        focusPane(next.bridgeId, next.pane);
+        if (focusAdjacentAgentPane(step)) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
         return;
       }
 
@@ -3554,6 +3565,8 @@ export function App() {
             resumeToken={selectedRuntime?.resumeToken ?? 0}
             httpUrl={selectedHttpUrl}
             wsUrl={selectedWsUrl}
+            onNextAgentPane={() => focusAdjacentAgentPane(1)}
+            onPrevAgentPane={() => focusAdjacentAgentPane(-1)}
           />
         ) : renderTerminal ? (
           <TerminalView
@@ -3579,6 +3592,8 @@ export function App() {
             terminalOutputCoalesceMs={terminalOutputCoalesceMs}
             refitToken={refitToken}
             focusToken={terminalFocusToken}
+            onNextAgentPane={() => focusAdjacentAgentPane(1)}
+            onPrevAgentPane={() => focusAdjacentAgentPane(-1)}
           />
         ) : (
           <div className="terminal-stage" aria-hidden="true" />
@@ -4922,6 +4937,8 @@ function SplitGrid({
   resumeToken,
   httpUrl,
   wsUrl,
+  onNextAgentPane,
+  onPrevAgentPane,
 }: {
   cells: { pane: PaneInfo; style: CSSProperties }[];
   selectedPaneId: string | null;
@@ -4945,6 +4962,8 @@ function SplitGrid({
   resumeToken: number;
   httpUrl: (path: string, query?: URLSearchParams) => string;
   wsUrl: (path: string, query?: URLSearchParams) => string;
+  onNextAgentPane: () => void;
+  onPrevAgentPane: () => void;
 }) {
   // On touch devices, showing every split pane at once (e.g. a small tmux
   // status pane stacked under the main agent pane) leaves too little room for
@@ -5006,6 +5025,8 @@ function SplitGrid({
               terminalOutputCoalesceMs={terminalOutputCoalesceMs}
               refitToken={selected ? refitToken : 0}
               focusToken={selected ? focusToken : 0}
+              onNextAgentPane={onNextAgentPane}
+              onPrevAgentPane={onPrevAgentPane}
             />
           </div>
         );

@@ -54,6 +54,12 @@ Files: CHANGELOG.md, AGENTS.md, web/src/App.tsx, web/src/paneSearch.ts, bridge/s
 
 ### Fixed
 
+- Fixed the mobile "next agent" / "previous agent" command doing nothing: the parlay command
+  context's `tabs.next`/`tabs.prev` hooks were no-op stubs, so typing or speaking "next agent"
+  (or "next tab" / "previous agent") in the mobile command input never switched panes. They now
+  route through the same tested `nextVisibleAgentPaneEntry` + `focusPane` navigation used by the
+  desktop ArrowUp/ArrowDown shortcut, matching its wrap-at-ends behavior.
+  [PR #19](https://github.com/trillium/herdr-web/pull/19)
 - Fixed herdr-web rejecting the herdr `v0.8.0` daemon at startup with "protocol 19 is newer than
   this herdr-web bridge supports": the vendored protocol constant is now `19`, so the bridge's
   terminal-attach accept range (`16..=PROTOCOL_VERSION`) admits protocol `19` daemons while still

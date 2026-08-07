@@ -34,6 +34,23 @@ export type BridgeBackendStore = {
 
 export type BridgeMode = "same-origin" | "configured";
 
+/**
+ * A remote herdr-web bridge the local (hub) bridge was launched to proxy for
+ * (`--remote-bridge <url>`), as reported by the server at `GET /api/bridges`.
+ *
+ * These are NOT client-added backends: their existence and reachability are
+ * owned by the hub bridge's process configuration. The client mirrors the
+ * server's list and reaches each one through the hub's same-origin proxy
+ * (`/api/remote/<id>/...`, `/ws/remote/<id>/terminal`) — never by connecting to
+ * the remote host directly. `id` is the server-derived stable id (remote
+ * hostname); `label`/`baseUrl` are for display only.
+ */
+export type RemoteBridgeSummary = {
+  id: string;
+  label: string;
+  baseUrl: string;
+};
+
 export type BridgeCapabilities = {
   commands: string[];
   agent_activity?: {
@@ -75,6 +92,14 @@ export type BridgeRuntime = {
   capabilityState: CapabilityState;
   capabilityError: string | null;
   canConnect: boolean;
+  /**
+   * True when this runtime reaches a remote bridge through the hub's same-origin
+   * proxy (`/api/remote/<id>/...`). Only the server's read-oriented allow-list is
+   * forwarded and only `/ws/terminal` is proxied, so callers must not expect
+   * write endpoints (command/selection/uploads) or the non-terminal event
+   * sockets (`/ws/events`, `/ws/activity`, `/ws/ui-events`) to work here.
+   */
+  proxied: boolean;
   httpUrl: (path: string, query?: URLSearchParams) => string;
   wsUrl: (path: string, query?: URLSearchParams) => string;
 };
@@ -83,6 +108,8 @@ export type BridgeManager = {
   store: BridgeBackendStore;
   storeLoaded: boolean;
   sameOriginAvailable: boolean;
+  /** Remote bridges the server proxies for (`GET /api/bridges`), for display. */
+  remoteBridges: RemoteBridgeSummary[];
   availableRuntimes: BridgeRuntime[];
   enabledRuntimes: BridgeRuntime[];
   enabledBridgeIds: BridgeId[];
@@ -126,6 +153,7 @@ const BridgeContext = createContext<BridgeManager | null>(null);
 export function BridgeProvider({ children }: { children: ReactNode }) {
   const [store, setStore] = useState<BridgeBackendStore>(() => fallbackStore());
   const [storeLoaded, setStoreLoaded] = useState(false);
+  const [remoteBridges, setRemoteBridges] = useState<RemoteBridgeSummary[]>([]);
   const [probeStates, setProbeStates] = useState<Record<string, BridgeProbeState>>({});
   const [probeRetryTokens, setProbeRetryTokens] = useState<Record<string, number>>({});
   const [resumeToken, setResumeToken] = useState(0);
@@ -147,6 +175,24 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
+    // Remote proxy bridges only exist when this app is served same-origin by a
+    // hub bridge; in the native app (`disconnected` default) there is no
+    // same-origin `/api/bridges` to discover, so skip the pointless request.
+    if (!sameOriginAvailable) {
+      return;
+    }
+    let cancelled = false;
+    void fetchRemoteBridges().then((next) => {
+      if (!cancelled) {
+        setRemoteBridges(next);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [sameOriginAvailable]);
+
+  useEffect(() => {
     return addNativeResumeHandler(() => {
       setResumeToken((token) => token + 1);
     });
@@ -162,11 +208,12 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
     () =>
       buildAvailableRuntimes({
         backends: store.backends,
+        remoteBridges,
         probeStates,
         resumeToken,
         sameOriginAvailable,
       }),
-    [probeStates, resumeToken, sameOriginAvailable, store.backends],
+    [probeStates, remoteBridges, resumeToken, sameOriginAvailable, store.backends],
   );
 
   const availableRuntimeIds = useMemo(
@@ -174,10 +221,25 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
     [availableRuntimes],
   );
 
-  const enabledBridgeIds = useMemo(
-    () => store.enabledBridgeIds.filter((bridgeId) => availableRuntimeIds.has(bridgeId)),
-    [availableRuntimeIds, store.enabledBridgeIds],
+  // Server-configured proxy bridges are always enabled: the hub's
+  // `--remote-bridge` list is the authoritative selection, so there is no
+  // per-bridge client opt-out. User-configured and same-origin bridges keep
+  // their persisted enablement from the store.
+  const proxyRuntimeIds = useMemo(
+    () => availableRuntimes.filter((runtime) => runtime.proxied).map((runtime) => runtime.id),
+    [availableRuntimes],
   );
+
+  const enabledBridgeIds = useMemo(() => {
+    const stored = store.enabledBridgeIds.filter((bridgeId) => availableRuntimeIds.has(bridgeId));
+    const result = [...stored];
+    for (const bridgeId of proxyRuntimeIds) {
+      if (!result.includes(bridgeId)) {
+        result.push(bridgeId);
+      }
+    }
+    return result;
+  }, [availableRuntimeIds, proxyRuntimeIds, store.enabledBridgeIds]);
 
   const enabledRuntimes = useMemo(
     () => availableRuntimes.filter((runtime) => enabledBridgeIds.includes(runtime.id)),
@@ -378,6 +440,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
       store,
       storeLoaded,
       sameOriginAvailable,
+      remoteBridges,
       availableRuntimes,
       enabledRuntimes,
       enabledBridgeIds,
@@ -404,6 +467,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
       getRuntime,
       markBridgeUsed,
       probeBackend,
+      remoteBridges,
       retryBridgeProbe,
       sameOriginAvailable,
       setBridgeEnabled,
@@ -529,11 +593,13 @@ export function useBridge() {
 
 function buildAvailableRuntimes({
   backends,
+  remoteBridges,
   probeStates,
   resumeToken,
   sameOriginAvailable,
 }: {
   backends: BridgeBackendProfile[];
+  remoteBridges: readonly RemoteBridgeSummary[];
   probeStates: Record<string, BridgeProbeState>;
   resumeToken: number;
   sameOriginAvailable: boolean;
@@ -565,6 +631,26 @@ function buildAvailableRuntimes({
       }),
     );
   }
+  const usedIds = new Set(runtimes.map((runtime) => runtime.id));
+  for (const remote of remoteBridges) {
+    const id = remoteBridgeRuntimeId(remote.id);
+    if (usedIds.has(id)) {
+      continue;
+    }
+    usedIds.add(id);
+    runtimes.push(
+      createBridgeRuntime({
+        id,
+        mode: "configured",
+        label: remote.label,
+        backend: null,
+        baseUrl: null,
+        proxyServerId: remote.id,
+        probeState: probeStates[id],
+        resumeToken,
+      }),
+    );
+  }
   return runtimes;
 }
 
@@ -574,6 +660,7 @@ function createBridgeRuntime({
   label,
   backend,
   baseUrl,
+  proxyServerId,
   probeState,
   resumeToken,
 }: {
@@ -582,16 +669,23 @@ function createBridgeRuntime({
   label: string;
   backend: BridgeBackendProfile | null;
   baseUrl: string | null;
+  proxyServerId?: string;
   probeState: BridgeProbeState | undefined;
   resumeToken: number;
 }): BridgeRuntime {
-  const connectionKey =
-    mode === "same-origin"
+  const proxied = proxyServerId !== undefined;
+  const connectionKey = proxied
+    ? remoteBridgeConnectionKey(proxyServerId)
+    : mode === "same-origin"
       ? SAME_ORIGIN_BRIDGE_ID
       : configuredBridgeConnectionKey(id, baseUrl ?? "");
   const currentProbeState = probeState?.connectionKey === connectionKey ? probeState : undefined;
-  const httpUrl = (path: string, query?: URLSearchParams) => buildHttpUrl(baseUrl, path, query);
-  const wsUrl = (path: string, query?: URLSearchParams) => buildWsUrl(baseUrl, path, query);
+  const httpUrl = proxied
+    ? (path: string, query?: URLSearchParams) => buildProxyHttpUrl(proxyServerId, path, query)
+    : (path: string, query?: URLSearchParams) => buildHttpUrl(baseUrl, path, query);
+  const wsUrl = proxied
+    ? (path: string, query?: URLSearchParams) => buildProxyWsUrl(proxyServerId, path, query)
+    : (path: string, query?: URLSearchParams) => buildWsUrl(baseUrl, path, query);
   const color =
     backend?.color ?? (mode === "same-origin" ? SAME_ORIGIN_BRIDGE_COLOR : fallbackBackendColor(id));
   return {
@@ -606,6 +700,7 @@ function createBridgeRuntime({
     capabilityState: currentProbeState?.capabilityState ?? "idle",
     capabilityError: currentProbeState?.capabilityError ?? null,
     canConnect: !currentProbeState?.connectionBlocked,
+    proxied,
     httpUrl,
     wsUrl,
   };
@@ -961,6 +1056,112 @@ export function buildWsUrl(
 
 export function configuredBridgeConnectionKey(id: BridgeId, baseUrl: string) {
   return `configured:${id}:${baseUrl}`;
+}
+
+const REMOTE_BRIDGE_RUNTIME_ID_PREFIX = "remote:";
+
+/**
+ * Namespaces a server-reported remote bridge id into a client runtime id so it
+ * cannot collide with `same-origin` or a user backend's random id.
+ */
+export function remoteBridgeRuntimeId(serverId: string): BridgeId {
+  return `${REMOTE_BRIDGE_RUNTIME_ID_PREFIX}${serverId}`;
+}
+
+export function remoteBridgeConnectionKey(serverId: string) {
+  return `remote:${serverId}`;
+}
+
+/**
+ * Rewrites a bridge API path into the hub's same-origin proxy path for a remote
+ * bridge: `/api/<rest>` → `/api/remote/<serverId>/<rest>`. The hub then forwards
+ * the request (allow-listed read endpoints only) to `<remote>/api/<rest>`.
+ */
+export function remoteProxyApiPath(serverId: string, path: string): string {
+  const normalized = normalizeEndpointPath(path);
+  const prefix = "/api/";
+  if (!normalized.startsWith(prefix)) {
+    throw new Error("Remote proxy only supports /api/ paths");
+  }
+  const rest = normalized.slice(prefix.length);
+  return `/api/remote/${encodeURIComponent(serverId)}/${rest}`;
+}
+
+/**
+ * Rewrites a bridge WebSocket path into the hub's same-origin proxy path:
+ * `/ws/<rest>` → `/ws/remote/<serverId>/<rest>`. Only `/ws/terminal` is
+ * actually proxied server-side; other event sockets 404 and callers must skip
+ * them for proxied runtimes.
+ */
+export function remoteProxyWsPath(serverId: string, path: string): string {
+  const normalized = normalizeEndpointPath(path);
+  const prefix = "/ws/";
+  if (!normalized.startsWith(prefix)) {
+    throw new Error("Remote proxy only supports /ws/ paths");
+  }
+  const rest = normalized.slice(prefix.length);
+  return `/ws/remote/${encodeURIComponent(serverId)}/${rest}`;
+}
+
+export function buildProxyHttpUrl(
+  serverId: string,
+  path: string,
+  query?: URLSearchParams,
+): string {
+  return buildHttpUrl(null, remoteProxyApiPath(serverId, path), query);
+}
+
+export function buildProxyWsUrl(
+  serverId: string,
+  path: string,
+  query?: URLSearchParams,
+): string {
+  return buildWsUrl(null, remoteProxyWsPath(serverId, path), query);
+}
+
+/**
+ * Fetches the remote bridges the hub is configured to proxy for, from the
+ * same-origin `GET /api/bridges` endpoint (a flat `{ id, url }[]` mirror of the
+ * hub's `--remote-bridge` config). Any transport, status, or shape error yields
+ * an empty list so a missing or older bridge never breaks the picker.
+ */
+export async function fetchRemoteBridges(): Promise<RemoteBridgeSummary[]> {
+  let data: unknown;
+  try {
+    const response = await fetchWithTimeout("/api/bridges");
+    if (!response.ok) {
+      return [];
+    }
+    data = await response.json();
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(data)) {
+    return [];
+  }
+  const result: RemoteBridgeSummary[] = [];
+  const seen = new Set<string>();
+  for (const entry of data) {
+    if (!isRecord(entry) || typeof entry.id !== "string" || typeof entry.url !== "string") {
+      continue;
+    }
+    const id = entry.id.trim();
+    const url = entry.url.trim();
+    if (!id || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    result.push({ id, label: remoteBridgeLabel(id, url), baseUrl: url });
+  }
+  return result;
+}
+
+function remoteBridgeLabel(id: string, url: string): string {
+  try {
+    return new URL(url).host || id;
+  } catch {
+    return id;
+  }
 }
 
 export function removeNoteDraftsForBridgeConnection(bridgeId: BridgeId, connectionKey: string) {

@@ -3918,8 +3918,16 @@ export function BridgeConnectionController({
       interval = window.setInterval(refresh, SNAPSHOT_REFRESH_INTERVAL_MS);
     }, SNAPSHOT_REFRESH_INTERVAL_MS + refreshOffset);
 
-    const events = openEventsSocket(wsUrlRef.current, "/ws/events", refresh);
-    const activity = openEventsSocket(
+    // Proxied remote runtimes only get the hub's terminal proxy
+    // (`/ws/remote/<id>/terminal`); the event sockets below are not proxied and
+    // would 404-reconnect forever. Skip them and rely on interval polling +
+    // the immediate refresh above for remote snapshot freshness.
+    const events = runtime.proxied
+      ? null
+      : openEventsSocket(wsUrlRef.current, "/ws/events", refresh);
+    const activity = runtime.proxied
+      ? null
+      : openEventsSocket(
       wsUrlRef.current,
       "/ws/activity",
       (event) => {
@@ -3960,7 +3968,9 @@ export function BridgeConnectionController({
       },
       { onOpen: refresh },
     );
-    const uiEvents = openEventsSocket(
+    const uiEvents = runtime.proxied
+      ? null
+      : openEventsSocket(
       wsUrlRef.current,
       "/ws/ui-events",
       (event) => {

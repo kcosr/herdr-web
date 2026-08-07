@@ -632,6 +632,7 @@ function bridgeRuntime(bridgeId: string): BridgeRuntime {
   return {
     id: bridgeId,
     mode: "configured",
+    proxied: false,
     label: bridgeId,
     color: "#89b4fa",
     backend: null,

@@ -46,6 +46,7 @@ use herdr_compat::protocol::{
 
 use crate::agent_activity::{AgentActivityListResponse, AgentActivityManager};
 use crate::agent_pins::{AgentPinsError, AgentPinsListResponse, AgentPinsManager};
+use crate::push::{parse_subscription_body, AgentPushAlert, PushManager, WebPushCapability};
 use crate::launcher_presets::{
     layout_leaf_for_preset, split_layout_with_command_preset, CustomCommandPreset,
     LauncherPresetLaunch, LauncherPresetStore, ManagedAgentKind, ResolvedLauncherPreset,
@@ -110,6 +111,8 @@ struct BridgeState {
     agent_pins: Arc<AgentPinsManager>,
     launcher_presets: Arc<LauncherPresetStore>,
     notes: Arc<NotesManager>,
+    push: Arc<PushManager>,
+    runtime: tokio::runtime::Handle,
     ui_event_tx: tokio::sync::broadcast::Sender<String>,
     activity_tx: tokio::sync::broadcast::Sender<ActivityMessage>,
     upload_dir: PathBuf,
@@ -154,6 +157,8 @@ struct Capabilities {
     agent_pins: AgentPinsCapability,
     launcher_presets: LauncherPresetsCapability,
     notes: NotesCapability,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    web_push: Option<WebPushCapability>,
 }
 
 #[derive(Debug, Serialize)]
@@ -935,6 +940,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
             .map_err(|message| io::Error::new(ErrorKind::InvalidInput, message))?,
     );
     let notes = Arc::new(NotesManager::new()?);
+    let push = Arc::new(PushManager::load()?);
     let request_policy = RequestPolicy {
         bind_host: options.host.clone(),
         bind_port: options.port,
@@ -966,6 +972,8 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         agent_pins,
         launcher_presets,
         notes,
+        push,
+        runtime: tokio::runtime::Handle::current(),
         ui_event_tx: tokio::sync::broadcast::channel(256).0,
         activity_tx: tokio::sync::broadcast::channel(512).0,
         upload_dir: options.upload_dir.clone(),
@@ -975,6 +983,15 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         "/api/agent-activity",
         get(agent_activity_list_handler).options(preflight_handler),
     );
+    let push_routes = Router::new()
+        .route(
+            "/api/push/subscribe",
+            post(push_subscribe_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/push/unsubscribe",
+            post(push_unsubscribe_handler).options(preflight_handler),
+        );
     let agent_pins_routes = Router::new()
         .route(
             "/api/agent-pins",
@@ -1034,6 +1051,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         .merge(agent_pins_routes)
         .merge(notes_routes)
         .merge(launcher_preset_routes)
+        .merge(push_routes)
         .route(
             "/api/snapshot",
             get(snapshot_handler).options(preflight_handler),
@@ -2861,6 +2879,54 @@ fn is_default_tab_label(label: &str) -> bool {
     !label.is_empty() && label.chars().all(|ch| ch.is_ascii_digit())
 }
 
+async fn push_subscribe_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    if !state.push.is_enabled() {
+        return Err(BridgeError::BadRequest(
+            "web push is not configured on this bridge".to_string(),
+        ));
+    }
+    let subscription = parse_subscription_body(body).map_err(BridgeError::BadRequest)?;
+    state.push.subscribe(subscription)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn push_unsubscribe_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let endpoint = body
+        .get("endpoint")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| BridgeError::BadRequest("missing endpoint".to_string()))?;
+    let removed = state.push.unsubscribe(endpoint)?;
+    Ok(Json(serde_json::json!({ "ok": true, "removed": removed })))
+}
+
+fn maybe_broadcast_web_push(state: &BridgeState, alert: AgentPushAlert) {
+    if !state.push.is_enabled() {
+        return;
+    }
+    if !matches!(
+        alert.agent_status,
+        AgentStatus::Blocked | AgentStatus::Done
+    ) {
+        return;
+    }
+    let push = state.push.clone();
+    state.runtime.spawn(async move {
+        push.broadcast_alert(&alert).await;
+    });
+}
+
 async fn capabilities_handler(
     State(state): State<BridgeState>,
     headers: HeaderMap,
@@ -2872,6 +2938,7 @@ async fn capabilities_handler(
         agent_pins: AgentPinsCapability { version: 1 },
         launcher_presets: LauncherPresetsCapability { version: 1 },
         notes: NotesCapability { version: 1 },
+        web_push: state.push.capability(),
     }))
 }
 
@@ -3927,7 +3994,11 @@ fn run_agent_activity_subscription(
                 if let Some(message) = activity_message_from_subscription_value(value) {
                     if let ActivityMessage::PaneAgentStatusChanged {
                         pane_id,
+                        workspace_id,
                         agent_status,
+                        agent,
+                        title,
+                        display_agent,
                         ..
                     } = &message
                     {
@@ -3937,6 +4008,17 @@ fn run_agent_activity_subscription(
                         {
                             broadcast_agent_activity_changed(state);
                         }
+                        maybe_broadcast_web_push(
+                            state,
+                            AgentPushAlert {
+                                pane_id: pane_id.clone(),
+                                workspace_id: workspace_id.clone(),
+                                agent_status: *agent_status,
+                                agent: agent.clone(),
+                                title: title.clone(),
+                                display_agent: display_agent.clone(),
+                            },
+                        );
                     }
                     let _ = state.activity_tx.send(message);
                 }

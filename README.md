@@ -152,11 +152,17 @@ for HTTP/cleartext behavior, Android SDK setup, and APK verification notes.
 Settings are grouped by area:
 
 - Bridge: same-origin and saved bridge profiles, reachability testing, and bridge enablement.
-- Features: client feature toggles such as Notes.
+- Features: client feature toggles such as Notes, desktop agent alerts, tab badges, and optional
+  background Web Push (service worker; requires HTTPS or localhost).
 - Display: browser-wide navigation synchronization, agent features in Tabs, multi-host Space
   selection, top/bottom app padding, and mobile terminal controls size.
 - Terminal: browser-to-bridge terminal input transport and input batching delay.
 - Mobile: touch-specific terminal behavior when running on a coarse pointer device.
+
+Desktop alerts use the page Notification API while a tab is open. Background push uses a service
+worker and bridge-side VAPID keys (auto-generated under the herdr-web data dir, or set
+`HERDR_WEB_VAPID_PUBLIC_KEY` / `HERDR_WEB_VAPID_PRIVATE_KEY`). When an agent becomes blocked or done,
+the bridge can push even if no browser tab is connected.
 
 When viewing all of multiple hosts, use the Spaces list `…` menu to group spaces by host or keep a
 flat list with host context in each row. The menu stays hidden in single-host scope.

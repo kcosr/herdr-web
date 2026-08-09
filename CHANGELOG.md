@@ -10,6 +10,10 @@
   optional per-status toggles cover blocked and done, notifications deep-link to the pane on click,
   and an optional tab-title badge shows the count of agents needing attention.
   [PR #52](https://github.com/kcosr/herdr-web/pull/52)
+- Added optional Web Push + service worker support so blocked/done alerts can reach the device when
+  the tab is closed. The bridge auto-generates VAPID keys (or accepts `HERDR_WEB_VAPID_*`), exposes
+  `web_push` on `/api/capabilities`, and accepts `/api/push/subscribe|unsubscribe`.
+  [PR #53](https://github.com/kcosr/herdr-web/pull/53)
 
 ### Changed
 

@@ -2703,6 +2703,13 @@ button {
   font-size: 12.5px;
 }
 
+.settings-hint {
+  margin: 0;
+  color: var(--overlay1);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .segmented-control {
   display: inline-flex;
   width: 100%;

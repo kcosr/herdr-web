@@ -78,6 +78,14 @@ import {
   showAgentStatusNotification,
 } from "./browserNotifications";
 import type { BrowserNotificationTarget } from "./browserNotifications";
+import {
+  getCurrentPushSubscription,
+  isWebPushBrowserSupported,
+  registerHerdrServiceWorker,
+  subscribeWebPush,
+  supportsWebPushCapability,
+  unsubscribeWebPush,
+} from "./webPush";
 import { useBridge } from "./bridge";
 import type { BridgeId, BridgeRuntime } from "./bridge";
 import { createCommands, createdPaneId } from "./commands";
@@ -2476,6 +2484,94 @@ export function App() {
     }
   }, []);
 
+  const [webPushEnabled, setWebPushEnabled] = useState(false);
+  const [webPushBusy, setWebPushBusy] = useState(false);
+  const [webPushStatus, setWebPushStatus] = useState<string | null>(null);
+  const webPushPublicKey =
+    selectedRuntime && supportsWebPushCapability(selectedRuntime.capabilities)
+      ? selectedRuntime.capabilities.web_push.public_key
+      : null;
+  const webPushAvailable = Boolean(
+    webPushPublicKey && isWebPushBrowserSupported() && selectedRuntime?.canConnect,
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      if (!webPushAvailable) {
+        if (!cancelled) {
+          setWebPushEnabled(false);
+          setWebPushStatus(
+            !isWebPushBrowserSupported()
+              ? "Background push needs a secure context (HTTPS or localhost)."
+              : !webPushPublicKey
+                ? "This bridge has no VAPID web-push keys."
+                : null,
+          );
+        }
+        return;
+      }
+      const registration = await registerHerdrServiceWorker();
+      const subscription = await getCurrentPushSubscription(registration);
+      if (!cancelled) {
+        setWebPushEnabled(Boolean(subscription));
+        setWebPushStatus(subscription ? "Subscribed to background push." : null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [webPushAvailable, webPushPublicKey, selectedRuntime?.id]);
+
+  const setWebPushEnabledWithSubscribe = useCallback(
+    async (enabled: boolean) => {
+      if (!selectedRuntime || !webPushPublicKey) {
+        setWebPushStatus("Select a bridge that advertises web_push capability.");
+        return;
+      }
+      setWebPushBusy(true);
+      try {
+        const registration = await registerHerdrServiceWorker();
+        if (!registration) {
+          setWebPushEnabled(false);
+          setWebPushStatus("Service worker registration failed.");
+          return;
+        }
+        if (!enabled) {
+          await unsubscribeWebPush({
+            httpUrl: selectedRuntime.httpUrl,
+            registration,
+          });
+          setWebPushEnabled(false);
+          setWebPushStatus("Background push disabled.");
+          return;
+        }
+        const permission = await requestBrowserNotificationPermission();
+        if (permission !== "granted") {
+          setWebPushEnabled(false);
+          setWebPushStatus("Notification permission is required for background push.");
+          return;
+        }
+        await subscribeWebPush({
+          httpUrl: selectedRuntime.httpUrl,
+          publicKey: webPushPublicKey,
+          registration,
+        });
+        setWebPushEnabled(true);
+        setBrowserNotificationsEnabled(true);
+        setWebPushStatus("Subscribed to background push.");
+      } catch (caught) {
+        setWebPushEnabled(false);
+        setWebPushStatus(
+          caught instanceof Error ? caught.message : "Could not update background push.",
+        );
+      } finally {
+        setWebPushBusy(false);
+      }
+    },
+    [selectedRuntime, webPushPublicKey],
+  );
+
   const requestTerminalFocus = () => setTerminalFocusToken((token) => token + 1);
   const requestNoteTitleFocus = (bridgeId: BridgeId, noteId: string) => {
     setNoteTitleFocusRequest((current) => ({
@@ -4434,6 +4530,13 @@ export function App() {
           onBrowserNotifyOnDone={setBrowserNotifyOnDone}
           browserDocumentBadge={browserDocumentBadge}
           onBrowserDocumentBadge={setBrowserDocumentBadge}
+          webPushAvailable={webPushAvailable}
+          webPushEnabled={webPushEnabled}
+          webPushBusy={webPushBusy}
+          webPushStatus={webPushStatus}
+          onWebPushEnabled={(enabled) => {
+            void setWebPushEnabledWithSubscribe(enabled);
+          }}
           navigationSyncMode={navigationSyncMode}
           onNavigationSyncMode={changeNavigationSyncMode}
           agentFeaturesInTabs={agentFeaturesInTabs}

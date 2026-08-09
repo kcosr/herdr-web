@@ -69,6 +69,11 @@ type Props = {
   onBrowserNotifyOnDone: (enabled: boolean) => void;
   browserDocumentBadge: boolean;
   onBrowserDocumentBadge: (enabled: boolean) => void;
+  webPushAvailable: boolean;
+  webPushEnabled: boolean;
+  webPushBusy: boolean;
+  webPushStatus: string | null;
+  onWebPushEnabled: (enabled: boolean) => void;
   navigationSyncMode: NavigationSyncMode;
   onNavigationSyncMode: (mode: NavigationSyncMode) => void;
   agentFeaturesInTabs: boolean;
@@ -131,6 +136,11 @@ export function BackendSettingsDialog({
   onBrowserNotifyOnDone,
   browserDocumentBadge,
   onBrowserDocumentBadge,
+  webPushAvailable,
+  webPushEnabled,
+  webPushBusy,
+  webPushStatus,
+  onWebPushEnabled,
   navigationSyncMode,
   onNavigationSyncMode,
   agentFeaturesInTabs,
@@ -633,6 +643,40 @@ export function BackendSettingsDialog({
                       </button>
                     </div>
                   </div>
+                  <div className="settings-row">
+                    <span title="Receive blocked/done alerts when the tab is closed (requires HTTPS or localhost and bridge VAPID)">
+                      Background push
+                    </span>
+                    <div
+                      className="segmented-control"
+                      role="group"
+                      aria-label="Background web push"
+                    >
+                      <button
+                        type="button"
+                        data-on={!webPushEnabled}
+                        aria-pressed={!webPushEnabled}
+                        disabled={!webPushAvailable || webPushBusy}
+                        onClick={() => onWebPushEnabled(false)}
+                      >
+                        Off
+                      </button>
+                      <button
+                        type="button"
+                        data-on={webPushEnabled}
+                        aria-pressed={webPushEnabled}
+                        disabled={!webPushAvailable || webPushBusy}
+                        onClick={() => onWebPushEnabled(true)}
+                      >
+                        On
+                      </button>
+                    </div>
+                  </div>
+                  {webPushStatus ? (
+                    <p className="settings-hint" role="status">
+                      {webPushStatus}
+                    </p>
+                  ) : null}
                 </div>
               </>
             ) : null}

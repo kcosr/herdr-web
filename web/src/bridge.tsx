@@ -48,6 +48,10 @@ export type BridgeCapabilities = {
   launcher_presets?: {
     version: 1;
   };
+  web_push?: {
+    version: 1;
+    public_key: string;
+  };
   bridge_version?: string;
   web_compat?: number;
   min_android_app_compat?: number;
@@ -1085,6 +1089,13 @@ export function parseCapabilities(value: unknown): BridgeCapabilities {
     launcher_presets:
       isRecord(value.launcher_presets) && value.launcher_presets.version === 1
         ? { version: 1 }
+        : undefined,
+    web_push:
+      isRecord(value.web_push) &&
+      value.web_push.version === 1 &&
+      typeof value.web_push.public_key === "string" &&
+      value.web_push.public_key.length > 0
+        ? { version: 1, public_key: value.web_push.public_key }
         : undefined,
   };
 }

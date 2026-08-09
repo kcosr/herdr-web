@@ -61,6 +61,14 @@ type Props = {
   showMobileTerminalSettings: boolean;
   notesEnabled: boolean;
   onNotesEnabled: (enabled: boolean) => void;
+  browserNotificationsEnabled: boolean;
+  onBrowserNotificationsEnabled: (enabled: boolean) => void;
+  browserNotifyOnBlocked: boolean;
+  onBrowserNotifyOnBlocked: (enabled: boolean) => void;
+  browserNotifyOnDone: boolean;
+  onBrowserNotifyOnDone: (enabled: boolean) => void;
+  browserDocumentBadge: boolean;
+  onBrowserDocumentBadge: (enabled: boolean) => void;
   navigationSyncMode: NavigationSyncMode;
   onNavigationSyncMode: (mode: NavigationSyncMode) => void;
   agentFeaturesInTabs: boolean;
@@ -115,6 +123,14 @@ export function BackendSettingsDialog({
   showMobileTerminalSettings,
   notesEnabled,
   onNotesEnabled,
+  browserNotificationsEnabled,
+  onBrowserNotificationsEnabled,
+  browserNotifyOnBlocked,
+  onBrowserNotifyOnBlocked,
+  browserNotifyOnDone,
+  onBrowserNotifyOnDone,
+  browserDocumentBadge,
+  onBrowserDocumentBadge,
   navigationSyncMode,
   onNavigationSyncMode,
   agentFeaturesInTabs,
@@ -490,30 +506,135 @@ export function BackendSettingsDialog({
             ) : null}
 
             {activeArea === "features" ? (
-              <div className="settings-section settings-section-flat">
-                <div className="settings-label">Client features</div>
-                <div className="settings-row">
-                  <span>Notes</span>
-                  <div className="segmented-control" role="group" aria-label="Notes feature">
-                    <button
-                      type="button"
-                      data-on={!notesEnabled}
-                      aria-pressed={!notesEnabled}
-                      onClick={() => onNotesEnabled(false)}
-                    >
-                      Off
-                    </button>
-                    <button
-                      type="button"
-                      data-on={notesEnabled}
-                      aria-pressed={notesEnabled}
-                      onClick={() => onNotesEnabled(true)}
-                    >
-                      On
-                    </button>
+              <>
+                <div className="settings-section settings-section-flat">
+                  <div className="settings-label">Client features</div>
+                  <div className="settings-row">
+                    <span>Notes</span>
+                    <div className="segmented-control" role="group" aria-label="Notes feature">
+                      <button
+                        type="button"
+                        data-on={!notesEnabled}
+                        aria-pressed={!notesEnabled}
+                        onClick={() => onNotesEnabled(false)}
+                      >
+                        Off
+                      </button>
+                      <button
+                        type="button"
+                        data-on={notesEnabled}
+                        aria-pressed={notesEnabled}
+                        onClick={() => onNotesEnabled(true)}
+                      >
+                        On
+                      </button>
+                    </div>
                   </div>
                 </div>
-              </div>
+                <div className="settings-section settings-section-flat">
+                  <div className="settings-label">Browser notifications</div>
+                  <div className="settings-row">
+                    <span title="Show a desktop notification when an agent becomes blocked or done">
+                      Desktop alerts
+                    </span>
+                    <div
+                      className="segmented-control"
+                      role="group"
+                      aria-label="Browser notifications"
+                    >
+                      <button
+                        type="button"
+                        data-on={!browserNotificationsEnabled}
+                        aria-pressed={!browserNotificationsEnabled}
+                        onClick={() => onBrowserNotificationsEnabled(false)}
+                      >
+                        Off
+                      </button>
+                      <button
+                        type="button"
+                        data-on={browserNotificationsEnabled}
+                        aria-pressed={browserNotificationsEnabled}
+                        onClick={() => onBrowserNotificationsEnabled(true)}
+                      >
+                        On
+                      </button>
+                    </div>
+                  </div>
+                  <div className="settings-row">
+                    <span>Notify when blocked</span>
+                    <div
+                      className="segmented-control"
+                      role="group"
+                      aria-label="Notify when blocked"
+                    >
+                      <button
+                        type="button"
+                        data-on={!browserNotifyOnBlocked}
+                        aria-pressed={!browserNotifyOnBlocked}
+                        disabled={!browserNotificationsEnabled}
+                        onClick={() => onBrowserNotifyOnBlocked(false)}
+                      >
+                        Off
+                      </button>
+                      <button
+                        type="button"
+                        data-on={browserNotifyOnBlocked}
+                        aria-pressed={browserNotifyOnBlocked}
+                        disabled={!browserNotificationsEnabled}
+                        onClick={() => onBrowserNotifyOnBlocked(true)}
+                      >
+                        On
+                      </button>
+                    </div>
+                  </div>
+                  <div className="settings-row">
+                    <span>Notify when done</span>
+                    <div className="segmented-control" role="group" aria-label="Notify when done">
+                      <button
+                        type="button"
+                        data-on={!browserNotifyOnDone}
+                        aria-pressed={!browserNotifyOnDone}
+                        disabled={!browserNotificationsEnabled}
+                        onClick={() => onBrowserNotifyOnDone(false)}
+                      >
+                        Off
+                      </button>
+                      <button
+                        type="button"
+                        data-on={browserNotifyOnDone}
+                        aria-pressed={browserNotifyOnDone}
+                        disabled={!browserNotificationsEnabled}
+                        onClick={() => onBrowserNotifyOnDone(true)}
+                      >
+                        On
+                      </button>
+                    </div>
+                  </div>
+                  <div className="settings-row">
+                    <span title="Prefix the tab title with the number of blocked or done agents">
+                      Tab badge
+                    </span>
+                    <div className="segmented-control" role="group" aria-label="Document title badge">
+                      <button
+                        type="button"
+                        data-on={!browserDocumentBadge}
+                        aria-pressed={!browserDocumentBadge}
+                        onClick={() => onBrowserDocumentBadge(false)}
+                      >
+                        Off
+                      </button>
+                      <button
+                        type="button"
+                        data-on={browserDocumentBadge}
+                        aria-pressed={browserDocumentBadge}
+                        onClick={() => onBrowserDocumentBadge(true)}
+                      >
+                        On
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </>
             ) : null}
 
             {activeArea === "display" ? (

@@ -65,6 +65,19 @@ import type { AgentPinsListResponse } from "./agentPins";
 import { applyActivityMessage, parseActivityEventData, replayActivityMessages } from "./activity";
 import type { ActivityLogEntry } from "./activity";
 import { BackendSettingsDialog } from "./BackendSettingsDialog";
+import {
+  countAttentionPanes,
+  DEFAULT_BROWSER_NOTIFICATION_PREFS,
+  DEFAULT_DOCUMENT_TITLE,
+  documentTitleWithBadge,
+  parseBrowserDocumentBadge,
+  parseBrowserNotificationEnabled,
+  parseBrowserNotifyOnBlocked,
+  parseBrowserNotifyOnDone,
+  requestBrowserNotificationPermission,
+  showAgentStatusNotification,
+} from "./browserNotifications";
+import type { BrowserNotificationTarget } from "./browserNotifications";
 import { useBridge } from "./bridge";
 import type { BridgeId, BridgeRuntime } from "./bridge";
 import { createCommands, createdPaneId } from "./commands";
@@ -179,6 +192,7 @@ import type {
   Snapshot,
   TabInfo,
   WorkspaceInfo,
+  PaneAgentStatusChangedMessage,
 } from "./types";
 import {
   workspaceMoveBlockParams,
@@ -414,6 +428,10 @@ type DisplayPrefs = {
   mobileKeyboardHideRefit: boolean;
   mobileCommandExpandingInput: boolean;
   mobileCommandEnterNewline: boolean;
+  browserNotificationsEnabled: boolean;
+  browserNotifyOnBlocked: boolean;
+  browserNotifyOnDone: boolean;
+  browserDocumentBadge: boolean;
 };
 type SharedNavigationPrefs = {
   selectedBridgeId: BridgeId | null;
@@ -477,6 +495,10 @@ function readDisplayPrefs(): DisplayPrefs {
     mobileKeyboardHideRefit: DEFAULT_MOBILE_KEYBOARD_HIDE_REFIT,
     mobileCommandExpandingInput: DEFAULT_MOBILE_COMMAND_EXPANDING_INPUT,
     mobileCommandEnterNewline: DEFAULT_MOBILE_COMMAND_ENTER_NEWLINE,
+    browserNotificationsEnabled: DEFAULT_BROWSER_NOTIFICATION_PREFS.enabled,
+    browserNotifyOnBlocked: DEFAULT_BROWSER_NOTIFICATION_PREFS.notifyOnBlocked,
+    browserNotifyOnDone: DEFAULT_BROWSER_NOTIFICATION_PREFS.notifyOnDone,
+    browserDocumentBadge: DEFAULT_BROWSER_NOTIFICATION_PREFS.documentBadge,
   };
   try {
     const raw = window.localStorage.getItem(DISPLAY_PREFS_KEY);
@@ -681,6 +703,22 @@ function parseDisplayPrefsValue(
     ),
     mobileCommandEnterNewline: parseMobileCommandEnterNewline(
       parsed.mobileCommandEnterNewline,
+    ),
+    browserNotificationsEnabled: parseBrowserNotificationEnabled(
+      parsed.browserNotificationsEnabled,
+      fallback.browserNotificationsEnabled,
+    ),
+    browserNotifyOnBlocked: parseBrowserNotifyOnBlocked(
+      parsed.browserNotifyOnBlocked,
+      fallback.browserNotifyOnBlocked,
+    ),
+    browserNotifyOnDone: parseBrowserNotifyOnDone(
+      parsed.browserNotifyOnDone,
+      fallback.browserNotifyOnDone,
+    ),
+    browserDocumentBadge: parseBrowserDocumentBadge(
+      parsed.browserDocumentBadge,
+      fallback.browserDocumentBadge,
     ),
   };
 }
@@ -1070,6 +1108,27 @@ export function App() {
   const [mobileCommandEnterNewline, setMobileCommandEnterNewline] = useState(
     initialPrefs.mobileCommandEnterNewline,
   );
+  const [browserNotificationsEnabled, setBrowserNotificationsEnabled] = useState(
+    initialPrefs.browserNotificationsEnabled,
+  );
+  const [browserNotifyOnBlocked, setBrowserNotifyOnBlocked] = useState(
+    initialPrefs.browserNotifyOnBlocked,
+  );
+  const [browserNotifyOnDone, setBrowserNotifyOnDone] = useState(
+    initialPrefs.browserNotifyOnDone,
+  );
+  const [browserDocumentBadge, setBrowserDocumentBadge] = useState(
+    initialPrefs.browserDocumentBadge,
+  );
+  const browserNotificationPrefsRef = useRef({
+    enabled: initialPrefs.browserNotificationsEnabled,
+    notifyOnBlocked: initialPrefs.browserNotifyOnBlocked,
+    notifyOnDone: initialPrefs.browserNotifyOnDone,
+    documentBadge: initialPrefs.browserDocumentBadge,
+  });
+  const openPaneFromNotificationRef = useRef<(target: BrowserNotificationTarget) => void>(
+    () => undefined,
+  );
   const [launchTarget, setLaunchTarget] = useState<ScopedLaunchTarget | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1174,6 +1233,10 @@ export function App() {
       setMobileKeyboardHideRefit(prefs.mobileKeyboardHideRefit);
       setMobileCommandExpandingInput(prefs.mobileCommandExpandingInput);
       setMobileCommandEnterNewline(prefs.mobileCommandEnterNewline);
+      setBrowserNotificationsEnabled(prefs.browserNotificationsEnabled);
+      setBrowserNotifyOnBlocked(prefs.browserNotifyOnBlocked);
+      setBrowserNotifyOnDone(prefs.browserNotifyOnDone);
+      setBrowserDocumentBadge(prefs.browserDocumentBadge);
       setDisplayPrefsLoaded(true);
       },
     );
@@ -1716,6 +1779,10 @@ export function App() {
       mobileKeyboardHideRefit,
       mobileCommandExpandingInput,
       mobileCommandEnterNewline,
+      browserNotificationsEnabled,
+      browserNotifyOnBlocked,
+      browserNotifyOnDone,
+      browserDocumentBadge,
     });
   }, [
     displayPrefsLoaded,
@@ -1751,6 +1818,24 @@ export function App() {
     mobileKeyboardHideRefit,
     mobileCommandExpandingInput,
     mobileCommandEnterNewline,
+    browserNotificationsEnabled,
+    browserNotifyOnBlocked,
+    browserNotifyOnDone,
+    browserDocumentBadge,
+  ]);
+
+  useEffect(() => {
+    browserNotificationPrefsRef.current = {
+      enabled: browserNotificationsEnabled,
+      notifyOnBlocked: browserNotifyOnBlocked,
+      notifyOnDone: browserNotifyOnDone,
+      documentBadge: browserDocumentBadge,
+    };
+  }, [
+    browserNotificationsEnabled,
+    browserNotifyOnBlocked,
+    browserNotifyOnDone,
+    browserDocumentBadge,
   ]);
 
   useEffect(() => {
@@ -2325,6 +2410,71 @@ export function App() {
       openMobileDetail();
     }
   };
+
+  openPaneFromNotificationRef.current = (target) => {
+    const snapshot = snapshotForBridge(target.bridgeId);
+    const pane = snapshot?.panes.find((candidate) => candidate.pane_id === target.paneId);
+    if (pane) {
+      openPane(target.bridgeId, pane);
+      return;
+    }
+    setSelectedBridgeId(target.bridgeId);
+    rememberPaneSelection(target.bridgeId, target.paneId, target.workspaceId);
+  };
+
+  const handleAgentStatusActivity = useCallback(
+    (bridgeId: BridgeId, message: PaneAgentStatusChangedMessage) => {
+      const runtime = bridge.getRuntime(bridgeId);
+      showAgentStatusNotification({
+        bridgeId,
+        message,
+        prefs: browserNotificationPrefsRef.current,
+        bridgeLabel: runtime?.label ?? bridgeId,
+        onClick: (target) => openPaneFromNotificationRef.current(target),
+      });
+    },
+    [bridge],
+  );
+
+  const attentionCount = useMemo(() => {
+    return Object.values(connectionStates).reduce((total, state) => {
+      if (!state.snapshot) {
+        return total;
+      }
+      return total + countAttentionPanes(state.snapshot.panes);
+    }, 0);
+  }, [connectionStates]);
+
+  useEffect(() => {
+    document.title = documentTitleWithBadge(
+      DEFAULT_DOCUMENT_TITLE,
+      attentionCount,
+      browserDocumentBadge,
+    );
+    return () => {
+      document.title = DEFAULT_DOCUMENT_TITLE;
+    };
+  }, [attentionCount, browserDocumentBadge]);
+
+  const setBrowserNotificationsEnabledWithPermission = useCallback(async (enabled: boolean) => {
+    if (!enabled) {
+      setBrowserNotificationsEnabled(false);
+      return;
+    }
+    const permission = await requestBrowserNotificationPermission();
+    if (permission === "granted") {
+      setBrowserNotificationsEnabled(true);
+      return;
+    }
+    setBrowserNotificationsEnabled(false);
+    if (permission === "denied") {
+      setError("Browser notifications are blocked. Enable them in the browser site settings.");
+      return;
+    }
+    if (permission === "unsupported") {
+      setError("This browser does not support desktop notifications.");
+    }
+  }, []);
 
   const requestTerminalFocus = () => setTerminalFocusToken((token) => token + 1);
   const requestNoteTitleFocus = (bridgeId: BridgeId, noteId: string) => {
@@ -3706,6 +3856,7 @@ export function App() {
           setConnectionStates={setConnectionStates}
           onPaneSelection={applySharedPaneSelection}
           onAgentActivityChanged={refreshAgentActivityForBridge}
+          onAgentStatusActivity={handleAgentStatusActivity}
           onAgentPinsChanged={refreshAgentPinsForBridge}
           onNotesChanged={refreshNotesForBridge}
         />
@@ -4273,6 +4424,16 @@ export function App() {
           showMobileTerminalSettings={isTouchInput}
           notesEnabled={notesEnabled}
           onNotesEnabled={setNotesEnabled}
+          browserNotificationsEnabled={browserNotificationsEnabled}
+          onBrowserNotificationsEnabled={(enabled) => {
+            void setBrowserNotificationsEnabledWithPermission(enabled);
+          }}
+          browserNotifyOnBlocked={browserNotifyOnBlocked}
+          onBrowserNotifyOnBlocked={setBrowserNotifyOnBlocked}
+          browserNotifyOnDone={browserNotifyOnDone}
+          onBrowserNotifyOnDone={setBrowserNotifyOnDone}
+          browserDocumentBadge={browserDocumentBadge}
+          onBrowserDocumentBadge={setBrowserDocumentBadge}
           navigationSyncMode={navigationSyncMode}
           onNavigationSyncMode={changeNavigationSyncMode}
           agentFeaturesInTabs={agentFeaturesInTabs}
@@ -4359,6 +4520,7 @@ export function BridgeConnectionController({
   setConnectionStates,
   onPaneSelection,
   onAgentActivityChanged,
+  onAgentStatusActivity,
   onAgentPinsChanged,
   onNotesChanged,
 }: {
@@ -4368,12 +4530,14 @@ export function BridgeConnectionController({
   setConnectionStates: Dispatch<SetStateAction<Record<string, BridgeConnectionState>>>;
   onPaneSelection: (bridgeId: BridgeId, paneId: string, workspaceId?: string) => void;
   onAgentActivityChanged: (bridgeId: BridgeId) => void;
+  onAgentStatusActivity: (bridgeId: BridgeId, message: PaneAgentStatusChangedMessage) => void;
   onAgentPinsChanged: (bridgeId: BridgeId) => void;
   onNotesChanged: (bridgeId: BridgeId) => void;
 }) {
   const httpUrlRef = useRef(runtime.httpUrl);
   const wsUrlRef = useRef(runtime.wsUrl);
   const onAgentActivityChangedRef = useRef(onAgentActivityChanged);
+  const onAgentStatusActivityRef = useRef(onAgentStatusActivity);
   const onAgentPinsChangedRef = useRef(onAgentPinsChanged);
   const onNotesChangedRef = useRef(onNotesChanged);
   const followSharedSelectionRef = useRef(followSharedSelection);
@@ -4387,11 +4551,13 @@ export function BridgeConnectionController({
   useEffect(() => {
     followSharedSelectionRef.current = followSharedSelection;
     onAgentActivityChangedRef.current = onAgentActivityChanged;
+    onAgentStatusActivityRef.current = onAgentStatusActivity;
     onAgentPinsChangedRef.current = onAgentPinsChanged;
     onNotesChangedRef.current = onNotesChanged;
   }, [
     followSharedSelection,
     onAgentActivityChanged,
+    onAgentStatusActivity,
     onAgentPinsChanged,
     onNotesChanged,
   ]);
@@ -4528,6 +4694,9 @@ export function BridgeConnectionController({
               loadState: "ready",
             },
           }));
+          if (parsed.message.type === "pane.agent_status_changed") {
+            onAgentStatusActivityRef.current(runtime.id, parsed.message);
+          }
         } else if (result.status === "resync") {
           requestActivityResync();
         }

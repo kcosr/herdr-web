@@ -6,6 +6,10 @@
 
 ### Added
 
+- Added browser desktop notifications for agent attention states. Enable under Settings → Features;
+  optional per-status toggles cover blocked and done, notifications deep-link to the pane on click,
+  and an optional tab-title badge shows the count of agents needing attention.
+
 ### Changed
 
 ### Fixed

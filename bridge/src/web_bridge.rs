@@ -14,7 +14,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, State};
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
-    ACCESS_CONTROL_MAX_AGE, ACCESS_CONTROL_REQUEST_HEADERS, HOST, ORIGIN, VARY,
+    ACCESS_CONTROL_MAX_AGE, ACCESS_CONTROL_REQUEST_HEADERS, CACHE_CONTROL, HOST, ORIGIN, VARY,
 };
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
@@ -1081,6 +1081,7 @@ async fn add_security_headers(
     next: Next,
 ) -> Response {
     let cors_origin = cors_origin_header(request.headers(), &policy);
+    let request_path = request.uri().path().to_string();
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     headers.insert(
@@ -1091,10 +1092,28 @@ async fn add_security_headers(
         HeaderName::from_static("content-security-policy"),
         content_security_policy(&policy),
     );
+    insert_static_cache_headers(headers, &request_path);
     if let Some(origin) = cors_origin {
         insert_cors_headers(headers, origin);
     }
     response
+}
+
+/// Cache policy for the static SPA: never sticky-cache HTML entrypoints; long-cache hashed assets.
+fn insert_static_cache_headers(headers: &mut HeaderMap, path: &str) {
+    if headers.contains_key(CACHE_CONTROL) {
+        return;
+    }
+    if path == "/" || path.ends_with(".html") {
+        headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+        return;
+    }
+    if path.starts_with("/assets/") {
+        headers.insert(
+            CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=31536000, immutable"),
+        );
+    }
 }
 
 async fn preflight_handler(

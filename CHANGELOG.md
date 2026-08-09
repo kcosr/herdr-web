@@ -6,9 +6,24 @@
 
 ### Added
 
+- Added `scripts/dev.sh` / `npm run dev` to run the bridge and Vite HMR frontend together for local
+  iteration (proxied `/api` and `/ws`, hot-reloading UI without rebuilding `web/dist` each change).
+
 ### Changed
 
+- Static responses now set cache headers: HTML entrypoints use `Cache-Control: no-cache`, while
+  hashed `/assets/*` files are long-cached as immutable to make production static refreshes more
+  predictable after rebuilds.
+
 ### Fixed
+
+- Fixed CJK / IME terminal typing so intermediate composition preedit (for example pinyin) is no
+  longer streamed into the PTY. Committed text is sent only after `compositionend`, the hidden
+  ghostty textarea is anchored near the terminal caret so the OS candidate window is usable, and
+  desktop focus is routed to that textarea (ghostty's host element is not editable after
+  contenteditable is removed, so IMEs previously had nothing reliable to attach to).
+- Show in-progress IME preedit (pinyin / partial CJK) as an underlined overlay at the terminal
+  caret while composing, so composition is visible before commit.
 
 ### Removed
 

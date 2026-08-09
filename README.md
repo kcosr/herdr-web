@@ -117,6 +117,26 @@ npm install
 npm install --prefix web
 ```
 
+## Development Server (HMR)
+
+For day-to-day UI work, run the bridge and Vite together:
+
+```bash
+# Optional: point at a non-default Herdr socket (for example herdr-dev / protocol 19)
+HERDR_SOCKET_PATH=$HOME/.config/herdr-dev/herdr.sock npm run dev
+```
+
+Then open the Vite URL:
+
+```text
+http://127.0.0.1:5173
+```
+
+Vite proxies `/api` and `/ws` to the bridge (default `http://127.0.0.1:8787`). Frontend edits hot-reload;
+Rust bridge changes still need `npm run bridge:build` and a process restart. Production-style static
+serving continues to use `npm run build` plus `scripts/run-bridge.sh` and
+`http://127.0.0.1:8787`.
+
 ## Development Build And Test
 
 ```bash
@@ -128,6 +148,7 @@ npm run build
 Useful narrower commands:
 
 ```bash
+npm run dev
 npm run lint:web
 npm run test:web
 npm run build:web

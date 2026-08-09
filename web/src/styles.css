@@ -1739,23 +1739,53 @@ button {
 
 .terminal-host .ghostty-hidden-input {
   position: fixed !important;
-  left: -10000px !important;
-  top: 0 !important;
-  width: 1px !important;
-  height: 1px !important;
+  left: var(--ghostty-ime-left, -10000px) !important;
+  top: var(--ghostty-ime-top, 0px) !important;
+  width: var(--ghostty-ime-width, 1px) !important;
+  height: var(--ghostty-ime-height, 1px) !important;
   opacity: 0 !important;
   color: transparent !important;
   background: transparent !important;
   caret-color: transparent !important;
   overflow: hidden !important;
   resize: none !important;
-}
-
-.terminal-host .ghostty-hidden-input.ghostty-keyboard-input {
-  left: 1px !important;
-  top: 1px !important;
+  border: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
   pointer-events: none !important;
   z-index: 0 !important;
+}
+
+/* Keep the OS IME candidate window near the terminal caret while typing or composing. */
+.terminal-host .ghostty-hidden-input.ghostty-keyboard-input,
+.terminal-host .ghostty-hidden-input.ghostty-ime-composing {
+  left: var(--ghostty-ime-left, 1px) !important;
+  top: var(--ghostty-ime-top, 1px) !important;
+  width: var(--ghostty-ime-width, 2px) !important;
+  height: var(--ghostty-ime-height, 16px) !important;
+  z-index: 5 !important;
+}
+
+/* Visible preedit (pinyin / partial CJK) painted over the terminal caret while composing. */
+.terminal-host .ghostty-ime-preedit {
+  position: fixed;
+  z-index: 6;
+  box-sizing: border-box;
+  max-width: min(80vw, 36rem);
+  padding: 0 2px;
+  margin: 0;
+  border: 0;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--surface0) 88%, transparent);
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-thickness: 1px;
+  text-decoration-color: var(--blue);
+  white-space: pre;
+  pointer-events: none;
+  overflow: hidden;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--blue) 35%, transparent);
 }
 
 .terminal-file-input {

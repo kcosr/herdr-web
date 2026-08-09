@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "dev": "scripts/dev.sh",
     "dev:web": "npm run dev --prefix web",
     "build:web": "npm run build --prefix web",
     "test:web": "npm run test --prefix web",

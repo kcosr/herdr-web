@@ -8,6 +8,24 @@ import "./styles.css";
 
 startNativeControls();
 
+/** Runtime marker so you can confirm the loaded bundle in DevTools: `__HERDR_WEB__`. */
+declare global {
+  interface Window {
+    __HERDR_WEB__?: {
+      features: string[];
+    };
+  }
+}
+
+window.__HERDR_WEB__ = {
+  features: [
+    "ime-composition-gate",
+    "ime-caret-anchor",
+    "focus-textarea-for-ime",
+    "ime-preedit-overlay",
+  ],
+};
+
 const root = document.getElementById("root");
 
 if (!root) {

@@ -1,0 +1,5 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# Disable CodeRabbit automatic reviews. Reviews can still be triggered manually.
+reviews:
+  auto_review:
+    enabled: false

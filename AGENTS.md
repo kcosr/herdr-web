@@ -38,14 +38,14 @@ This is a lightweight internal onboarding note for agents working in this repo.
   `is_proxy_path_allowed()`. Only the paths in that list are forwarded; command-execution and upload
   endpoints are never proxied. Add new proxied paths there; do not widen the allow-list without
   review.
-- `@parlay/client` (used by `web/src/ParlayMobileInput.tsx`) is a permanently OPTIONAL, LOCAL-ONLY,
+- `@parlay/client` (used by `web/src/ParlayInput.tsx`) is a permanently OPTIONAL, LOCAL-ONLY,
   NEVER-PUBLISHED dependency. It is deliberately absent from `web/package.json` and
   `web/package-lock.json` so `npm ci` never fetches it from a registry, and it resolves only via the
   gitignored symlink `web/local-deps/parlay-client` (setup in `web/README.md`). Do not add it as a
   registry dependency or commit the symlink. Two mechanisms keep it optional and must stay in sync:
   the `parlayClientResolver` in `web/vite.config.ts` (resolves the local package for `vite dev`/tests
   when the symlink is present) with `build.rolldownOptions.external` (externalizes it in production),
-  and the guarded `try { await import("@parlay/client") }` in `ParlayMobileInput.tsx` that falls back
+  and the guarded `try { await import("@parlay/client") }` in `ParlayInput.tsx` that falls back
   to a plain input at runtime when the module is absent. The type side is the single ambient shim
   `web/types/parlay-client.d.ts` — do not reintroduce a duplicate under `web/src/`.
 

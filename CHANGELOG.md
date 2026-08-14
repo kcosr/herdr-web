@@ -36,11 +36,19 @@ Files: CHANGELOG.md, AGENTS.md, web/src/App.tsx, web/src/paneSearch.ts, bridge/s
 
 ### Changed
 
+- Made the parlay-backed command composer the single terminal input experience at every viewport
+  width and pointer type. Previously the composer (key strip, expanding/voice input, stage/send
+  buttons) rendered only on touch devices (`(hover: none) and (pointer: coarse)`); wide desktop
+  viewports had no composer and typed directly into the terminal. Desktop now gets the same input
+  bar, layout, styling, and key handling — parlay owns input everywhere. Renamed `ParlayMobileInput`
+  → `ParlayInput` to reflect that it is no longer mobile-specific. Terminal focus-on-attach
+  (`autoFocus`) and wheel scroll speed remain tuned per pointer device.
+  [PR #22](https://github.com/trillium/herdr-web/pull/22)
 - Made `@parlay/client` a permanently optional, local-only, never-published dependency so fresh
   worktrees and CI build cleanly when the local `web/local-deps/parlay-client` symlink is absent.
   It is no longer referenced in `web/package.json`/`web/package-lock.json` (so `npm ci` never
   resolves it from a registry); the Vite resolver picks up the symlink for `vite dev`/tests when
-  present, production builds externalize it, and `ParlayMobileInput`'s guarded dynamic import falls
+  present, production builds externalize it, and `ParlayInput`'s guarded dynamic import falls
   back to a plain text input at runtime when the module is absent. Removed the dead `vite.config.ts`
   stub module and the duplicate `web/src/@parlay-client.d.ts` type shim (the canonical ambient
   declaration is `web/types/parlay-client.d.ts`).

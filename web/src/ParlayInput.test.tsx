@@ -35,7 +35,7 @@ vi.mock("@parlay/client", () => ({
   PARLAY_SETTINGS_DEFAULTS: { voiceSettleMs: 300 },
 }));
 
-const { ParlayMobileInput } = await import("./ParlayMobileInput");
+const { ParlayInput } = await import("./ParlayInput");
 
 // jsdom has no EventSource; the component opens one for voice actions. Provide a
 // minimal inert stub so rendering does not throw.
@@ -74,7 +74,7 @@ async function renderInput(props: {
   roots.push(root);
   await act(async () => {
     root.render(
-      <ParlayMobileInput
+      <ParlayInput
         value=""
         onValueChange={vi.fn()}
         onVoiceSubmit={vi.fn()}
@@ -90,7 +90,7 @@ async function renderInput(props: {
   });
 }
 
-describe("ParlayMobileInput next/prev agent wiring", () => {
+describe("ParlayInput next/prev agent wiring", () => {
   it("routes parlay ctx.tabs.next() to the onNextAgent callback", async () => {
     const onNextAgent = vi.fn();
     const onPrevAgent = vi.fn();

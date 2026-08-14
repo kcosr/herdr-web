@@ -19,7 +19,7 @@ try {
   // parlay-client unavailable; component will render as a plain input.
 }
 
-export interface ParlayMobileInputProps {
+export interface ParlayInputProps {
   value: string;
   onValueChange: (next: string) => void;
   onVoiceSubmit: (text: string) => void;
@@ -35,7 +35,7 @@ export interface ParlayMobileInputProps {
   inputRef: (node: HTMLInputElement | HTMLTextAreaElement | null) => void;
 }
 
-export function ParlayMobileInput({
+export function ParlayInput({
   value,
   onValueChange,
   onVoiceSubmit,
@@ -47,7 +47,7 @@ export function ParlayMobileInput({
   controlsScalePercent,
   onKeyDown,
   inputRef,
-}: ParlayMobileInputProps) {
+}: ParlayInputProps) {
   const nodeRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
   const valueRef = useRef(value);
   const onValueChangeRef = useRef(onValueChange);

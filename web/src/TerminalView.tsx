@@ -64,8 +64,8 @@ import type {
 } from "./mobileTerminalPrefs";
 import type { PaneInfo } from "./types";
 
-const ParlayMobileInput = lazy(() =>
-  import("./ParlayMobileInput").then((mod) => ({ default: mod.ParlayMobileInput })),
+const ParlayInput = lazy(() =>
+  import("./ParlayInput").then((mod) => ({ default: mod.ParlayInput })),
 );
 
 type Props = {
@@ -1729,7 +1729,7 @@ function MobileTerminalControls({
           <Smartphone size={15} />
         </button>
         <Suspense fallback={null}>
-          <ParlayMobileInput
+          <ParlayInput
             value={value}
             onValueChange={setValue}
             onVoiceSubmit={(text) => {

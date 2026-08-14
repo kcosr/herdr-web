@@ -32,7 +32,7 @@ session.
 
 ## Optional: Enable Parlay-backed Mobile Voice Input
 
-The `ParlayMobileInput` component (`src/ParlayMobileInput.tsx`) is optional and degrades gracefully
+The `ParlayInput` component (`src/ParlayInput.tsx`) is optional and degrades gracefully
 to a plain text input when parlay is unavailable. To enable parlay voice-submit phrase detection,
 set up a local symlink to your parlay checkout:
 

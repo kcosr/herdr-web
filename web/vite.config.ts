@@ -21,7 +21,7 @@ const allowedHosts = parseAllowedHosts(process.env.HERDR_WEB_ALLOWED_HOSTS);
 // from package.json/package-lock.json so `npm ci` never fetches it from a registry.
 //
 // In production (`vite build`) the specifier is externalized (see build.rolldownOptions.external
-// below), so parlay is never bundled; ParlayMobileInput's guarded `try { await import(...) }`
+// below), so parlay is never bundled; ParlayInput's guarded `try { await import(...) }`
 // then falls back to a plain input when the module cannot be resolved at runtime. This resolver
 // only serves the symlink-present dev/test path — do not add a registry version.
 function parlayClientResolver(): Plugin {

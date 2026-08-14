@@ -1794,7 +1794,11 @@ button {
   --mobile-input-row-height: calc(34px * var(--mobile-controls-scale));
   --mobile-input-padding-x: calc(10px * var(--mobile-controls-scale));
   --mobile-send-width: calc(38px * var(--mobile-controls-scale));
-  display: none;
+  /* The parlay command composer is the single input experience at every viewport
+     width and pointer type, so the controls bar renders unconditionally (it used to
+     be display:none until unlocked by .app[data-touch="true"]). */
+  display: flex;
+  flex-direction: column;
   flex: 0 0 auto;
   gap: var(--mobile-control-gap);
   padding: calc(6px * var(--mobile-controls-scale)) max(8px, env(safe-area-inset-right))
@@ -3253,19 +3257,16 @@ button {
   height: 60px;
 }
 
-.app[data-touch="true"] .terminal-mobile-controls {
-  display: flex;
-  flex-direction: column;
-}
-
-.app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-overlay {
+/* Offsets below apply whenever the controls bar is present (now every viewport), so
+   they are scoped by :has(.terminal-mobile-controls) rather than [data-touch="true"]. */
+.terminal-stage:has(.terminal-mobile-controls) .terminal-overlay {
   bottom: calc(var(--terminal-mobile-controls-height) + 38px * var(--mobile-controls-scale));
 }
 
-.app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-upload-status {
+.terminal-stage:has(.terminal-mobile-controls) .terminal-upload-status {
   bottom: calc(var(--terminal-mobile-controls-height) + 8px * var(--mobile-controls-scale));
 }
 
-.app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-selection-sheet {
+.terminal-stage:has(.terminal-mobile-controls) .terminal-selection-sheet {
   bottom: calc(var(--terminal-mobile-controls-height) + 8px * var(--mobile-controls-scale));
 }

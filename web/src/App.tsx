@@ -3577,7 +3577,9 @@ export function App() {
             wsUrl={selectedWsUrl}
             autoFocus={!isTouchInput}
             scrollSensitivity={isTouchInput ? 2 : 0.4}
-            mobileControls={isTouchInput}
+            // The parlay-backed command composer is the single input experience at every
+            // viewport width and pointer type — no longer gated on touch input.
+            mobileControls={true}
             terminalFontSizePx={terminalFontSizePx}
             mobileControlsScalePercent={mobileControlsScalePercent}
             mobileCompactControls={mobileCompactControls}
@@ -5010,7 +5012,9 @@ function SplitGrid({
               wsUrl={wsUrl}
               autoFocus={selected && !touchInput}
               scrollSensitivity={touchInput ? 2 : 0.4}
-              mobileControls={selected && touchInput}
+              // Unified input composer on every device; still only the selected split
+              // pane gets the controls bar (pane selection, not pointer type).
+              mobileControls={selected}
               terminalFontSizePx={terminalFontSizePx}
               mobileControlsScalePercent={mobileControlsScalePercent}
               mobileCompactControls={mobileCompactControls}

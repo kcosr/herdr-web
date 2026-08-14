@@ -24,6 +24,7 @@ import {
   useBridge,
 } from "./bridge";
 import type { BridgeBackendProfile } from "./bridge";
+import { sameOriginDisplay } from "./sameOrigin";
 import {
   DEFAULT_CONTENT_INSET_BOTTOM_PX,
   DEFAULT_CONTENT_INSET_TOP_PX,
@@ -267,7 +268,11 @@ export function BackendSettingsDialog({
 
   const canDelete = Boolean(form.id);
   const editingBackend = selectionMode !== "same-origin";
-  const sameOriginUrl = sameOriginDisplayUrl();
+  const sameOriginEntry = sameOriginDisplay({
+    tailnetName: bridge.getRuntime(SAME_ORIGIN_BRIDGE_ID)?.capabilities?.tailnet_name,
+    origin: globalThis.location?.origin,
+    port: globalThis.location?.port,
+  });
   const showSameOrigin = bridge.sameOriginAvailable;
   const areas: { id: SettingsArea; label: string; icon: typeof Server }[] = [
     { id: "bridge", label: "Bridge", icon: Server },
@@ -341,8 +346,8 @@ export function BackendSettingsDialog({
                         active={selectionMode === "same-origin"}
                         color={SAME_ORIGIN_BRIDGE_COLOR}
                         enabled={sameOriginEnabled}
-                        title="Same origin"
-                        subtitle={sameOriginUrl}
+                        title={sameOriginEntry.title}
+                        subtitle={sameOriginEntry.subtitle}
                         toggleLabel={`${sameOriginEnabled ? "Disable" : "Enable"} Same origin bridge`}
                         onSelect={selectSameOrigin}
                         onToggle={() => bridge.setBridgeEnabled(SAME_ORIGIN_BRIDGE_ID, !sameOriginEnabled)}
@@ -380,10 +385,10 @@ export function BackendSettingsDialog({
                   <div className="backend-form">
                     {selectionMode === "same-origin" ? (
                       <div className="backend-static">
-                        <strong>Same origin</strong>
+                        <strong>{sameOriginEntry.title}</strong>
                         <span>
                           {sameOriginEnabled ? "Enabled" : "Disabled"}; uses the server that
-                          delivered this web app.
+                          delivered this web app ({sameOriginEntry.subtitle}).
                         </span>
                       </div>
                     ) : (
@@ -1257,14 +1262,6 @@ function wrapHue(value: number) {
 
 function clampPercent(value: number) {
   return Math.min(100, Math.max(0, value));
-}
-
-function sameOriginDisplayUrl() {
-  const location = globalThis.location;
-  if (!location?.origin || location.origin === "null") {
-    return "same-origin";
-  }
-  return location.origin;
 }
 
 function initialSelectionMode(

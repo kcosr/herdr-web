@@ -44,6 +44,15 @@ Files: CHANGELOG.md, AGENTS.md, web/src/App.tsx, web/src/paneSearch.ts, bridge/s
   → `ParlayInput` to reflect that it is no longer mobile-specific. Terminal focus-on-attach
   (`autoFocus`) and wheel scroll speed remain tuned per pointer device.
   [PR #22](https://github.com/trillium/herdr-web/pull/22)
+- The "Same origin" backend entry now leads with the machine's own Tailscale tailnet name
+  (e.g. `macbook.tailnet.ts.net:8787`) instead of the generic "Same origin" label, so an agent
+  reachable at `http://localhost:PORT` advertises a name another device on the tailnet can
+  actually connect to. The served origin stays visible as the entry's subtitle. The bridge
+  resolves its tailnet name server-side via `tailscale status --json` (`Self.DNSName`) and
+  reports it in `GET /api/capabilities` as `tailnet_name`, resolving it at most once and caching
+  the result. When Tailscale is absent, stopped, or the machine is not on a tailnet, the field is
+  omitted and the UI falls back to the previous "Same origin" behavior.
+  [PR #23](https://github.com/trillium/herdr-web/pull/23)
 - Made `@parlay/client` a permanently optional, local-only, never-published dependency so fresh
   worktrees and CI build cleanly when the local `web/local-deps/parlay-client` symlink is absent.
   It is no longer referenced in `web/package.json`/`web/package-lock.json` (so `npm ci` never

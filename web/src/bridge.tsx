@@ -52,6 +52,11 @@ export type BridgeCapabilities = {
   bridge_version?: string;
   web_compat?: number;
   min_android_app_compat?: number;
+  /**
+   * This machine's own Tailscale tailnet DNS name (e.g. `macbook.tailnet.ts.net`), resolved
+   * server-side. Absent when Tailscale is not available; consumers fall back to the origin.
+   */
+  tailnet_name?: string;
 };
 
 export type CapabilityState = "idle" | "probing" | "ready" | "error";
@@ -1142,6 +1147,10 @@ export function parseCapabilities(value: unknown): BridgeCapabilities {
       ? value.commands.filter((command): command is string => typeof command === "string")
       : [],
     bridge_version: typeof value.bridge_version === "string" ? value.bridge_version : undefined,
+    tailnet_name:
+      typeof value.tailnet_name === "string" && value.tailnet_name.trim() !== ""
+        ? value.tailnet_name
+        : undefined,
     web_compat: typeof value.web_compat === "number" ? value.web_compat : undefined,
     min_android_app_compat:
       typeof value.min_android_app_compat === "number" ? value.min_android_app_compat : undefined,

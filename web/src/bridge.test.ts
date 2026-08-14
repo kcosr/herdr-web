@@ -322,6 +322,7 @@ describe("capabilities", () => {
         bridge_version: "1.2.3",
         web_compat: 1,
         min_android_app_compat: 2,
+        tailnet_name: "macbook.hippo-tilapia.ts.net",
         agent_activity: { version: 1 },
         agent_pins: { version: 1 },
         notes: { version: 1 },
@@ -331,10 +332,17 @@ describe("capabilities", () => {
       bridge_version: "1.2.3",
       web_compat: 1,
       min_android_app_compat: 2,
+      tailnet_name: "macbook.hippo-tilapia.ts.net",
       agent_activity: { version: 1 },
       agent_pins: { version: 1 },
       notes: { version: 1 },
     });
+  });
+
+  it("omits a blank or non-string tailnet name", () => {
+    expect(parseCapabilities({ commands: [], tailnet_name: "   " }).tailnet_name).toBeUndefined();
+    expect(parseCapabilities({ commands: [], tailnet_name: 42 }).tailnet_name).toBeUndefined();
+    expect(parseCapabilities({ commands: [] }).tailnet_name).toBeUndefined();
   });
 
   it("probes configured bridge capabilities", async () => {

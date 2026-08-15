@@ -67,6 +67,11 @@ export async function decodeTerminalOutputFrame(frame: Uint8Array): Promise<Uint
     throw new Error(`Unsupported terminal output frame type: ${frameType}`);
   }
 
-  const decompressed = new Blob([payload]).stream().pipeThrough(new DecompressionStream("gzip"));
+  // subarray() keeps the ArrayBufferLike base type, which Blob rejects under strict
+  // TypeScript. Copy into a fresh ArrayBuffer-backed view before streaming.
+  const compressedBytes = Uint8Array.from(payload);
+  const decompressed = new Blob([compressedBytes.buffer])
+    .stream()
+    .pipeThrough(new DecompressionStream("gzip"));
   return new Uint8Array(await new Response(decompressed).arrayBuffer());
 }

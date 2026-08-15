@@ -35,7 +35,7 @@ import {
 } from "./terminalConnectionStatus";
 import type { TerminalConnectionState } from "./terminalConnectionStatus";
 import { findFirstUrlInSelection, openableHttpUrl } from "./terminalSelection";
-import { GhosttyRenderer } from "./terminalRenderer";
+import { GhosttyRenderer, terminalCursorBlinkEnabled } from "./terminalRenderer";
 import type { MobileTerminalTouchEvent, TerminalRenderer, TerminalSize } from "./terminalRenderer";
 import {
   appendTerminalInputBatch,
@@ -515,7 +515,14 @@ export function TerminalView({
     let resizeObserver: ResizeObserver | null = null;
     const generation = rendererGenerationRef.current + 1;
     rendererGenerationRef.current = generation;
-    const renderer: TerminalRenderer = new GhosttyRenderer(terminalFontSizePxRef.current);
+    const renderer: TerminalRenderer = new GhosttyRenderer(
+      terminalFontSizePxRef.current,
+      terminalCursorBlinkEnabled(
+        mobileControlsRef.current,
+        navigator.maxTouchPoints > 0 ||
+          window.matchMedia("(hover: none) and (pointer: coarse)").matches,
+      ),
+    );
     rendererRef.current = renderer;
     setConnectionState("connecting");
 

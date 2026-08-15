@@ -102,7 +102,7 @@ type TerminalBufferLine = {
 };
 
 export type MobileTerminalTouchEvent =
-  | { type: "selection"; text: string; lineBreaksAtTerminalRightEdge: readonly boolean[] }
+  | { type: "selection"; text: string }
   | { type: "url"; url: string };
 
 export type TerminalRenderer = {
@@ -777,11 +777,11 @@ export class GhosttyRenderer implements TerminalRenderer {
       const selection = completeTouchSelection(selectionState);
       const selectedText = selection
         ? terminalSelectedTextFromViewportRange(terminal, selection.start, selection.end)
-        : null;
-      if (selectedText?.text && this.#mobileTouchSelectionHandler) {
+        : "";
+      if (selectedText.length > 0 && this.#mobileTouchSelectionHandler) {
         resetTouchSelection(false);
         terminal.textarea?.blur();
-        this.#mobileTouchSelectionHandler({ type: "selection", ...selectedText });
+        this.#mobileTouchSelectionHandler({ type: "selection", text: selectedText });
       } else {
         resetTouchSelection(true);
         terminal.textarea?.blur();
@@ -793,12 +793,12 @@ export class GhosttyRenderer implements TerminalRenderer {
       const selectedText =
         simpleSelectionStart && simpleSelectionEnd
           ? terminalSelectedTextFromViewportRange(terminal, simpleSelectionStart, simpleSelectionEnd)
-          : null;
+          : "";
       stopSimpleTouchSelection();
       terminal.textarea?.blur();
-      if (selectedText?.text.trim() && this.#mobileTouchSelectionHandler) {
-        this.#mobileTouchSelectionHandler({ type: "selection", ...selectedText });
-        if (!findFirstUrlInSelection(selectedText.text.trim())) {
+      if (selectedText.trim() && this.#mobileTouchSelectionHandler) {
+        this.#mobileTouchSelectionHandler({ type: "selection", text: selectedText });
+        if (!findFirstUrlInSelection(selectedText.trim())) {
           clearSelectionClearTimer();
           selectionClearTimer = window.setTimeout(() => {
             selectionClearTimer = null;
@@ -1396,7 +1396,6 @@ function terminalSelectedTextFromViewportRange(
   const range = terminalSelectionRange(start, end, terminal.cols);
 
   const selectedLines: string[] = [];
-  const lineBreaksAtTerminalRightEdge: boolean[] = [];
   for (let row = range.from.row; row <= range.to.row; row += 1) {
     const bufferRow = terminalBufferRow(terminal, row);
     const line = terminal.buffer.active.getLine(bufferRow) as TerminalBufferLine | undefined;
@@ -1412,21 +1411,8 @@ function terminalSelectedTextFromViewportRange(
           ).trimEnd()
         : "",
     );
-    if (row < range.to.row) {
-      lineBreaksAtTerminalRightEdge.push(terminalBufferLineHasNonBlankLastCell(line, terminal.cols));
-    }
   }
-  return { text: selectedLines.join("\n"), lineBreaksAtTerminalRightEdge };
-}
-
-// Herdr's cursor-positioned TerminalAnsi frames do not preserve Ghostty's soft-wrap flag.
-// A nonblank last column is the strongest row-boundary evidence available to the web client.
-function terminalBufferLineHasNonBlankLastCell(
-  line: TerminalBufferLine | undefined,
-  terminalColumns: number,
-) {
-  const codepoint = line?.getCell(terminalColumns - 1)?.getCodepoint() ?? 0;
-  return codepoint > 32;
+  return selectedLines.join("\n");
 }
 
 // Cells holding multi-codepoint grapheme clusters (combining marks, emoji with

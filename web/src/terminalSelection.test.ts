@@ -34,61 +34,50 @@ describe("terminal selection helpers", () => {
     );
   });
 
-  it("removes a visual row boundary from a copied mobile URL", () => {
+  it("rejoins a copied URL split before a hyphen", () => {
     expect(
-      normalizeMobileTerminalCopyText(
-        "http://100.112.72.93:8765/herdr-hollow-centered\n-handle-d872ae6.apk",
-      ),
-    ).toBe("http://100.112.72.93:8765/herdr-hollow-centered-handle-d872ae6.apk");
+      normalizeMobileTerminalCopyText("https://example.com/herdr-hollow-centered\n-handle.apk"),
+    ).toBe("https://example.com/herdr-hollow-centered-handle.apk");
   });
 
-  it("rejoins an alphanumeric URL continuation at the terminal right edge", () => {
-    expect(
-      normalizeMobileTerminalCopyText(
-        "http://100.112.72.93:4100/herdr-web-rebased-v2-ab\n 689b6-android-debug.apk",
-        [true],
-      ),
-    ).toBe("http://100.112.72.93:4100/herdr-web-rebased-v2-ab689b6-android-debug.apk");
+  it("rejoins an indented URL continuation", () => {
+    expect(normalizeMobileTerminalCopyText("https://example.com/copy-fix-v3-9\n 1c39e1.apk")).toBe(
+      "https://example.com/copy-fix-v3-91c39e1.apk",
+    );
   });
 
-  it("rejoins an indented URL continuation when canvas row evidence is unavailable", () => {
-    expect(
-      normalizeMobileTerminalCopyText(
-        "http://100.112.72.93:4100/herdr-web-copy-fix-v3-9\n 1c39e1.apk",
-        [false],
-      ),
-    ).toBe("http://100.112.72.93:4100/herdr-web-copy-fix-v3-91c39e1.apk");
+  it("rejoins a URL that ends on a path delimiter", () => {
+    expect(normalizeMobileTerminalCopyText("https://example.com/release/\nNext")).toBe(
+      "https://example.com/release/Next",
+    );
   });
 
-  it("preserves an unindented alphanumeric hard line break without right-edge evidence", () => {
+  it("preserves an unindented alphanumeric line break", () => {
     expect(
-      normalizeMobileTerminalCopyText(
-        "http://100.112.72.93:4100/herdr-web-rebased-v2-ab\n689b6-android-debug.apk",
-        [false],
-      ),
-    ).toBe("http://100.112.72.93:4100/herdr-web-rebased-v2-ab\n689b6-android-debug.apk");
+      normalizeMobileTerminalCopyText("https://example.com/rebased-v2-ab\n689b6-android-debug.apk"),
+    ).toBe("https://example.com/rebased-v2-ab\n689b6-android-debug.apk");
   });
 
   it("preserves an indented prose word after a URL", () => {
-    expect(
-      normalizeMobileTerminalCopyText("https://example.com/release\n Next", [false]),
-    ).toBe("https://example.com/release\n Next");
+    expect(normalizeMobileTerminalCopyText("https://example.com/release\n Next")).toBe(
+      "https://example.com/release\n Next",
+    );
   });
 
   it("preserves copied prose line boundaries and spaces", () => {
-    expect(normalizeMobileTerminalCopyText("first line\nsecond line with spaces", [true])).toBe(
+    expect(normalizeMobileTerminalCopyText("first line\nsecond line with spaces")).toBe(
       "first line\nsecond line with spaces",
     );
   });
 
-  it("preserves a hard line boundary after a complete URL", () => {
+  it("preserves a hard line break after a complete URL", () => {
     expect(normalizeMobileTerminalCopyText("https://example.com/release\nNext step")).toBe(
       "https://example.com/release\nNext step",
     );
   });
 
-  it("preserves a hard line boundary before list prose", () => {
-    expect(normalizeMobileTerminalCopyText("https://example.com/release/\n- Next step", [true])).toBe(
+  it("preserves a hard line break before list prose", () => {
+    expect(normalizeMobileTerminalCopyText("https://example.com/release/\n- Next step")).toBe(
       "https://example.com/release/\n- Next step",
     );
   });

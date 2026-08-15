@@ -80,8 +80,7 @@ Files: CHANGELOG.md, AGENTS.md, web/src/App.tsx, web/src/paneSearch.ts, bridge/s
   new upstream types they reference, and migrated the bridge's launcher agent-split to herdr
   `v0.8.0`'s redesigned `agent.start` (which now starts a managed agent in an existing pane instead
   of creating and placing the pane itself).
-- Terminal output now negotiates gzip compression between matching web apps and bridges, while
-  remaining compatible with older versions and keeping incompressible updates raw.
+- Compress terminal output with gzip when the client and bridge both support it.
   [PR #59](https://github.com/kcosr/herdr-web/pull/59)
 
 ### Fixed

@@ -164,8 +164,8 @@ Terminal input payloads can be sent as JSON or binary WebSocket frames. JSON rem
 binary is available for comparing terminal input performance. Terminal input batching is off by
 default. When enabled, short input chunks are coalesced for `32`, `64`, `128`, or `256` ms and are
 flushed early once the pending UTF-8 input reaches 32 bytes, so paste-like input bypasses the delay.
-Matching web app and bridge versions automatically compress terminal output when the browser supports
-gzip decompression. Older bridges and browsers continue using uncompressed terminal output.
+The web app and bridge compress terminal output with gzip when both support it. Older bridges and
+browsers keep uncompressed output.
 
 ## Launcher Presets
 

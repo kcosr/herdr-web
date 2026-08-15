@@ -569,18 +569,19 @@ impl TerminalOutputCoalescer {
     fn record_coalesced_send(&mut self, _chunks: usize, _bytes: usize, _latency: Duration) {}
 }
 
+fn gzip_fast(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(bytes).ok()?;
+    encoder.finish().ok()
+}
+
 fn encode_terminal_output_frame(bytes: Bytes, encoding: TerminalOutputWireEncoding) -> Bytes {
-    if matches!(encoding, TerminalOutputWireEncoding::Identity) {
+    if encoding == TerminalOutputWireEncoding::Identity {
         return bytes;
     }
 
-    if bytes.len() < TERMINAL_OUTPUT_GZIP_MIN_BYTES {
-        return raw_terminal_output_frame(bytes);
-    }
-
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
-    if encoder.write_all(&bytes).is_ok() {
-        if let Ok(compressed) = encoder.finish() {
+    if bytes.len() >= TERMINAL_OUTPUT_GZIP_MIN_BYTES {
+        if let Some(compressed) = gzip_fast(&bytes) {
             if compressed.len() < bytes.len() {
                 let mut frame = Vec::with_capacity(compressed.len() + 1);
                 frame.push(TERMINAL_OUTPUT_FRAME_GZIP);
@@ -3727,14 +3728,12 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
 
     let write_tx = session.write_tx.clone();
     let mut terminal_rx = session.output_tx.subscribe();
-    if matches!(output_encoding, TerminalOutputWireEncoding::Gzip)
-        && ws_sender
-            .send(Message::Text(TERMINAL_OUTPUT_GZIP_ACKNOWLEDGEMENT.into()))
-            .await
-            .is_err()
-    {
-        release_terminal_session(&state.terminal_sessions, &terminal_id, &session);
-        return;
+    if output_encoding == TerminalOutputWireEncoding::Gzip {
+        let ack = Message::Text(TERMINAL_OUTPUT_GZIP_ACKNOWLEDGEMENT.into());
+        if ws_sender.send(ack).await.is_err() {
+            release_terminal_session(&state.terminal_sessions, &terminal_id, &session);
+            return;
+        }
     }
 
     let mut output_coalescer = TerminalOutputCoalescer::new(coalesce_window);

@@ -44,12 +44,12 @@ import {
   shouldSendTerminalInputImmediately,
 } from "./terminalInputTransport";
 import type { TerminalInputTransport } from "./terminalInputTransport";
+import { DEFAULT_TERMINAL_OUTPUT_COALESCE_MS } from "./terminalOutputCoalescing";
 import {
   createTerminalOutputFrameDecoder,
-  DEFAULT_TERMINAL_OUTPUT_COALESCE_MS,
   isTerminalOutputGzipAcknowledgement,
-  terminalOutputCompressionSupported,
-} from "./terminalOutputCoalescing";
+  terminalOutputGzipSupported,
+} from "./terminalOutputEncoding";
 import { DEFAULT_TERMINAL_FONT_SIZE_PX } from "./terminalPrefs";
 import {
   TERMINAL_FOREGROUND_FAST_ATTEMPTS,
@@ -735,23 +735,20 @@ export function TerminalView({
         closeActiveSocket();
       }
       reconnectScheduledForSocket.clear();
-      const requestGzipOutput = terminalOutputCompressionSupported();
+      const currentSocketGeneration = socketGeneration + 1;
+      socketGeneration = currentSocketGeneration;
       const nextSocket = new WebSocket(
         terminalSocketUrl(
           wsUrl,
           terminalId,
           initialSize,
           terminalOutputCoalesceMs,
-          requestGzipOutput,
+          terminalOutputGzipSupported(),
         ),
       );
       let gzipOutputAcknowledged = false;
       const outputDecoder = createTerminalOutputFrameDecoder(
-        (output) => {
-          if (socket === nextSocket) {
-            writeTerminalData(currentSocketGeneration, output);
-          }
-        },
+        (output) => writeTerminalData(currentSocketGeneration, output),
         (error) => {
           lastCloseReason = "terminal output decompression failed";
           debugReconnect("output-decompression-failed", { error });
@@ -763,8 +760,6 @@ export function TerminalView({
       socket = nextSocket;
       socketRef.current = nextSocket;
       nextSocket.binaryType = "arraybuffer";
-      const currentSocketGeneration = socketGeneration + 1;
-      socketGeneration = currentSocketGeneration;
       socketStartedAt = performance.now();
       setConnectionState("connecting");
       debugReconnect("connect_start", { reason, socketGeneration, connectTimeoutMs });
@@ -820,18 +815,6 @@ export function TerminalView({
           } else {
             writeTerminalData(currentSocketGeneration, output);
           }
-          return;
-        }
-        if (event.data instanceof Blob) {
-          attachConflictRetries = 0;
-          void event.data.arrayBuffer().then((buffer) => {
-            const output = new Uint8Array(buffer);
-            if (gzipOutputAcknowledged) {
-              void outputDecoder.enqueue(output);
-            } else {
-              writeTerminalData(currentSocketGeneration, output);
-            }
-          });
         }
       });
       nextSocket.addEventListener("close", () => {

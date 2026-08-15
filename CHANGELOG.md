@@ -82,8 +82,8 @@ Files: CHANGELOG.md, AGENTS.md, web/src/App.tsx, web/src/paneSearch.ts, bridge/s
   of creating and placing the pane itself).
 - Compress terminal output with gzip when the client and bridge both support it.
   [PR #59](https://github.com/kcosr/herdr-web/pull/59)
-- Mobile terminals now use a static visible cursor instead of a blinking cursor, reducing continuous
-  canvas redraw work on resource-constrained devices. Desktop cursors continue to blink.
+- Stop blinking the terminal cursor on touch devices so idle terminals do not keep redrawing.
+  Desktop cursors still blink.
   [PR #60](https://github.com/kcosr/herdr-web/pull/60)
 
 ### Fixed

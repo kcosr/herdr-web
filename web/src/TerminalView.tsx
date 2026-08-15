@@ -34,7 +34,11 @@ import {
   terminalConnectionOverlayDelayMs,
 } from "./terminalConnectionStatus";
 import type { TerminalConnectionState } from "./terminalConnectionStatus";
-import { findFirstUrlInSelection, openableHttpUrl } from "./terminalSelection";
+import {
+  findFirstUrlInSelection,
+  normalizeMobileTerminalCopyText,
+  openableHttpUrl,
+} from "./terminalSelection";
 import { GhosttyRenderer } from "./terminalRenderer";
 import type { MobileTerminalTouchEvent, TerminalRenderer, TerminalSize } from "./terminalRenderer";
 import {
@@ -321,19 +325,22 @@ export function TerminalView({
         }
         return;
       }
-      const trimmed = event.text.trim();
+      const copiedText = normalizeMobileTerminalCopyText(
+        event.text,
+        event.lineBreaksAtTerminalRightEdge,
+      ).trim();
       setMobileSelectionAction(null);
-      if (!trimmed) {
+      if (!copiedText) {
         rendererRef.current?.clearSelection();
         return;
       }
-      const url = findFirstUrlInSelection(trimmed);
+      const url = findFirstUrlInSelection(copiedText);
       if (url) {
-        setMobileSelectionAction({ text: trimmed, url });
+        setMobileSelectionAction({ text: copiedText, url });
         return;
       }
       rendererRef.current?.clearSelection();
-      void copyText(trimmed, "Copied selection");
+      void copyText(copiedText, "Copied selection");
     },
     [copyText],
   );

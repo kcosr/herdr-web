@@ -18,6 +18,7 @@ import {
   fallbackBackendColor,
   normalizeBridgeBaseUrl,
   normalizeBackendColor,
+  remoteBridgeRuntimeId,
   SAME_ORIGIN_BRIDGE_ID,
   SAME_ORIGIN_BRIDGE_COLOR,
   suggestBackendColor,
@@ -381,6 +382,45 @@ export function BackendSettingsDialog({
                         <small>Save another bridge URL</small>
                       </span>
                     </button>
+                    {bridge.remoteBridges.length > 0 ? (
+                      <>
+                        <div className="backend-note">Proxied bridges (configured on the server)</div>
+                        {bridge.remoteBridges.map((remote) => {
+                          const runtime = bridge.availableRuntimes.find(
+                            (candidate) => candidate.id === remoteBridgeRuntimeId(remote.id),
+                          );
+                          const status =
+                            runtime?.capabilityState === "ready"
+                              ? "Connected"
+                              : runtime?.capabilityState === "error"
+                                ? "Unreachable"
+                                : "Proxied";
+                          return (
+                            <div className="backend-row" role="listitem" key={remote.id}>
+                              <span className="backend-row-main">
+                                <span
+                                  className="backend-row-dot"
+                                  style={
+                                    {
+                                      "--bridge-color":
+                                        runtime?.color ??
+                                        fallbackBackendColor(remoteBridgeRuntimeId(remote.id)),
+                                    } as CSSProperties
+                                  }
+                                  aria-hidden="true"
+                                />
+                                <span className="backend-row-text">
+                                  <strong>{remote.label}</strong>
+                                  <small>
+                                    {remote.baseUrl} · {status}
+                                  </small>
+                                </span>
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </>
+                    ) : null}
                   </div>
                   <div className="backend-form">
                     {selectionMode === "same-origin" ? (

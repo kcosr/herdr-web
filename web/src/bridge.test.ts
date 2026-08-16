@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildHttpUrl,
+  buildProxyHttpUrl,
+  buildProxyWsUrl,
   buildWsUrl,
   capabilityProbeFailure,
   capabilityProbeSuccess,
   capabilityRetryDelayMs,
   configuredBridgeConnectionKey,
   duplicateBackend,
+  fetchRemoteBridges,
   fetchDiscoveredBridges,
   loadBackendStore,
   mergeBridges,
@@ -15,6 +18,10 @@ import {
   parseBackendStore,
   parseCapabilities,
   probeBridgeBaseUrl,
+  remoteBridgeConnectionKey,
+  remoteBridgeRuntimeId,
+  remoteProxyApiPath,
+  remoteProxyWsPath,
   removeNoteDraftsForBridgeConnection,
   SAME_ORIGIN_BRIDGE_ID,
 } from "./bridge";
@@ -367,6 +374,153 @@ describe("capabilities", () => {
     );
 
     await expect(probeBridgeBaseUrl("192.168.1.20:4000")).rejects.toThrow(/not compatible/iu);
+
+    fetchMock.mockRestore();
+  });
+});
+
+describe("remote bridge proxy runtime", () => {
+  it("namespaces runtime and connection ids so proxied bridges cannot collide", () => {
+    expect(remoteBridgeRuntimeId("mini1")).toBe("remote:mini1");
+    expect(remoteBridgeConnectionKey("mini1")).toBe("remote:mini1");
+    expect(remoteBridgeRuntimeId("mini1")).not.toBe(SAME_ORIGIN_BRIDGE_ID);
+  });
+
+  it("rewrites bridge API paths to the hub's same-origin proxy path", () => {
+    expect(remoteProxyApiPath("mini1", "/api/snapshot")).toBe(
+      "/api/remote/mini1/snapshot",
+    );
+    expect(remoteProxyApiPath("mini1", "/api/agent-activity")).toBe(
+      "/api/remote/mini1/agent-activity",
+    );
+  });
+
+  it("percent-encodes the server id in proxy API paths", () => {
+    expect(remoteProxyApiPath("mini/1 a", "/api/snapshot")).toBe(
+      "/api/remote/mini%2F1%20a/snapshot",
+    );
+  });
+
+  it("rejects proxy API rewrites for non-/api/ paths", () => {
+    expect(() => remoteProxyApiPath("mini1", "/ws/terminal")).toThrow(/\/api\//u);
+  });
+
+  it("rewrites bridge WebSocket paths to the hub's same-origin proxy path", () => {
+    expect(remoteProxyWsPath("mini1", "/ws/terminal")).toBe(
+      "/ws/remote/mini1/terminal",
+    );
+    expect(remoteProxyWsPath("mini/1", "/ws/terminal")).toBe(
+      "/ws/remote/mini%2F1/terminal",
+    );
+  });
+
+  it("rejects proxy WebSocket rewrites for non-/ws/ paths", () => {
+    expect(() => remoteProxyWsPath("mini1", "/api/snapshot")).toThrow(/\/ws\//u);
+  });
+
+  it("builds same-origin proxy HTTP URLs that preserve query params", () => {
+    const query = new URLSearchParams({ terminal_id: "term-1" });
+
+    expect(buildProxyHttpUrl("mini1", "/api/snapshot")).toBe("/api/remote/mini1/snapshot");
+    expect(buildProxyHttpUrl("mini1", "/api/notes", query)).toBe(
+      "/api/remote/mini1/notes?terminal_id=term-1",
+    );
+  });
+
+  it("builds absolute same-origin proxy WebSocket URLs from window location", () => {
+    vi.stubGlobal("location", { protocol: "https:", host: "hub.local:8787" });
+    const query = new URLSearchParams({ terminal_id: "term-1" });
+
+    expect(buildProxyWsUrl("mini1", "/ws/terminal", query)).toBe(
+      "wss://hub.local:8787/ws/remote/mini1/terminal?terminal_id=term-1",
+    );
+
+    vi.unstubAllGlobals();
+  });
+
+  it("reads the server-configured remote bridges and derives host labels", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          { id: "mini1", url: "http://mini1.tail-scale.ts.net:8787" },
+          { id: "mini2", url: "http://100.64.0.2:8787" },
+        ]),
+        { status: 200 },
+      ),
+    );
+
+    await expect(fetchRemoteBridges()).resolves.toEqual([
+      { id: "mini1", label: "mini1.tail-scale.ts.net:8787", baseUrl: "http://mini1.tail-scale.ts.net:8787" },
+      { id: "mini2", label: "100.64.0.2:8787", baseUrl: "http://100.64.0.2:8787" },
+    ]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/bridges",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+
+    fetchMock.mockRestore();
+  });
+
+  it("deduplicates remote bridges by id and skips malformed entries", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          { id: "mini1", url: "http://mini1:8787" },
+          { id: "mini1", url: "http://mini1-dupe:8787" },
+          { id: "  ", url: "http://blank:8787" },
+          { id: "mini3" },
+          { url: "http://no-id:8787" },
+          "not-an-object",
+        ]),
+        { status: 200 },
+      ),
+    );
+
+    await expect(fetchRemoteBridges()).resolves.toEqual([
+      { id: "mini1", label: "mini1:8787", baseUrl: "http://mini1:8787" },
+    ]);
+
+    fetchMock.mockRestore();
+  });
+
+  it("falls back to the bridge id when the url has no parseable host", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify([{ id: "mini9", url: "not a url" }]), { status: 200 }),
+    );
+
+    await expect(fetchRemoteBridges()).resolves.toEqual([
+      { id: "mini9", label: "mini9", baseUrl: "not a url" },
+    ]);
+
+    fetchMock.mockRestore();
+  });
+
+  it("returns an empty list when the bridges endpoint is unavailable", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("nope", { status: 404 }),
+    );
+
+    await expect(fetchRemoteBridges()).resolves.toEqual([]);
+
+    fetchMock.mockRestore();
+  });
+
+  it("returns an empty list on transport failure", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("network down"));
+
+    await expect(fetchRemoteBridges()).resolves.toEqual([]);
+
+    fetchMock.mockRestore();
+  });
+
+  it("returns an empty list when the payload is not an array", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ bridges: [] }), { status: 200 }),
+    );
+
+    await expect(fetchRemoteBridges()).resolves.toEqual([]);
 
     fetchMock.mockRestore();
   });

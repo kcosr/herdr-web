@@ -64,8 +64,8 @@ import type {
 } from "./mobileTerminalPrefs";
 import type { PaneInfo } from "./types";
 
-const ParlayMobileInput = lazy(() =>
-  import("./ParlayMobileInput").then((mod) => ({ default: mod.ParlayMobileInput })),
+const ParlayInput = lazy(() =>
+  import("./ParlayInput").then((mod) => ({ default: mod.ParlayInput })),
 );
 
 type Props = {
@@ -108,6 +108,10 @@ type Props = {
   refitToken?: number;
   /** Incrementing token from the parent that requests focus on the preferred terminal input. */
   focusToken?: number;
+  /** Advance to the next agent pane (mobile "next agent"/"next tab" command). */
+  onNextAgentPane?: () => void;
+  /** Return to the previous agent pane (mobile "previous agent" command). */
+  onPrevAgentPane?: () => void;
 };
 
 type UploadCandidate = {
@@ -171,6 +175,8 @@ export function TerminalView({
   terminalOutputCoalesceMs = DEFAULT_TERMINAL_OUTPUT_COALESCE_MS,
   refitToken = 0,
   focusToken = 0,
+  onNextAgentPane = () => {},
+  onPrevAgentPane = () => {},
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLElement | null>(null);
@@ -1395,6 +1401,8 @@ export function TerminalView({
           onUpload={openFilePicker}
           onStageCommand={(command) => enqueueTerminalInput([command])}
           onSubmitCommand={(command) => enqueueTerminalInput([command, "\r"])}
+          onNextAgentPane={onNextAgentPane}
+          onPrevAgentPane={onPrevAgentPane}
         />
       ) : null}
       {mobileSelectionAction ? (
@@ -1490,6 +1498,8 @@ function MobileTerminalControls({
   onUpload,
   onStageCommand,
   onSubmitCommand,
+  onNextAgentPane,
+  onPrevAgentPane,
 }: {
   commandInputRef: RefObject<HTMLInputElement | HTMLTextAreaElement | null>;
   disabled: boolean;
@@ -1507,6 +1517,8 @@ function MobileTerminalControls({
   onUpload: () => void;
   onStageCommand: (command: string) => void;
   onSubmitCommand: (command: string) => void;
+  onNextAgentPane: () => void;
+  onPrevAgentPane: () => void;
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [value, setValue] = useState("");
@@ -1717,13 +1729,15 @@ function MobileTerminalControls({
           <Smartphone size={15} />
         </button>
         <Suspense fallback={null}>
-          <ParlayMobileInput
+          <ParlayInput
             value={value}
             onValueChange={setValue}
             onVoiceSubmit={(text) => {
               onSubmitCommand(text);
               setValue("");
             }}
+            onNextAgent={onNextAgentPane}
+            onPrevAgent={onPrevAgentPane}
             disabled={disabled}
             expandingInput={expandingInput}
             enterNewline={enterNewline}

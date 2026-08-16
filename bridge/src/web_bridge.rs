@@ -5,7 +5,7 @@ use std::io::{self, ErrorKind, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -183,6 +183,12 @@ struct Capabilities {
     agent_pins: AgentPinsCapability,
     launcher_presets: LauncherPresetsCapability,
     notes: NotesCapability,
+    /// This machine's own Tailscale tailnet DNS name (e.g. `macbook.tailnet.ts.net`), so the
+    /// same-origin entry can advertise a name reachable from other devices on the tailnet.
+    /// Omitted entirely when Tailscale is absent, stopped, or the machine is not on a tailnet;
+    /// the web client then falls back to displaying the served origin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tailnet_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -930,10 +936,7 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
     // users to either (a) pass --allow-origin with their serving hostname, or
     // (b) start herdr with an --allow-origin flag for their hostname.
     // This ensures localhost-to-localhost communication always works.
-    if !allowed_origins
-        .iter()
-        .any(|o| o.starts_with("http://localhost"))
-    {
+    if !allowed_origins.iter().any(|o| o.starts_with("http://localhost")) {
         allowed_origins.push("http://localhost".to_string());
     }
 
@@ -1250,7 +1253,7 @@ async fn add_security_headers(
     );
     headers.insert(
         HeaderName::from_static("content-security-policy"),
-        content_security_policy(&policy),
+        content_security_policy(&policy, posthog_enabled()),
     );
     if let Some(origin) = cors_origin {
         insert_cors_headers(headers, origin);
@@ -1560,8 +1563,20 @@ fn connect_sources_for_origin(origin: &str) -> Result<Vec<String>, String> {
     Ok(vec![origin, websocket_origin])
 }
 
-fn content_security_policy(policy: &RequestPolicy) -> HeaderValue {
-    let mut connect_src = vec!["'self'".to_string(), "data:".to_string()];
+fn posthog_enabled() -> bool {
+    std::env::var("HERDR_POSTHOG_ENABLED").is_ok()
+}
+
+fn content_security_policy(policy: &RequestPolicy, posthog_enabled: bool) -> HeaderValue {
+    let mut connect_src = vec![
+        "'self'".to_string(),
+        "data:".to_string(),
+    ];
+    // Only allow PostHog hosts if explicitly enabled
+    if posthog_enabled {
+        connect_src.push("https://us.i.posthog.com".to_string());
+        connect_src.push("https://us-assets.i.posthog.com".to_string());
+    }
     connect_src.extend(policy.allowed_connect_sources.iter().cloned());
     let value = format!(
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src {}; \
@@ -2738,7 +2753,69 @@ async fn capabilities_handler(
         agent_pins: AgentPinsCapability { version: 1 },
         launcher_presets: LauncherPresetsCapability { version: 1 },
         notes: NotesCapability { version: 1 },
+        tailnet_name: tailnet_name_cached().await,
     }))
+}
+
+/// Process-wide cache of this machine's tailnet name. The tailnet name does not change minute
+/// to minute, so we resolve it at most once (a benign race on first request may resolve twice,
+/// but only the first result is retained) and reuse it for every later capabilities request.
+static TAILNET_NAME: OnceLock<Option<String>> = OnceLock::new();
+
+/// Returns this machine's Tailscale tailnet DNS name, resolving it once on first request and
+/// caching the result (including a cached "not available" when Tailscale is absent or stopped).
+/// Resolution shells out to `tailscale`, so it runs on a blocking thread.
+async fn tailnet_name_cached() -> Option<String> {
+    if let Some(cached) = TAILNET_NAME.get() {
+        return cached.clone();
+    }
+    let resolved = tokio::task::spawn_blocking(resolve_tailnet_name)
+        .await
+        .unwrap_or(None);
+    // If another request won the race, keep its value; either way both are equivalent.
+    let _ = TAILNET_NAME.set(resolved);
+    TAILNET_NAME.get().cloned().flatten()
+}
+
+/// Shells out to `tailscale status --json` and extracts this machine's tailnet DNS name.
+///
+/// We shell out to the CLI rather than talking to the Tailscale LocalAPI socket directly: the
+/// LocalAPI socket path and auth differ per platform (a unix socket on Linux, a port+token
+/// handshake on macOS), whereas `tailscale status --json` is a single stable command on every
+/// platform. We read `Self.DNSName` (a real name) rather than `tailscale ip -4` (only an IP,
+/// not something the captain asked to connect to by name). Tailscale being absent, stopped, or
+/// this machine not being on a tailnet are all normal states that yield `None`, never an error.
+fn resolve_tailnet_name() -> Option<String> {
+    let output = std::process::Command::new("tailscale")
+        .args(["status", "--json"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    parse_tailnet_name_from_status(&stdout)
+}
+
+/// Parses the tailnet DNS name out of `tailscale status --json` output.
+///
+/// Returns `None` unless the backend is actually running (a stopped backend can report a stale
+/// `Self.DNSName`, which we must not surface) and `Self.DNSName` is a non-empty name. The
+/// trailing FQDN dot Tailscale includes is stripped.
+fn parse_tailnet_name_from_status(json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    if value.get("BackendState").and_then(|v| v.as_str()) != Some("Running") {
+        return None;
+    }
+    let dns_name = value
+        .get("Self")
+        .and_then(|self_node| self_node.get("DNSName"))
+        .and_then(|v| v.as_str())?;
+    let trimmed = dns_name.trim().trim_end_matches('.');
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 /// Returns the remote bridges this bridge was launched with (`--remote-bridge`), as a flat
@@ -5838,14 +5915,33 @@ mod tests {
     }
 
     #[test]
-    fn content_security_policy_includes_configured_connect_sources() {
+    fn content_security_policy_excludes_posthog_when_disabled() {
         let mut policy = test_policy("0.0.0.0", 8787);
         policy.allowed_connect_sources = connect_sources_for_origin("http://srv:8787").unwrap();
 
-        let header = content_security_policy(&policy);
+        let header = content_security_policy(&policy, false);
         let value = header.to_str().unwrap();
 
+        // PostHog should NOT be in CSP when disabled
+        assert!(!value.contains("posthog.com"));
         assert!(value.contains("connect-src 'self' data: http://srv:8787 ws://srv:8787;"));
+        assert!(value.contains("img-src 'self' data: blob:;"));
+        assert!(value.contains("frame-ancestors 'none'"));
+    }
+
+    #[test]
+    fn content_security_policy_includes_posthog_when_enabled() {
+        let mut policy = test_policy("0.0.0.0", 8787);
+        policy.allowed_connect_sources = connect_sources_for_origin("http://srv:8787").unwrap();
+
+        let header = content_security_policy(&policy, true);
+        let value = header.to_str().unwrap();
+
+        // PostHog hosts should be in CSP when enabled
+        assert!(value.contains(
+            "connect-src 'self' data: https://us.i.posthog.com https://us-assets.i.posthog.com \
+             http://srv:8787 ws://srv:8787;"
+        ));
         assert!(value.contains("img-src 'self' data: blob:;"));
         assert!(value.contains("frame-ancestors 'none'"));
     }
@@ -6527,15 +6623,15 @@ mod tests {
 
     #[test]
     fn remote_bridge_url_validation_rejects_query_strings_and_fragments() {
-        assert!(origin_authority("http://mini1:8787").is_ok());
-        assert!(origin_authority("http://mini1:8787/").is_ok());
-        assert!(origin_authority("mini1:8787").is_ok());
-        assert!(origin_authority("http://mini1:8787?query=value").is_err());
-        assert!(origin_authority("http://mini1:8787#fragment").is_err());
-        assert!(origin_authority("mini1:8787?x").is_err());
-        assert!(origin_authority("mini1:8787#x").is_err());
-        assert!(origin_authority("http://user@mini1:8787").is_err());
-        assert!(origin_authority("http://mini1:8787/path").is_err());
+        assert!(normalize_remote_bridge_url("http://remote1:8787").is_ok());
+        assert!(normalize_remote_bridge_url("http://remote1:8787/").is_ok());
+        assert!(normalize_remote_bridge_url("remote1:8787").is_ok());
+        assert!(normalize_remote_bridge_url("http://remote1:8787?query=value").is_err());
+        assert!(normalize_remote_bridge_url("http://remote1:8787#fragment").is_err());
+        assert!(normalize_remote_bridge_url("remote1:8787?x").is_err());
+        assert!(normalize_remote_bridge_url("remote1:8787#x").is_err());
+        assert!(normalize_remote_bridge_url("http://testuser@remote1:8787").is_err());
+        assert!(normalize_remote_bridge_url("http://remote1:8787/path").is_err());
     }
 
     fn origin_headers(host: &str, origin: Option<&str>) -> HeaderMap {
@@ -6555,5 +6651,46 @@ mod tests {
             allowed_origins: Vec::new(),
             allowed_connect_sources: Vec::new(),
         }
+    }
+
+    #[test]
+    fn parses_tailnet_name_from_running_status() {
+        let json = r#"{
+            "BackendState": "Running",
+            "MagicDNSSuffix": "hippo-tilapia.ts.net",
+            "Self": { "DNSName": "macbook.hippo-tilapia.ts.net." }
+        }"#;
+        assert_eq!(
+            parse_tailnet_name_from_status(json),
+            Some("macbook.hippo-tilapia.ts.net".to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_tailnet_name_when_backend_not_running() {
+        // A stopped backend can still report a stale DNSName; we must not surface it.
+        let json = r#"{
+            "BackendState": "Stopped",
+            "Self": { "DNSName": "macbook.hippo-tilapia.ts.net." }
+        }"#;
+        assert_eq!(parse_tailnet_name_from_status(json), None);
+    }
+
+    #[test]
+    fn ignores_empty_tailnet_name() {
+        let json = r#"{ "BackendState": "Running", "Self": { "DNSName": "." } }"#;
+        assert_eq!(parse_tailnet_name_from_status(json), None);
+    }
+
+    #[test]
+    fn tailnet_name_absent_when_status_unparseable_or_missing_self() {
+        // Tailscale absent/erroring yields non-JSON or empty output; a running tailnet with no
+        // Self node likewise yields no name. Both are normal, non-error "not available" states.
+        assert_eq!(parse_tailnet_name_from_status(""), None);
+        assert_eq!(parse_tailnet_name_from_status("not json"), None);
+        assert_eq!(
+            parse_tailnet_name_from_status(r#"{ "BackendState": "Running" }"#),
+            None
+        );
     }
 }

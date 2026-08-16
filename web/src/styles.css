@@ -1794,7 +1794,11 @@ button {
   --mobile-input-row-height: calc(34px * var(--mobile-controls-scale));
   --mobile-input-padding-x: calc(10px * var(--mobile-controls-scale));
   --mobile-send-width: calc(38px * var(--mobile-controls-scale));
-  display: none;
+  /* The parlay command composer is the single input experience at every viewport
+     width and pointer type, so the controls bar renders unconditionally (it used to
+     be display:none until unlocked by .app[data-touch="true"]). */
+  display: flex;
+  flex-direction: column;
   flex: 0 0 auto;
   gap: var(--mobile-control-gap);
   padding: calc(6px * var(--mobile-controls-scale)) max(8px, env(safe-area-inset-right))
@@ -2331,6 +2335,88 @@ button {
   color: var(--subtext0);
   font-size: 12px;
   line-height: 1.35;
+}
+
+.pane-search-modal {
+  width: min(480px, 100%);
+  max-height: min(560px, calc(100dvh - 32px));
+}
+
+.pane-search-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border: 1px solid var(--surface1);
+  border-radius: var(--r-sm);
+  background: var(--crust);
+  color: var(--overlay1);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.pane-search-field:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.pane-search-field .field {
+  padding: 10px 0;
+  border: 0;
+  background: transparent;
+}
+
+.pane-search-field .field:focus {
+  box-shadow: none;
+}
+
+.pane-search-results {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+}
+
+.pane-search-result {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 9px;
+  border: 0;
+  border-radius: var(--r-sm);
+  color: var(--subtext0);
+  background: transparent;
+  text-align: left;
+  transition: background 110ms ease, color 110ms ease;
+}
+
+.pane-search-result:hover,
+.pane-search-result[data-active="true"] {
+  color: var(--text);
+  background: var(--row-hover);
+}
+
+.pane-search-result-text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pane-search-result-title {
+  overflow: hidden;
+  font-size: 13.5px;
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pane-search-result-path {
+  overflow: hidden;
+  font-size: 11.5px;
+  color: var(--overlay1);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .backend-modal {
@@ -3171,19 +3257,16 @@ button {
   height: 60px;
 }
 
-.app[data-touch="true"] .terminal-mobile-controls {
-  display: flex;
-  flex-direction: column;
-}
-
-.app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-overlay {
+/* Offsets below apply whenever the controls bar is present (now every viewport), so
+   they are scoped by :has(.terminal-mobile-controls) rather than [data-touch="true"]. */
+.terminal-stage:has(.terminal-mobile-controls) .terminal-overlay {
   bottom: calc(var(--terminal-mobile-controls-height) + 38px * var(--mobile-controls-scale));
 }
 
-.app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-upload-status {
+.terminal-stage:has(.terminal-mobile-controls) .terminal-upload-status {
   bottom: calc(var(--terminal-mobile-controls-height) + 8px * var(--mobile-controls-scale));
 }
 
-.app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-selection-sheet {
+.terminal-stage:has(.terminal-mobile-controls) .terminal-selection-sheet {
   bottom: calc(var(--terminal-mobile-controls-height) + 8px * var(--mobile-controls-scale));
 }

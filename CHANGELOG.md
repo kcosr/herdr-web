@@ -36,6 +36,32 @@ Files: CHANGELOG.md, AGENTS.md, web/src/App.tsx, web/src/paneSearch.ts, bridge/s
 
 ### Changed
 
+- Made the parlay-backed command composer the single terminal input experience at every viewport
+  width and pointer type. Previously the composer (key strip, expanding/voice input, stage/send
+  buttons) rendered only on touch devices (`(hover: none) and (pointer: coarse)`); wide desktop
+  viewports had no composer and typed directly into the terminal. Desktop now gets the same input
+  bar, layout, styling, and key handling — parlay owns input everywhere. Renamed `ParlayMobileInput`
+  → `ParlayInput` to reflect that it is no longer mobile-specific. Terminal focus-on-attach
+  (`autoFocus`) and wheel scroll speed remain tuned per pointer device.
+  [PR #22](https://github.com/trillium/herdr-web/pull/22)
+- The "Same origin" backend entry now leads with the machine's own Tailscale tailnet name
+  (e.g. `macbook.tailnet.ts.net:8787`) instead of the generic "Same origin" label, so an agent
+  reachable at `http://localhost:PORT` advertises a name another device on the tailnet can
+  actually connect to. The served origin stays visible as the entry's subtitle. The bridge
+  resolves its tailnet name server-side via `tailscale status --json` (`Self.DNSName`) and
+  reports it in `GET /api/capabilities` as `tailnet_name`, resolving it at most once and caching
+  the result. When Tailscale is absent, stopped, or the machine is not on a tailnet, the field is
+  omitted and the UI falls back to the previous "Same origin" behavior.
+  [PR #23](https://github.com/trillium/herdr-web/pull/23)
+- Made `@parlay/client` a permanently optional, local-only, never-published dependency so fresh
+  worktrees and CI build cleanly when the local `web/local-deps/parlay-client` symlink is absent.
+  It is no longer referenced in `web/package.json`/`web/package-lock.json` (so `npm ci` never
+  resolves it from a registry); the Vite resolver picks up the symlink for `vite dev`/tests when
+  present, production builds externalize it, and `ParlayInput`'s guarded dynamic import falls
+  back to a plain text input at runtime when the module is absent. Removed the dead `vite.config.ts`
+  stub module and the duplicate `web/src/@parlay-client.d.ts` type shim (the canonical ambient
+  declaration is `web/types/parlay-client.d.ts`).
+  [PR #18](https://github.com/trillium/herdr-web/pull/18)
 - Refreshed the vendored `herdr-compat` crate to the herdr `v0.8.0` baseline (wire protocol `19`,
   up from `v0.7.2`/protocol `16`): copied the exact-compared API schema surface and the
   `protocol::wire` body, added minimal `input`/`raw_input`/`popup_size` supporting shims for the
@@ -45,6 +71,12 @@ Files: CHANGELOG.md, AGENTS.md, web/src/App.tsx, web/src/paneSearch.ts, bridge/s
 
 ### Fixed
 
+- Fixed the mobile "next agent" / "previous agent" command doing nothing: the parlay command
+  context's `tabs.next`/`tabs.prev` hooks were no-op stubs, so typing or speaking "next agent"
+  (or "next tab" / "previous agent") in the mobile command input never switched panes. They now
+  route through the same tested `nextVisibleAgentPaneEntry` + `focusPane` navigation used by the
+  desktop ArrowUp/ArrowDown shortcut, matching its wrap-at-ends behavior.
+  [PR #19](https://github.com/trillium/herdr-web/pull/19)
 - Fixed herdr-web rejecting the herdr `v0.8.0` daemon at startup with "protocol 19 is newer than
   this herdr-web bridge supports": the vendored protocol constant is now `19`, so the bridge's
   terminal-attach accept range (`16..=PROTOCOL_VERSION`) admits protocol `19` daemons while still

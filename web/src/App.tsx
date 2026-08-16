@@ -9,6 +9,7 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
+  Search,
   Settings,
   SplitSquareHorizontal,
   SplitSquareVertical,
@@ -75,6 +76,8 @@ import {
 import { LaunchDialog } from "./LaunchDialog";
 import { resolveLaunchSpec } from "./launch";
 import type { LaunchTarget } from "./launch";
+import { PaneSearchDialog } from "./PaneSearchDialog";
+import type { PaneSearchEntry } from "./paneSearch";
 import {
   FALLBACK_LAUNCHER_PRESETS,
   fetchLauncherPresets,
@@ -802,6 +805,7 @@ export function App() {
   const [showDetail, setShowDetail] = useState(false);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [dialog, setDialog] = useState<DialogState | null>(null);
+  const [showPaneSearch, setShowPaneSearch] = useState(false);
   const [noteDeleteTarget, setNoteDeleteTarget] = useState<ScopedNoteEntry | null>(null);
   const [deletingNote, setDeletingNote] = useState(false);
   const [backendSettingsOpen, setBackendSettingsOpen] = useState(false);
@@ -1299,6 +1303,43 @@ export function App() {
   useEffect(() => {
     showDetailRef.current = showDetail;
   }, [showDetail]);
+
+  // Sync current bridge/pane/workspace selection to URL for persistence
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const hasUrlSelection =
+      params.has("bridge") || params.has("pane") || params.has("workspace");
+    if (hasUrlSelection) {
+      return; // Don't overwrite URL-seeded selection
+    }
+    if (selectedRuntime && selectedPaneRefState) {
+      const urlParams = new URLSearchParams(window.location.search);
+      urlParams.set("bridge", selectedRuntime.id);
+      urlParams.set("pane", selectedPaneRefState.paneId);
+      if (activeWorkspaceRefState?.workspaceId) {
+        urlParams.set("workspace", activeWorkspaceRefState.workspaceId);
+      } else {
+        urlParams.delete("workspace");
+      }
+      const newUrl = `${window.location.pathname}?${urlParams.toString()}${window.location.hash}`;
+      window.history.replaceState(null, "", newUrl);
+    }
+  }, [selectedRuntime?.id, selectedPaneRefState, activeWorkspaceRefState?.workspaceId]);
+
+  // Seed selection from URL params on initial load
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const urlBridgeId = params.get("bridge");
+    const urlPaneId = params.get("pane");
+    const urlWorkspaceId = params.get("workspace");
+    if (urlBridgeId && urlPaneId) {
+      setSelectedBridgeId(urlBridgeId);
+      setSelectedPaneRefState({ bridgeId: urlBridgeId, paneId: urlPaneId });
+      if (urlWorkspaceId) {
+        setActiveWorkspaceRefState({ bridgeId: urlBridgeId, workspaceId: urlWorkspaceId });
+      }
+    }
+  }, []); // Only run on mount
 
   useEffect(() => {
     if (!selectedRuntime) {
@@ -1911,6 +1952,31 @@ export function App() {
     }
   };
 
+  const paneSearchEntries = useMemo<PaneSearchEntry[]>(() => {
+    const entries: PaneSearchEntry[] = [];
+    for (const bridgeView of bridgeViews) {
+      const snapshotData = bridgeView.snapshot;
+      if (!snapshotData) continue;
+      for (const pane of snapshotData.panes) {
+        const workspace = snapshotData.workspaces.find((w) => w.workspace_id === pane.workspace_id);
+        const tab = snapshotData.tabs.find((t) => t.tab_id === pane.tab_id);
+        const path = workspace && tab ? `${workspace.label}/${tab.label}` : "unknown";
+        entries.push({
+          bridgeId: bridgeView.runtime.id,
+          bridgeLabel: bridgeView.runtime.label,
+          pane,
+          path,
+        });
+      }
+    }
+    return entries;
+  }, [bridgeViews]);
+
+  const handlePaneSearchSelect = (bridgeId: BridgeId, pane: PaneInfo) => {
+    setShowPaneSearch(false);
+    openPane(bridgeId, pane);
+  };
+
   const requestTerminalFocus = () => setTerminalFocusToken((token) => token + 1);
   const requestNoteTitleFocus = (bridgeId: BridgeId, noteId: string) => {
     setNoteTitleFocusRequest((current) => ({
@@ -1986,6 +2052,47 @@ export function App() {
   const focusPane = (bridgeId: BridgeId, pane: PaneInfo) => {
     openPane(bridgeId, pane);
     requestTerminalFocus();
+  };
+
+  // Advance the selected agent pane by one visible entry, wrapping at the ends.
+  // Shared by the desktop ArrowUp/ArrowDown shortcut and the mobile "next agent"/
+  // "previous agent" command (parlay text/voice trigger). Reuses the same tested
+  // `nextVisibleAgentPaneEntry` + `focusPane` path as the keyboard so mobile stays
+  // in lockstep with desktop wrap behavior. Returns whether a pane was focused.
+  const focusAdjacentAgentPane = (step: -1 | 1): boolean => {
+    const agentEntries = buildVisibleAgentPaneEntries(
+      buildVisibleScopedWorkspaces(
+        bridgeViews,
+        selectedRuntime?.id ?? null,
+        hostScope,
+        scope,
+        activeSpace,
+        activeWorkspacesByBridgeId,
+      ),
+      bridgeViews,
+      hostScope,
+      agentGroup,
+      agentSort,
+      pinnedAgentKeys,
+      effectiveAgentPinnedOnly,
+      agentActivityTransitions,
+      agentActiveOnly,
+    );
+    if (agentEntries.length === 0) {
+      return false;
+    }
+    const selectedBridgeIdForShortcut = selectedRuntime?.id ?? null;
+    const currentIndex =
+      selectedBridgeIdForShortcut && selectedPane
+        ? agentEntries.findIndex(
+            (entry) =>
+              entry.bridgeId === selectedBridgeIdForShortcut &&
+              entry.pane.pane_id === selectedPane.pane_id,
+          )
+        : -1;
+    const next = nextVisibleAgentPaneEntry(agentEntries, currentIndex, step);
+    focusPane(next.bridgeId, next.pane);
+    return true;
   };
 
   const selectNote = (bridgeId: BridgeId, noteId: string) => {
@@ -2551,41 +2658,11 @@ export function App() {
       }
 
       if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-        const agentEntries = buildVisibleAgentPaneEntries(
-          buildVisibleScopedWorkspaces(
-            bridgeViews,
-            selectedRuntime?.id ?? null,
-            hostScope,
-            scope,
-            activeSpace,
-            activeWorkspacesByBridgeId,
-          ),
-          bridgeViews,
-          hostScope,
-          agentGroup,
-          agentSort,
-          pinnedAgentKeys,
-          effectiveAgentPinnedOnly,
-          agentActivityTransitions,
-          agentActiveOnly,
-        );
-        if (agentEntries.length === 0) {
-          return;
-        }
-        event.preventDefault();
-        event.stopPropagation();
-        const selectedBridgeIdForShortcut = selectedRuntime?.id ?? null;
-        const currentIndex =
-          selectedBridgeIdForShortcut && selectedPane
-            ? agentEntries.findIndex(
-                (entry) =>
-                  entry.bridgeId === selectedBridgeIdForShortcut &&
-                  entry.pane.pane_id === selectedPane.pane_id,
-              )
-            : -1;
         const step = event.key === "ArrowDown" ? 1 : -1;
-        const next = nextVisibleAgentPaneEntry(agentEntries, currentIndex, step);
-        focusPane(next.bridgeId, next.pane);
+        if (focusAdjacentAgentPane(step)) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
         return;
       }
 
@@ -3365,6 +3442,15 @@ export function App() {
               {stageBreadcrumb(snapshot, selectedPane, loadState, selectedRuntime?.canConnect ?? false)}
             </span>
           </div>
+          <button
+            className="icon-btn"
+            type="button"
+            aria-label="Search panes"
+            title="Search panes across all bridges"
+            onClick={() => setShowPaneSearch(true)}
+          >
+            <Search size={18} />
+          </button>
           {splitSupported && selectedPane && !isCompactLayout ? (
             <>
               <button
@@ -3479,6 +3565,8 @@ export function App() {
             resumeToken={selectedRuntime?.resumeToken ?? 0}
             httpUrl={selectedHttpUrl}
             wsUrl={selectedWsUrl}
+            onNextAgentPane={() => focusAdjacentAgentPane(1)}
+            onPrevAgentPane={() => focusAdjacentAgentPane(-1)}
           />
         ) : renderTerminal ? (
           <TerminalView
@@ -3489,7 +3577,9 @@ export function App() {
             wsUrl={selectedWsUrl}
             autoFocus={!isTouchInput}
             scrollSensitivity={isTouchInput ? 2 : 0.4}
-            mobileControls={isTouchInput}
+            // The parlay-backed command composer is the single input experience at every
+            // viewport width and pointer type — no longer gated on touch input.
+            mobileControls={true}
             terminalFontSizePx={terminalFontSizePx}
             mobileControlsScalePercent={mobileControlsScalePercent}
             mobileCompactControls={mobileCompactControls}
@@ -3504,6 +3594,8 @@ export function App() {
             terminalOutputCoalesceMs={terminalOutputCoalesceMs}
             refitToken={refitToken}
             focusToken={terminalFocusToken}
+            onNextAgentPane={() => focusAdjacentAgentPane(1)}
+            onPrevAgentPane={() => focusAdjacentAgentPane(-1)}
           />
         ) : (
           <div className="terminal-stage" aria-hidden="true" />
@@ -3696,6 +3788,14 @@ export function App() {
             }
           }}
           onConfirm={() => void confirmDeleteNote()}
+        />
+      ) : null}
+
+      {showPaneSearch ? (
+        <PaneSearchDialog
+          entries={paneSearchEntries}
+          onCancel={() => setShowPaneSearch(false)}
+          onSelect={handlePaneSearchSelect}
         />
       ) : null}
 
@@ -4849,6 +4949,8 @@ function SplitGrid({
   resumeToken,
   httpUrl,
   wsUrl,
+  onNextAgentPane,
+  onPrevAgentPane,
 }: {
   cells: { pane: PaneInfo; style: CSSProperties }[];
   selectedPaneId: string | null;
@@ -4872,6 +4974,8 @@ function SplitGrid({
   resumeToken: number;
   httpUrl: (path: string, query?: URLSearchParams) => string;
   wsUrl: (path: string, query?: URLSearchParams) => string;
+  onNextAgentPane: () => void;
+  onPrevAgentPane: () => void;
 }) {
   // On touch devices, showing every split pane at once (e.g. a small tmux
   // status pane stacked under the main agent pane) leaves too little room for
@@ -4918,7 +5022,9 @@ function SplitGrid({
               wsUrl={wsUrl}
               autoFocus={selected && !touchInput}
               scrollSensitivity={touchInput ? 2 : 0.4}
-              mobileControls={selected && touchInput}
+              // Unified input composer on every device; still only the selected split
+              // pane gets the controls bar (pane selection, not pointer type).
+              mobileControls={selected}
               terminalFontSizePx={terminalFontSizePx}
               mobileControlsScalePercent={mobileControlsScalePercent}
               mobileCompactControls={mobileCompactControls}
@@ -4933,6 +5039,8 @@ function SplitGrid({
               terminalOutputCoalesceMs={terminalOutputCoalesceMs}
               refitToken={selected ? refitToken : 0}
               focusToken={selected ? focusToken : 0}
+              onNextAgentPane={onNextAgentPane}
+              onPrevAgentPane={onPrevAgentPane}
             />
           </div>
         );

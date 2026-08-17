@@ -163,6 +163,10 @@ bin/herdr-web --host 0.0.0.0 --port 4000 \
 
 Then install the Android APK and add the bridge URL in the Bridge area of Settings.
 
+When a trusted reverse proxy publishes the bridge from another scheme or port, pass its exact
+external origin with `--public-origin ORIGIN`. This authorizes that Origin and Host authority; it
+does not add authentication.
+
 For browser-served multi-bridge use, configure both the page-serving bridge and the bridge being
 called. If a page opened from `http://host-a:8787` should connect to `http://host-b:8787`, run host
 A with:

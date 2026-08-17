@@ -125,8 +125,8 @@ Open `http://127.0.0.1:8787` and verify:
 - Binding to `HOST=0.0.0.0` is only used on a trusted network.
 
 Repeat the startup, terminal attach, and launcher checks with an unpacked desktop tarball before
-uploading it. Confirm the bridge rejects every protocol other than `19`
-instead of serving a partially compatible UI.
+uploading it. Confirm the bridge rejects every protocol other than `19` instead of serving a
+partially compatible UI.
 
 ## Cut
 

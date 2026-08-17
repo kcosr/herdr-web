@@ -1,3 +1,4 @@
+use crossterm::event::{KeyCode, KeyModifiers};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +20,10 @@ impl TextCommit {
     pub fn new(text: impl Into<String>) -> Self {
         Self { text: text.into() }
     }
+
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,8 +35,8 @@ enum KeySource {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalKey {
-    pub code: crossterm::event::KeyCode,
-    pub modifiers: crossterm::event::KeyModifiers,
+    pub code: KeyCode,
+    pub modifiers: KeyModifiers,
     pub kind: crossterm::event::KeyEventKind,
     pub repeat_count: u16,
     pub shifted_codepoint: Option<u32>,
@@ -40,7 +45,7 @@ pub struct TerminalKey {
 }
 
 impl TerminalKey {
-    pub fn new(code: crossterm::event::KeyCode, modifiers: crossterm::event::KeyModifiers) -> Self {
+    pub fn new(code: KeyCode, modifiers: KeyModifiers) -> Self {
         Self {
             code,
             modifiers,
@@ -92,6 +97,14 @@ impl TerminalKey {
         };
         self.source = KeySource::WindowsConsole { record };
         self
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn vt_bytes(&self) -> Option<&[u8]> {
+        match &self.source {
+            KeySource::Vt { bytes } => Some(bytes),
+            KeySource::Synthesized | KeySource::WindowsConsole { .. } => None,
+        }
     }
 
     #[cfg(any(windows, test))]

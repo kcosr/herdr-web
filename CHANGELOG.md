@@ -6,9 +6,25 @@
 
 ### Added
 
+- Added a mobile terminal key composer for Ctrl, Shift, and Alt chords with special keys and
+  printable keyboard input such as `Alt+P`. [PR #63](https://github.com/kcosr/herdr-web/pull/63)
+- Added `--public-origin ORIGIN` for trusted reverse proxies that publish the bridge from a different
+  scheme or port.
+
 ### Changed
 
+- Mobile terminals now use a static visible cursor instead of a blinking cursor, reducing continuous
+  canvas redraw work on resource-constrained devices. Desktop cursors continue to blink.
+- Terminal output now negotiates gzip compression between matching web apps and bridges, while
+  remaining compatible with older versions and keeping incompressible updates raw.
+
 ### Fixed
+
+- Incremented the Android package version to code 4 so this debug APK can update existing
+  `dev.herdr.web` installations signed with the same development certificate.
+- Mobile terminal copies now remove canvas row gaps that split HTTP(S) links, including indented
+  alphanumeric continuations when terminal edge metadata is unavailable, while preserving ordinary
+  line breaks.
 
 ### Removed
 

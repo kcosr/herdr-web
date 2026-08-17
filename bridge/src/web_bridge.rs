@@ -21,6 +21,8 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{extract::Request as AxumRequest, Json, Router};
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use futures_util::{SinkExt, StreamExt};
 use herdr_compat::TryClone as _;
 use serde::{Deserialize, Serialize};
@@ -75,6 +77,11 @@ const DEFAULT_TERMINAL_OUTPUT_COALESCE_MS: u64 = 16;
 const MAX_TERMINAL_OUTPUT_COALESCE_MS: u64 = 256;
 const TERMINAL_OUTPUT_COALESCE_MAX_BYTES: usize = 32 * 1024;
 const TERMINAL_OUTPUT_COALESCE_MAX_CHUNKS: usize = 256;
+const TERMINAL_OUTPUT_FRAME_RAW: u8 = 0;
+const TERMINAL_OUTPUT_FRAME_GZIP: u8 = 1;
+const TERMINAL_OUTPUT_GZIP_MIN_BYTES: usize = 256;
+const TERMINAL_OUTPUT_GZIP_ACKNOWLEDGEMENT: &str =
+    r#"{"type":"terminal_output_encoding","encoding":"gzip"}"#;
 const DAEMON_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const ACTIVITY_WATCHER_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const ACTIVITY_WATCHER_MAX_BACKOFF: Duration = Duration::from_secs(30);
@@ -96,6 +103,7 @@ struct BridgeOptions {
     launcher_presets_path: Option<PathBuf>,
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
+    public_origins: Vec<String>,
     allowed_connect_sources: Vec<String>,
 }
 
@@ -121,6 +129,7 @@ struct RequestPolicy {
     bind_port: u16,
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
+    public_origins: Vec<String>,
     allowed_connect_sources: Vec<String>,
 }
 
@@ -199,6 +208,7 @@ struct TerminalQuery {
     cols: Option<u16>,
     rows: Option<u16>,
     coalesce_ms: Option<u64>,
+    output_encoding: Option<TerminalOutputWireEncoding>,
     #[serde(default)]
     takeover: bool,
 }
@@ -239,6 +249,13 @@ fn default_scroll_lines() -> u16 {
 enum TerminalOutput {
     Bytes(Bytes),
     Close(String),
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TerminalOutputWireEncoding {
+    Identity,
+    Gzip,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -518,6 +535,37 @@ impl TerminalOutputCoalescer {
     fn record_coalesced_send(&mut self, _chunks: usize, _bytes: usize, _latency: Duration) {}
 }
 
+fn encode_terminal_output_frame(bytes: Bytes, encoding: TerminalOutputWireEncoding) -> Bytes {
+    if matches!(encoding, TerminalOutputWireEncoding::Identity) {
+        return bytes;
+    }
+
+    if bytes.len() < TERMINAL_OUTPUT_GZIP_MIN_BYTES {
+        return raw_terminal_output_frame(bytes);
+    }
+
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    if encoder.write_all(&bytes).is_ok() {
+        if let Ok(compressed) = encoder.finish() {
+            if compressed.len() < bytes.len() {
+                let mut frame = Vec::with_capacity(compressed.len() + 1);
+                frame.push(TERMINAL_OUTPUT_FRAME_GZIP);
+                frame.extend_from_slice(&compressed);
+                return Bytes::from(frame);
+            }
+        }
+    }
+
+    raw_terminal_output_frame(bytes)
+}
+
+fn raw_terminal_output_frame(bytes: Bytes) -> Bytes {
+    let mut frame = Vec::with_capacity(bytes.len() + 1);
+    frame.push(TERMINAL_OUTPUT_FRAME_RAW);
+    frame.extend_from_slice(&bytes);
+    Bytes::from(frame)
+}
+
 fn drain_terminal_output_pending(
     pending: &mut Vec<Bytes>,
     pending_bytes: &mut usize,
@@ -771,7 +819,7 @@ pub(crate) fn run_command(args: &[String]) -> io::Result<i32> {
         Err(message) => {
             eprintln!("{message}");
             eprintln!(
-                "usage: herdr-web-bridge [--session NAME] [--host HOST] [--port PORT] [--static-dir DIR] [--launcher-presets PATH] [--allow-origin ORIGIN] [--allow-host HOSTNAME] [--allow-connect-origin ORIGIN]"
+                "usage: herdr-web-bridge [--session NAME] [--host HOST] [--port PORT] [--static-dir DIR] [--launcher-presets PATH] [--allow-origin ORIGIN] [--public-origin ORIGIN] [--allow-host HOSTNAME] [--allow-connect-origin ORIGIN]"
             );
             return Ok(2);
         }
@@ -800,6 +848,7 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
     let mut launcher_presets_path = None;
     let mut allowed_hosts = Vec::new();
     let mut allowed_origins = Vec::new();
+    let mut public_origins = Vec::new();
     let mut allowed_connect_sources = Vec::new();
     let mut explicit_session = None;
     let mut index = 0;
@@ -869,6 +918,13 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
                 allowed_origins.push(normalize_allowed_origin(value)?);
                 index += 2;
             }
+            "--public-origin" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --public-origin".into());
+                };
+                public_origins.push(normalize_allowed_origin(value)?);
+                index += 2;
+            }
             "--allow-connect-origin" => {
                 let Some(value) = args.get(index + 1) else {
                     return Err("missing value for --allow-connect-origin".into());
@@ -895,6 +951,7 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
         launcher_presets_path,
         allowed_hosts,
         allowed_origins,
+        public_origins,
         allowed_connect_sources,
     }))
 }
@@ -906,13 +963,14 @@ fn print_help() {
 fn help_text() -> &'static str {
     "herdr-web-bridge\n\
 \n\
-Usage: herdr-web-bridge [--session NAME] [--host HOST] [--port PORT] [--static-dir DIR] [--upload-dir DIR] [--launcher-presets PATH] [--allow-origin ORIGIN] [--allow-host HOSTNAME] [--allow-connect-origin ORIGIN]\n\
+Usage: herdr-web-bridge [--session NAME] [--host HOST] [--port PORT] [--static-dir DIR] [--upload-dir DIR] [--launcher-presets PATH] [--allow-origin ORIGIN] [--public-origin ORIGIN] [--allow-host HOSTNAME] [--allow-connect-origin ORIGIN]\n\
 \n\
 Runs the local HTTP/WebSocket bridge for herdr-web.\n\
 Defaults to the active Herdr daemon sockets and 127.0.0.1:8787.\n\
 Use --session NAME to target a named Herdr session and ignore HERDR_SOCKET_PATH.\n\
 Use --host 0.0.0.0 to listen on non-loopback interfaces.\n\
 Use --allow-origin http://localhost for bundled Android app access.\n\
+Use --public-origin ORIGIN when a trusted reverse proxy serves the bridge from that external origin.\n\
 Use --allow-host HOSTNAME to accept that exact DNS hostname in Host headers.\n\
 Use --allow-connect-origin ORIGIN to let the served web app connect to another bridge origin.\n\
 Use --launcher-presets PATH or HERDR_WEB_LAUNCHER_PRESETS to load custom launch presets.\n\
@@ -940,6 +998,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         bind_port: options.port,
         allowed_hosts: options.allowed_hosts.clone(),
         allowed_origins: options.allowed_origins.clone(),
+        public_origins: options.public_origins.clone(),
         allowed_connect_sources: options.allowed_connect_sources.clone(),
     };
     let api = ApiClient::for_socket_path(crate::session::active_api_socket_path());
@@ -1350,6 +1409,15 @@ fn host_authority_allowed(authority: &str, policy: &RequestPolicy) -> bool {
         return true;
     }
 
+    if policy
+        .public_origins
+        .iter()
+        .filter_map(|origin| origin_authority(origin))
+        .any(|public_authority| same_authority(public_authority, authority))
+    {
+        return true;
+    }
+
     if !authority_port_matches(authority, policy.bind_port) {
         return false;
     }
@@ -1388,6 +1456,7 @@ fn request_origin_allowed(headers: &HeaderMap, policy: &RequestPolicy) -> bool {
         || policy
             .allowed_origins
             .iter()
+            .chain(&policy.public_origins)
             .any(|allowed| allowed.eq_ignore_ascii_case(origin))
 }
 
@@ -3351,6 +3420,9 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
     let cols = query.cols.unwrap_or(DEFAULT_COLS);
     let rows = query.rows.unwrap_or(DEFAULT_ROWS);
     let coalesce_window = terminal_output_coalesce_window(query.coalesce_ms);
+    let output_encoding = query
+        .output_encoding
+        .unwrap_or(TerminalOutputWireEncoding::Identity);
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let session = match acquire_terminal_session(
         state.clone(),
@@ -3372,6 +3444,16 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
 
     let write_tx = session.write_tx.clone();
     let mut terminal_rx = session.output_tx.subscribe();
+    if matches!(output_encoding, TerminalOutputWireEncoding::Gzip)
+        && ws_sender
+            .send(Message::Text(TERMINAL_OUTPUT_GZIP_ACKNOWLEDGEMENT.into()))
+            .await
+            .is_err()
+    {
+        release_terminal_session(&state.terminal_sessions, &terminal_id, &session);
+        return;
+    }
+
     let mut output_coalescer = TerminalOutputCoalescer::new(coalesce_window);
     let _ = write_tx.send(ClientMessage::Resize {
         cols,
@@ -3388,6 +3470,7 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
                     if !handle_terminal_output_deadline(
                         &mut ws_sender,
                         &mut output_coalescer,
+                        output_encoding,
                     )
                     .await
                     {
@@ -3404,6 +3487,7 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
                         output,
                         &mut ws_sender,
                         &mut output_coalescer,
+                        output_encoding,
                     )
                     .await
                     {
@@ -3419,6 +3503,7 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
                         output,
                         &mut ws_sender,
                         &mut output_coalescer,
+                        output_encoding,
                     )
                     .await
                     {
@@ -3441,6 +3526,7 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
 async fn handle_terminal_output_deadline(
     ws_sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     output_coalescer: &mut TerminalOutputCoalescer,
+    output_encoding: TerminalOutputWireEncoding,
 ) -> bool {
     let Some(reason) = output_coalescer.handle_deadline() else {
         return true;
@@ -3448,23 +3534,35 @@ async fn handle_terminal_output_deadline(
     let Some(bytes) = output_coalescer.flush_pending(reason, Instant::now()) else {
         return true;
     };
-    if ws_sender.send(Message::Binary(bytes)).await.is_err() {
-        return false;
-    }
-    true
+    send_terminal_output_frame(ws_sender, bytes, output_encoding).await
+}
+
+async fn send_terminal_output_frame(
+    ws_sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    bytes: Bytes,
+    output_encoding: TerminalOutputWireEncoding,
+) -> bool {
+    ws_sender
+        .send(Message::Binary(encode_terminal_output_frame(
+            bytes,
+            output_encoding,
+        )))
+        .await
+        .is_ok()
 }
 
 async fn handle_terminal_output_message(
     output: Result<TerminalOutput, tokio::sync::broadcast::error::RecvError>,
     ws_sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     output_coalescer: &mut TerminalOutputCoalescer,
+    output_encoding: TerminalOutputWireEncoding,
 ) -> bool {
     match output {
         Ok(TerminalOutput::Bytes(bytes)) => {
             let decision = output_coalescer.push_bytes(bytes, Instant::now());
             match decision {
                 TerminalOutputCoalescingDecision::SendNow(bytes) => {
-                    if ws_sender.send(Message::Binary(bytes)).await.is_err() {
+                    if !send_terminal_output_frame(ws_sender, bytes, output_encoding).await {
                         return false;
                     }
                 }
@@ -3473,7 +3571,7 @@ async fn handle_terminal_output_message(
                     let Some(bytes) = output_coalescer.flush_pending(reason, Instant::now()) else {
                         return true;
                     };
-                    if ws_sender.send(Message::Binary(bytes)).await.is_err() {
+                    if !send_terminal_output_frame(ws_sender, bytes, output_encoding).await {
                         return false;
                     }
                 }
@@ -3484,7 +3582,7 @@ async fn handle_terminal_output_message(
             if let Some(bytes) =
                 output_coalescer.flush_pending(TerminalOutputFlushReason::Close, Instant::now())
             {
-                if ws_sender.send(Message::Binary(bytes)).await.is_err() {
+                if !send_terminal_output_frame(ws_sender, bytes, output_encoding).await {
                     return false;
                 }
             }
@@ -4457,6 +4555,43 @@ fn startup_daemon_error(err: BridgeError) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+
+    #[test]
+    fn gzip_terminal_output_frame_round_trips_and_reduces_repeated_output() {
+        let payload = Bytes::from(vec![b'x'; 4096]);
+
+        let frame = encode_terminal_output_frame(payload.clone(), TerminalOutputWireEncoding::Gzip);
+
+        assert_eq!(frame[0], TERMINAL_OUTPUT_FRAME_GZIP);
+        let mut decoded = Vec::new();
+        GzDecoder::new(&frame[1..])
+            .read_to_end(&mut decoded)
+            .expect("gzip terminal output should decode");
+        assert_eq!(decoded, payload);
+        assert!(frame.len() < payload.len() / 4);
+    }
+
+    #[test]
+    fn identity_terminal_output_encoding_preserves_legacy_frames() {
+        let payload = Bytes::from_static(b"legacy terminal bytes");
+
+        let frame =
+            encode_terminal_output_frame(payload.clone(), TerminalOutputWireEncoding::Identity);
+
+        assert_eq!(frame, payload);
+    }
+
+    #[test]
+    fn gzip_terminal_output_frame_keeps_small_output_raw() {
+        let payload = Bytes::from_static(b"ready> ");
+
+        let frame = encode_terminal_output_frame(payload.clone(), TerminalOutputWireEncoding::Gzip);
+
+        assert_eq!(frame[0], TERMINAL_OUTPUT_FRAME_RAW);
+        assert_eq!(&frame[1..], payload);
+    }
 
     #[test]
     fn static_cache_headers_revalidate_entrypoints_and_public_files() {
@@ -5471,6 +5606,7 @@ mod tests {
             bind_port: 4000,
             allowed_hosts: Vec::new(),
             allowed_origins: vec!["http://localhost".to_string()],
+            public_origins: Vec::new(),
             allowed_connect_sources: Vec::new(),
         };
         assert!(request_allowed(
@@ -5537,6 +5673,7 @@ mod tests {
             bind_port: 4000,
             allowed_hosts: vec!["herdr-host.local".to_string()],
             allowed_origins: Vec::new(),
+            public_origins: Vec::new(),
             allowed_connect_sources: Vec::new(),
         };
         assert!(host_authority_allowed("herdr-host.local:4000", &policy));
@@ -5546,12 +5683,48 @@ mod tests {
     }
 
     #[test]
+    fn public_origin_allows_only_its_reverse_proxy_authority() {
+        let mut policy = test_policy("100.92.238.117", 4000);
+        policy.public_origins = vec!["https://server60.greyhound-chinstrap.ts.net".to_string()];
+
+        assert!(request_allowed(
+            &origin_headers(
+                "server60.greyhound-chinstrap.ts.net",
+                Some("https://server60.greyhound-chinstrap.ts.net")
+            ),
+            &policy
+        ));
+        assert!(request_allowed(
+            &origin_headers(
+                "100.92.238.117:4000",
+                Some("https://server60.greyhound-chinstrap.ts.net")
+            ),
+            &policy
+        ));
+        assert!(!request_allowed(
+            &origin_headers(
+                "server60.greyhound-chinstrap.ts.net.evil.example",
+                Some("https://server60.greyhound-chinstrap.ts.net")
+            ),
+            &policy
+        ));
+        assert!(!request_allowed(
+            &origin_headers(
+                "server60.greyhound-chinstrap.ts.net",
+                Some("https://evil.example")
+            ),
+            &policy
+        ));
+    }
+
+    #[test]
     fn cors_headers_reflect_only_allowed_origins() {
         let policy = RequestPolicy {
             bind_host: "0.0.0.0".to_string(),
             bind_port: 4000,
             allowed_hosts: Vec::new(),
             allowed_origins: vec!["http://localhost".to_string()],
+            public_origins: Vec::new(),
             allowed_connect_sources: Vec::new(),
         };
         assert_eq!(
@@ -5930,6 +6103,14 @@ mod tests {
         assert_eq!(
             validated_daemon_protocol(runtime_status("1.0.0", PROTOCOL_VERSION)).unwrap(),
             PROTOCOL_VERSION
+        );
+    }
+
+    #[test]
+    fn daemon_status_accepts_herdr_0_8_protocol_19() {
+        assert_eq!(
+            validated_daemon_protocol(runtime_status("0.8.0", 19)).unwrap(),
+            19
         );
     }
 
@@ -6437,6 +6618,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_options_accepts_public_reverse_proxy_origin() {
+        let args = vec![
+            "--public-origin".to_string(),
+            "HTTPS://SERVER60.GREYHOUND-CHINSTRAP.TS.NET".to_string(),
+        ];
+
+        let options = parse_options(&args).unwrap().unwrap();
+        assert_eq!(
+            options.public_origins,
+            vec!["https://server60.greyhound-chinstrap.ts.net".to_string()]
+        );
+    }
+
+    #[test]
     fn parse_options_configures_explicit_session() {
         let _guard = crate::session::TEST_ENV_LOCK.lock().unwrap();
         let previous_session = std::env::var(crate::session::SESSION_ENV_VAR).ok();
@@ -6534,6 +6729,7 @@ mod tests {
             bind_port,
             allowed_hosts: Vec::new(),
             allowed_origins: Vec::new(),
+            public_origins: Vec::new(),
             allowed_connect_sources: Vec::new(),
         }
     }

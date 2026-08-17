@@ -11,7 +11,15 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent, RefObject } from "react";
-import { autosizeMobileCommandTextarea } from "./mobileCommandTextarea";
+import {
+  autosizeMobileCommandTextarea,
+  encodeMobileTerminalChord,
+  formatMobileTerminalChord,
+  MOBILE_TERMINAL_MODIFIERS,
+  MOBILE_TERMINAL_SPECIAL_KEYS,
+  mobileTerminalPrintableKey,
+} from "./mobileTerminalControls";
+import type { MobileTerminalChordKey } from "./mobileTerminalControls";
 import { ConfirmDialog } from "./overlays";
 import { addNativeResumeHandler } from "./native";
 import { shellQuote } from "./shell";
@@ -24,8 +32,12 @@ import {
   terminalConnectionOverlayDelayMs,
 } from "./terminalConnectionStatus";
 import type { TerminalConnectionState } from "./terminalConnectionStatus";
-import { findFirstUrlInSelection, openableHttpUrl } from "./terminalSelection";
-import { GhosttyRenderer } from "./terminalRenderer";
+import {
+  findFirstUrlInSelection,
+  normalizeMobileTerminalCopyText,
+  openableHttpUrl,
+} from "./terminalSelection";
+import { GhosttyRenderer, terminalCursorBlinkEnabled } from "./terminalRenderer";
 import type { MobileTerminalTouchEvent, TerminalRenderer, TerminalSize } from "./terminalRenderer";
 import {
   appendTerminalInputBatch,
@@ -34,7 +46,12 @@ import {
   shouldSendTerminalInputImmediately,
 } from "./terminalInputTransport";
 import type { TerminalInputTransport } from "./terminalInputTransport";
-import { DEFAULT_TERMINAL_OUTPUT_COALESCE_MS } from "./terminalOutputCoalescing";
+import {
+  createTerminalOutputFrameDecoder,
+  DEFAULT_TERMINAL_OUTPUT_COALESCE_MS,
+  isTerminalOutputGzipAcknowledgement,
+  terminalOutputCompressionSupported,
+} from "./terminalOutputCoalescing";
 import { DEFAULT_TERMINAL_FONT_SIZE_PX } from "./terminalPrefs";
 import {
   TERMINAL_FOREGROUND_FAST_ATTEMPTS,
@@ -291,19 +308,22 @@ export function TerminalView({
         }
         return;
       }
-      const trimmed = event.text.trim();
+      const copiedText = normalizeMobileTerminalCopyText(
+        event.text,
+        event.lineBreaksAtTerminalRightEdge,
+      ).trim();
       setMobileSelectionAction(null);
-      if (!trimmed) {
+      if (!copiedText) {
         rendererRef.current?.clearSelection();
         return;
       }
-      const url = findFirstUrlInSelection(trimmed);
+      const url = findFirstUrlInSelection(copiedText);
       if (url) {
-        setMobileSelectionAction({ text: trimmed, url });
+        setMobileSelectionAction({ text: copiedText, url });
         return;
       }
       rendererRef.current?.clearSelection();
-      void copyText(trimmed, "Copied selection");
+      void copyText(copiedText, "Copied selection");
     },
     [copyText],
   );
@@ -491,7 +511,14 @@ export function TerminalView({
     let resizeObserver: ResizeObserver | null = null;
     const generation = rendererGenerationRef.current + 1;
     rendererGenerationRef.current = generation;
-    const renderer: TerminalRenderer = new GhosttyRenderer(terminalFontSizePxRef.current);
+    const renderer: TerminalRenderer = new GhosttyRenderer(
+      terminalFontSizePxRef.current,
+      terminalCursorBlinkEnabled(
+        mobileControlsRef.current,
+        navigator.maxTouchPoints > 0 ||
+          window.matchMedia("(hover: none) and (pointer: coarse)").matches,
+      ),
+    );
     rendererRef.current = renderer;
     setConnectionState("connecting");
 
@@ -732,8 +759,30 @@ export function TerminalView({
         closeActiveSocket();
       }
       reconnectScheduledForSocket.clear();
+      const requestGzipOutput = terminalOutputCompressionSupported();
       const nextSocket = new WebSocket(
-        terminalSocketUrl(wsUrl, terminalId, initialSize, terminalOutputCoalesceMs),
+        terminalSocketUrl(
+          wsUrl,
+          terminalId,
+          initialSize,
+          terminalOutputCoalesceMs,
+          requestGzipOutput,
+        ),
+      );
+      let gzipOutputAcknowledged = false;
+      const outputDecoder = createTerminalOutputFrameDecoder(
+        (output) => {
+          if (socket === nextSocket) {
+            writeTerminalData(currentSocketGeneration, output);
+          }
+        },
+        (error) => {
+          lastCloseReason = "terminal output decompression failed";
+          debugReconnect("output-decompression-failed", { error });
+          if (socket === nextSocket) {
+            nextSocket.close();
+          }
+        },
       );
       socket = nextSocket;
       socketRef.current = nextSocket;
@@ -778,6 +827,10 @@ export function TerminalView({
           return;
         }
         if (typeof event.data === "string") {
+          if (isTerminalOutputGzipAcknowledgement(event.data)) {
+            gzipOutputAcknowledged = true;
+            return;
+          }
           lastCloseReason = parseTerminalCloseReason(event.data) ?? lastCloseReason;
           return;
         }
@@ -785,17 +838,28 @@ export function TerminalView({
           // Terminal output only flows after a successful daemon attach, so
           // a transient attach-conflict streak is over.
           attachConflictRetries = 0;
-          writeTerminalData(currentSocketGeneration, new Uint8Array(event.data));
+          const output = new Uint8Array(event.data);
+          if (gzipOutputAcknowledged) {
+            void outputDecoder.enqueue(output);
+          } else {
+            writeTerminalData(currentSocketGeneration, output);
+          }
           return;
         }
         if (event.data instanceof Blob) {
           attachConflictRetries = 0;
           void event.data.arrayBuffer().then((buffer) => {
-            writeTerminalData(currentSocketGeneration, new Uint8Array(buffer));
+            const output = new Uint8Array(buffer);
+            if (gzipOutputAcknowledged) {
+              void outputDecoder.enqueue(output);
+            } else {
+              writeTerminalData(currentSocketGeneration, output);
+            }
           });
         }
       });
       nextSocket.addEventListener("close", () => {
+        outputDecoder.cancel();
         if (disposed || socket !== nextSocket || socketGeneration !== currentSocketGeneration) {
           return;
         }
@@ -1446,6 +1510,8 @@ function MobileSelectionActions({
   );
 }
 
+type MobileTerminalModifier = (typeof MOBILE_TERMINAL_MODIFIERS)[number]["id"];
+
 export function MobileTerminalControls({
   commandInputRef,
   disabled,
@@ -1476,8 +1542,10 @@ export function MobileTerminalControls({
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [value, setValue] = useState("");
   const [fieldKey, setFieldKey] = useState(0);
-  const [expanded, setExpanded] = useState(false);
-  const [ctrlLatch, setCtrlLatch] = useState(false);
+  const [composerOpen, setComposerOpen] = useState(false);
+  const [composerModifiers, setComposerModifiers] = useState<MobileTerminalModifier[]>([]);
+  const [composerKey, setComposerKey] = useState<MobileTerminalChordKey | null>(null);
+  const [printableKey, setPrintableKey] = useState("");
   const setCommandInputNode = (node: HTMLInputElement | HTMLTextAreaElement | null) => {
     commandInputRef.current = node;
   };
@@ -1503,11 +1571,33 @@ export function MobileTerminalControls({
     clearCommandInput();
     onStageCommand(command);
   };
-  const sendKey = (key: TerminalKey) => {
-    onInput(ctrlLatch && key.ctrlData ? key.ctrlData : key.data);
-    if (ctrlLatch) {
-      setCtrlLatch(false);
+  const sendKey = (key: TerminalKey) => onInput(key.data);
+  const resetMobileTerminalComposer = () => {
+    setComposerOpen(false);
+    setComposerModifiers([]);
+    setComposerKey(null);
+    setPrintableKey("");
+  };
+  const toggleComposerModifier = (modifier: MobileTerminalModifier) => {
+    setComposerModifiers((current) =>
+      current.includes(modifier)
+        ? current.filter((candidate) => candidate !== modifier)
+        : [...current, modifier],
+    );
+  };
+  const composerChordLabel = composerKey
+    ? formatMobileTerminalChord(composerKey, composerModifiers)
+    : null;
+  const openOrSendMobileTerminalChord = () => {
+    if (!composerOpen) {
+      setComposerOpen(true);
+      return;
     }
+    if (!composerKey) {
+      return;
+    }
+    onInput(encodeMobileTerminalChord(composerKey, composerModifiers));
+    resetMobileTerminalComposer();
   };
 
   useLayoutEffect(() => {
@@ -1568,7 +1658,11 @@ export function MobileTerminalControls({
   };
 
   return (
-    <div ref={rootRef} className="terminal-mobile-controls" data-expanded={expanded ? "true" : "false"}>
+    <div
+      ref={rootRef}
+      className="terminal-mobile-controls"
+      data-expanded={composerOpen ? "true" : "false"}
+    >
       <div className="term-key-strip" aria-label="Common terminal keys">
         <div className="term-key-group" aria-label="Terminal quick keys">
           <button
@@ -1578,15 +1672,6 @@ export function MobileTerminalControls({
             onClick={() => sendKey(ESC_KEY)}
           >
             {ESC_KEY.label}
-          </button>
-          <button
-            className="term-key"
-            type="button"
-            data-active={ctrlLatch ? "true" : "false"}
-            disabled={disabled}
-            onClick={() => setCtrlLatch((active) => !active)}
-          >
-            Ctrl
           </button>
           {COMMON_KEYS.map((key) => (
             <button
@@ -1613,14 +1698,22 @@ export function MobileTerminalControls({
         </div>
         <div className="term-key-actions" aria-label="Terminal actions">
           <button
-            className="term-key term-key-icon"
+            className="term-key term-key-compose-action"
             type="button"
-            aria-label={expanded ? "Hide special keys" : "Show special keys"}
-            title={expanded ? "Hide keys" : "Keys"}
-            data-active={expanded ? "true" : "false"}
-            onClick={() => setExpanded((open) => !open)}
+            aria-label={
+              !composerOpen
+                ? "Compose terminal key"
+                : composerChordLabel
+                  ? `Send ${composerChordLabel}`
+                  : "Choose a key to compose"
+            }
+            title={composerOpen ? "Send chord" : "Compose key"}
+            data-active={composerOpen ? "true" : "false"}
+            disabled={disabled || (composerOpen && !composerKey)}
+            onClick={() => openOrSendMobileTerminalChord()}
           >
-            <Keyboard size={15} />
+            {composerOpen && composerKey ? <Send size={15} /> : <Keyboard size={15} />}
+            <span>{composerOpen && composerKey ? "Send" : "Compose"}</span>
           </button>
           <button
             className="term-key term-key-icon"
@@ -1651,19 +1744,74 @@ export function MobileTerminalControls({
         </div>
       </div>
 
-      {expanded ? (
-        <div className="term-key-panel" aria-label="Special terminal keys">
-          {SPECIAL_KEYS.map((key) => (
-            <button
-              key={key.label}
-              className="term-key"
-              type="button"
-              disabled={disabled}
-              onClick={() => sendKey(key)}
-            >
-              {key.label}
-            </button>
-          ))}
+      {composerOpen ? (
+        <div className="term-key-composer" aria-label="Terminal key composer">
+          <div className="term-key-composer-preview" aria-live="polite">
+            <span>Build a chord</span>
+            <strong>{composerChordLabel ?? "Choose a key"}</strong>
+          </div>
+          <div className="term-key-composer-modifiers" aria-label="Chord modifiers">
+            {MOBILE_TERMINAL_MODIFIERS.map((modifier) => {
+              const active = composerModifiers.includes(modifier.id);
+              return (
+                <button
+                  key={modifier.id}
+                  className="term-key"
+                  type="button"
+                  data-active={active ? "true" : "false"}
+                  aria-label={`${active ? "Remove" : "Add"} ${modifier.label} modifier`}
+                  disabled={disabled}
+                  onClick={() => toggleComposerModifier(modifier.id)}
+                >
+                  {modifier.label}
+                </button>
+              );
+            })}
+          </div>
+          <div className="term-key-composer-keys" aria-label="Special terminal keys">
+            {MOBILE_TERMINAL_SPECIAL_KEYS.map((key) => (
+              <button
+                key={key.id}
+                className="term-key"
+                type="button"
+                data-active={composerKey?.id === key.id ? "true" : "false"}
+                aria-label={`Use ${key.name} key`}
+                disabled={disabled}
+                onClick={() => {
+                  setComposerKey(key);
+                  setPrintableKey("");
+                }}
+              >
+                {key.label}
+              </button>
+            ))}
+          </div>
+          <div className="term-key-composer-capture">
+            <label>
+              <span>Printable key</span>
+              <input
+                className="mono"
+                type="text"
+                aria-label="Printable key"
+                autoCapitalize="none"
+                autoComplete="off"
+                autoCorrect="off"
+                inputMode="text"
+                spellCheck={false}
+                value={printableKey}
+                onFocus={(event) => event.currentTarget.select()}
+                onChange={(event) => {
+                  const nextPrintableKey = Array.from(event.target.value).at(-1) ?? "";
+                  setPrintableKey(nextPrintableKey);
+                  setComposerKey(
+                    nextPrintableKey ? mobileTerminalPrintableKey(nextPrintableKey) : null,
+                  );
+                }}
+              />
+            </label>
+            <button type="button" onClick={() => resetMobileTerminalComposer()}>Cancel</button>
+          </div>
+          <p>Choose modifiers and a key, then tap Compose again to send.</p>
         </div>
       ) : null}
 
@@ -1737,7 +1885,6 @@ export function MobileTerminalControls({
 type TerminalKey = {
   label: string;
   data: string;
-  ctrlData?: string;
 };
 
 const COMMON_KEYS: TerminalKey[] = [
@@ -1754,39 +1901,12 @@ const QUICK_NUMBER_KEYS: TerminalKey[] = [
   { label: "3", data: "3" },
 ];
 
-const SPECIAL_KEYS: TerminalKey[] = [
-  { label: "←", data: "\x1B[D" },
-  { label: "↑", data: "\x1B[A" },
-  { label: "↓", data: "\x1B[B" },
-  { label: "→", data: "\x1B[C" },
-  { label: "S-Tab", data: "\x1B[Z" },
-  { label: "Bksp", data: "\x7F" },
-  { label: "Del", data: "\x1B[3~" },
-  { label: "Home", data: "\x1B[H" },
-  { label: "End", data: "\x1B[F" },
-  { label: "PgUp", data: "\x1B[5~" },
-  { label: "PgDn", data: "\x1B[6~" },
-  { label: "C-l", data: "\x0C" },
-  { label: "C-r", data: "\x12" },
-  { label: "C-z", data: "\x1A" },
-  { label: "/", data: "/", ctrlData: "\x1F" },
-  { label: "|", data: "|" },
-  { label: "~", data: "~" },
-  { label: "-", data: "-" },
-  { label: "_", data: "_" },
-  { label: "'", data: "'" },
-  { label: "\"", data: "\"" },
-  { label: "[", data: "[" },
-  { label: "]", data: "]" },
-  { label: "{", data: "{" },
-  { label: "}", data: "}" },
-];
-
 function terminalSocketUrl(
   wsUrl: (path: string, query?: URLSearchParams) => string,
   terminalId: string,
   size: TerminalSize,
   coalesceMs: number,
+  requestGzipOutput: boolean,
 ) {
   const params = new URLSearchParams({
     terminal_id: terminalId,
@@ -1795,6 +1915,9 @@ function terminalSocketUrl(
     takeover: "false",
     coalesce_ms: String(coalesceMs),
   });
+  if (requestGzipOutput) {
+    params.set("output_encoding", "gzip");
+  }
   return wsUrl("/ws/terminal", params);
 }
 

@@ -39,8 +39,6 @@ This is a lightweight internal onboarding note for agents working in this repo.
 ## Build And Packaging
 
 - Development build: `npm run build` builds the web app and debug bridge binary.
-- Android debug build: `npm run android:build:debug`; output is
-  `android/app/build/outputs/apk/debug/app-debug.apk`.
 - Desktop release tarball: `scripts/package-tarball.sh vX.Y.Z PLATFORM`; outputs go under
   `dist-packages/`.
 - Build or provide `linux-x86_64` tarballs from Linux, `macos-arm64` tarballs from an Apple Silicon
@@ -51,6 +49,22 @@ This is a lightweight internal onboarding note for agents working in this repo.
   stamps the changelog and creates the release. Inspect tarball/APK contents before upload.
 - Desktop tarballs include only `herdr-web-bridge`, bundled `web/dist` assets, a wrapper script, and
   docs. They do not include Herdr itself.
+
+### Android App Build
+
+- Build this repo's Capacitor app: package `dev.herdr.web`. The separate Herdr Mobile project builds
+  package `dev.herdr.mobile` and is not a replacement for this app.
+- Before building an installable update, increment `versionCode` in `android/app/build.gradle` above
+  the version installed on the device.
+- Preserve update compatibility by using the established debug key:
+  `ANDROID_USER_HOME=/home/will/.android npm run android:build:debug`.
+- The APK is `android/app/build/outputs/apk/debug/app-debug.apk`.
+- Before distribution, verify package `dev.herdr.web`, the intended `versionCode`, APK Signature
+  Scheme v2, 16 KiB zip alignment, and signing-certificate SHA-256
+  `ac75572abbb6dfc87a4bcd32a27809c77d38d3cd4684b56586bb77c60af038ab` with Android SDK
+  `aapt`, `apksigner`, and `zipalign`.
+- Revert unrelated generated changes from `npm run android:build:debug`, especially worktree-relative
+  edits to `android/capacitor.settings.gradle`, before committing.
 
 ## Changelog
 

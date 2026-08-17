@@ -12,6 +12,7 @@ path = "src/main.rs"
 axum = { version = "0.8", features = ["ws"] }
 bytes = "1"
 futures-util = "0.3"
+flate2 = "1"
 herdr-compat = { path = "../vendor/herdr-compat" }
 libc = "0.2"
 png = "0.17"

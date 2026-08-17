@@ -88,6 +88,39 @@ describe("MobileTerminalControls", () => {
 
     expect(onSubmitCommand).toHaveBeenCalledWith("");
   });
+
+  it("composes Ctrl+Shift+Up and sends it from the same Compose button", async () => {
+    const { container, onInput } = await renderControls(false);
+
+    await clickButton(container, "Compose terminal key");
+    expect(composerPanel(container)).not.toBeNull();
+
+    await clickButton(container, "Add Ctrl modifier");
+    await clickButton(container, "Add Shift modifier");
+    await clickButton(container, "Use Up key");
+
+    expect(composerPanel(container).textContent).toContain("Ctrl + Shift + ↑");
+    await clickButton(container, "Send Ctrl + Shift + ↑");
+
+    expect(onInput).toHaveBeenCalledOnce();
+    expect(onInput).toHaveBeenCalledWith("\x1B[1;6A");
+    expect(container.querySelector(".term-key-composer")).toBeNull();
+  });
+
+  it("captures a printable key for Alt chords", async () => {
+    const { container, onInput } = await renderControls(false);
+
+    await clickButton(container, "Compose terminal key");
+    await clickButton(container, "Add Alt modifier");
+    await setCommandValue(printableKeyField(container), "p");
+
+    expect(composerPanel(container).textContent).toContain("Alt + p");
+    await clickButton(container, "Send Alt + p");
+
+    expect(onInput).toHaveBeenCalledOnce();
+    expect(onInput).toHaveBeenCalledWith("\x1Bp");
+    expect(container.querySelector(".term-key-composer")).toBeNull();
+  });
 });
 
 async function renderControls(expandingInput: boolean) {
@@ -98,6 +131,7 @@ async function renderControls(expandingInput: boolean) {
   const commandInputRef = createRef<HTMLInputElement | HTMLTextAreaElement>();
   const onSubmitCommand = vi.fn();
   const onStageCommand = vi.fn();
+  const onInput = vi.fn();
 
   await act(async () => {
     root.render(
@@ -109,7 +143,7 @@ async function renderControls(expandingInput: boolean) {
         enterNewline={false}
         controlsScalePercent={100}
         onControlsHeightChange={vi.fn()}
-        onInput={vi.fn()}
+        onInput={onInput}
         onTerminalFocus={vi.fn()}
         onUpload={vi.fn()}
         onStageCommand={onStageCommand}
@@ -121,6 +155,7 @@ async function renderControls(expandingInput: boolean) {
   return {
     commandInputRef,
     container,
+    onInput,
     onStageCommand,
     onSubmitCommand,
   };
@@ -174,5 +209,33 @@ function stageButton(container: HTMLElement) {
 async function clickStage(container: HTMLElement) {
   await act(async () => {
     stageButton(container).click();
+  });
+}
+
+function composerPanel(container: HTMLElement) {
+  const panel = container.querySelector<HTMLElement>(".term-key-composer");
+  if (!panel) {
+    throw new Error("missing terminal key composer");
+  }
+  return panel;
+}
+
+function printableKeyField(container: HTMLElement) {
+  const field = container.querySelector<HTMLInputElement>('input[aria-label="Printable key"]');
+  if (!field) {
+    throw new Error("missing printable key field");
+  }
+  return field;
+}
+
+async function clickButton(container: HTMLElement, ariaLabel: string) {
+  const button = container.querySelector<HTMLButtonElement>(
+    `button[aria-label="${ariaLabel}"]`,
+  );
+  if (!button) {
+    throw new Error(`missing button: ${ariaLabel}`);
+  }
+  await act(async () => {
+    button.click();
   });
 }

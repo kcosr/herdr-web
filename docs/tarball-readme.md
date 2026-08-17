@@ -37,6 +37,15 @@ bin/herdr-web --host 0.0.0.0 --port 4000 \
 
 Then add the bridge URL in the Android app's Bridge area of Settings.
 
+When a trusted reverse proxy publishes the bridge from another scheme or port, pass its exact
+external origin:
+
+```bash
+bin/herdr-web --host 0.0.0.0 --public-origin https://herdr-host.example
+```
+
+This authorizes that Origin and Host authority; it does not add authentication.
+
 For browser-served multi-bridge use, configure both directions. The bridge being called must allow
 the web page origin with `--allow-origin`; the bridge serving the web page must allow that page to
 connect out with `--allow-connect-origin`. For example, a page opened from `http://host-a:8787` that

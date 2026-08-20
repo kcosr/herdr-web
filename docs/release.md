@@ -10,7 +10,8 @@ They do not publish npm packages, and the package versions are not release versi
 - Rust stable.
 - JDK 21 and Android SDK when validating the Android shell.
 - GitHub CLI authenticated as a user that can create releases.
-- A local Herdr session for browser smoke testing.
+- A local Herdr `v0.8.0` or newer session reporting terminal protocol `19` for browser and packaged
+  bridge smoke testing.
 - The local `web/local-deps/parlay-client` symlink from [web/README.md](../web/README.md), needed
   before any `npm ci --prefix web` below can resolve `@parlay/client`.
 
@@ -97,7 +98,7 @@ dist-packages/herdr-web-vX.Y.Z-android.apk
 
 ## Browser Smoke
 
-Start or attach a Herdr `v0.7.2` or newer session:
+Start or attach a Herdr `v0.8.0` or newer session reporting terminal protocol `19`:
 
 ```bash
 herdr
@@ -121,13 +122,20 @@ Open `http://127.0.0.1:8787` and verify:
   mobile-mode toggle flips `~/.local/share/herdr-web/mobile-mode`.
 - On a touch device with a split pane, the single-pane toggle switches between the selected pane
   and the full split grid.
-- New tabs can launch Shell, Codex, Claude, and pi.
-- Split right/down can launch Shell, Codex, Claude, and pi.
+- New tabs can launch Shell and every enabled managed built-in agent.
+- Split right/down can launch Shell and every enabled managed built-in agent.
+- A custom preset launches its exact configured `argv`, including a wrapper or SSH-shaped command,
+  without a built-in agent executable being prepended.
+- A forced managed-agent launch failure removes the tab or split created for that launch.
 - Upload button, paste upload, and drop upload place shell-quoted file paths in the terminal.
 - Pane notes can be created, edited, reloaded, and recovered from the Notes view.
 - If started with `--remote-bridge URL`, `GET /api/bridges` lists it and a terminal opened through
   `/ws/remote/{bridge_id}/terminal` attaches to that remote bridge's session.
 - Binding to `HOST=0.0.0.0` is only used on a trusted network.
+
+Repeat the startup, terminal attach, and launcher checks with an unpacked desktop tarball before
+uploading it. Confirm the bridge rejects every protocol other than `19`
+instead of serving a partially compatible UI.
 
 ## Cut
 

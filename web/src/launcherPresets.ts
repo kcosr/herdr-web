@@ -15,47 +15,6 @@ export type LauncherPresetsResponse = {
   warnings: string[];
 };
 
-export type LegacyLaunchKind = "shell" | "codex" | "claude" | "pi" | "grok" | "opencode";
-
-export const FALLBACK_LAUNCHER_PRESETS: LauncherPresetOption[] = [
-  {
-    id: "builtin:shell",
-    label: "Shell",
-    agent_hint: null,
-    built_in: true,
-  },
-  {
-    id: "builtin:codex",
-    label: "Codex",
-    agent_hint: "codex",
-    built_in: true,
-  },
-  {
-    id: "builtin:claude",
-    label: "Claude",
-    agent_hint: "claude",
-    built_in: true,
-  },
-  {
-    id: "builtin:pi",
-    label: "pi",
-    agent_hint: "pi",
-    built_in: true,
-  },
-  {
-    id: "builtin:grok",
-    label: "Grok",
-    agent_hint: "grok",
-    built_in: true,
-  },
-  {
-    id: "builtin:opencode",
-    label: "OpenCode",
-    agent_hint: "opencode",
-    built_in: true,
-  },
-];
-
 export function supportsLauncherPresets(capabilities: BridgeCapabilities | null | undefined) {
   return capabilities?.launcher_presets?.version === 1;
 }
@@ -71,42 +30,38 @@ export async function fetchLauncherPresets(
 }
 
 export function parseLauncherPresetsResponse(value: unknown): LauncherPresetsResponse {
-  if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.presets)) {
-    return { version: 1, presets: FALLBACK_LAUNCHER_PRESETS, warnings: [] };
+  if (
+    !isRecord(value) ||
+    value.version !== 1 ||
+    !Array.isArray(value.presets) ||
+    !Array.isArray(value.warnings) ||
+    !value.warnings.every((warning) => typeof warning === "string")
+  ) {
+    throw new Error("invalid launcher presets response");
   }
-  // Preserve an intentionally empty list (e.g. builtins: [] with no customs).
-  // Only fall back when the response shape itself is unusable.
-  const presets = value.presets
-    .map(parseLauncherPreset)
-    .filter((preset): preset is LauncherPresetOption => Boolean(preset));
+  const presets = value.presets.map(parseLauncherPreset);
   return {
     version: 1,
     presets,
-    warnings: Array.isArray(value.warnings)
-      ? value.warnings.filter((warning): warning is string => typeof warning === "string")
-      : [],
+    warnings: value.warnings,
   };
 }
 
-export function legacyKindForPresetId(id: string): LegacyLaunchKind | null {
-  if (id === "builtin:shell") return "shell";
-  if (id === "builtin:codex") return "codex";
-  if (id === "builtin:claude") return "claude";
-  if (id === "builtin:pi") return "pi";
-  if (id === "builtin:grok") return "grok";
-  if (id === "builtin:opencode") return "opencode";
-  return null;
-}
-
-function parseLauncherPreset(value: unknown): LauncherPresetOption | null {
-  if (!isRecord(value) || typeof value.id !== "string" || typeof value.label !== "string") {
-    return null;
+function parseLauncherPreset(value: unknown): LauncherPresetOption {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    typeof value.label !== "string" ||
+    (value.agent_hint !== null && typeof value.agent_hint !== "string") ||
+    typeof value.built_in !== "boolean"
+  ) {
+    throw new Error("invalid launcher preset");
   }
   return {
     id: value.id,
     label: value.label,
-    agent_hint: typeof value.agent_hint === "string" ? value.agent_hint : null,
-    built_in: value.built_in === true,
+    agent_hint: value.agent_hint,
+    built_in: value.built_in,
   };
 }
 

@@ -66,11 +66,35 @@ pub struct LauncherPresetStore {
 pub struct ResolvedLauncherPreset {
     pub id: String,
     pub label: String,
-    pub agent_hint: Option<String>,
-    pub argv: Option<Vec<String>>,
+    pub launch: LauncherPresetLaunch,
+    pub built_in: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LauncherPresetLaunch {
+    Shell,
+    ManagedAgent {
+        kind: ManagedAgentKind,
+        args: Vec<String>,
+    },
+    CustomCommand(CustomCommandPreset),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedAgentKind {
+    Codex,
+    Claude,
+    Pi,
+    Grok,
+    OpenCode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomCommandPreset {
+    pub argv: Vec<String>,
     pub env: HashMap<String, String>,
     pub cwd: Option<String>,
-    pub built_in: bool,
+    pub agent_hint: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -222,7 +246,7 @@ impl LauncherPresetStore {
                 .map(|preset| LauncherPresetDisplay {
                     id: preset.id.clone(),
                     label: preset.label.clone(),
-                    agent_hint: preset.agent_hint.clone(),
+                    agent_hint: preset.agent_hint().map(str::to_string),
                     built_in: preset.built_in,
                 })
                 .collect(),
@@ -236,27 +260,35 @@ impl LauncherPresetStore {
 }
 
 impl ResolvedLauncherPreset {
-    pub fn is_builtin_shell(&self) -> bool {
-        self.id == BUILTIN_SHELL_ID
-    }
-
-    pub fn launch_env(&self) -> HashMap<String, String> {
-        let mut env = self.env.clone();
-        if let Some(agent_hint) = &self.agent_hint {
-            env.insert("HERDR_AGENT".to_string(), agent_hint.clone());
+    pub fn agent_hint(&self) -> Option<&str> {
+        match &self.launch {
+            LauncherPresetLaunch::Shell => None,
+            LauncherPresetLaunch::ManagedAgent { kind, .. } => Some(kind.as_str()),
+            LauncherPresetLaunch::CustomCommand(command) => command.agent_hint.as_deref(),
         }
-        env
     }
 }
 
-pub fn layout_leaf_for_preset(preset: &ResolvedLauncherPreset, title: &str) -> LayoutNode {
+impl ManagedAgentKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::Pi => "pi",
+            Self::Grok => "grok",
+            Self::OpenCode => "opencode",
+        }
+    }
+}
+
+pub fn layout_leaf_for_preset(preset: &CustomCommandPreset, title: &str) -> LayoutNode {
     LayoutNode::Pane {
         pane: LayoutPane {
             pane_id: None,
             label: Some(title.to_string()),
             cwd: preset.cwd.clone(),
-            command: preset.argv.clone(),
-            env: preset.launch_env(),
+            command: Some(preset.argv.clone()),
+            env: preset.env.clone(),
         },
     }
 }
@@ -265,7 +297,7 @@ pub fn split_layout_with_command_preset(
     root: LayoutNode,
     target_pane_id: &str,
     direction: SplitDirection,
-    preset: &ResolvedLauncherPreset,
+    preset: &CustomCommandPreset,
     title: &str,
 ) -> Result<LayoutNode, ()> {
     let (root, replaced) = replace_layout_leaf(root, target_pane_id, direction, preset, title);
@@ -280,7 +312,7 @@ fn replace_layout_leaf(
     root: LayoutNode,
     target_pane_id: &str,
     new_direction: SplitDirection,
-    preset: &ResolvedLauncherPreset,
+    preset: &CustomCommandPreset,
     title: &str,
 ) -> (LayoutNode, bool) {
     match root {
@@ -335,32 +367,12 @@ fn replace_layout_leaf(
 
 fn builtin_presets() -> Vec<ResolvedLauncherPreset> {
     vec![
-        builtin(BUILTIN_SHELL_ID, "Shell", None, None),
-        builtin(
-            BUILTIN_CODEX_ID,
-            "Codex",
-            Some("codex"),
-            Some(vec!["codex".into()]),
-        ),
-        builtin(
-            BUILTIN_CLAUDE_ID,
-            "Claude",
-            Some("claude"),
-            Some(vec!["claude".into()]),
-        ),
-        builtin(BUILTIN_PI_ID, "pi", Some("pi"), Some(vec!["pi".into()])),
-        builtin(
-            BUILTIN_GROK_ID,
-            "Grok",
-            Some("grok"),
-            Some(vec!["grok".into()]),
-        ),
-        builtin(
-            BUILTIN_OPENCODE_ID,
-            "OpenCode",
-            Some("opencode"),
-            Some(vec!["opencode".into()]),
-        ),
+        builtin_shell(),
+        builtin_managed_agent(BUILTIN_CODEX_ID, "Codex", ManagedAgentKind::Codex),
+        builtin_managed_agent(BUILTIN_CLAUDE_ID, "Claude", ManagedAgentKind::Claude),
+        builtin_managed_agent(BUILTIN_PI_ID, "pi", ManagedAgentKind::Pi),
+        builtin_managed_agent(BUILTIN_GROK_ID, "Grok", ManagedAgentKind::Grok),
+        builtin_managed_agent(BUILTIN_OPENCODE_ID, "OpenCode", ManagedAgentKind::OpenCode),
     ]
 }
 
@@ -406,19 +418,23 @@ fn builtin_short_name(id: &str) -> Option<&str> {
     id.strip_prefix("builtin:")
 }
 
-fn builtin(
-    id: &str,
-    label: &str,
-    agent_hint: Option<&str>,
-    argv: Option<Vec<String>>,
-) -> ResolvedLauncherPreset {
+fn builtin_shell() -> ResolvedLauncherPreset {
+    ResolvedLauncherPreset {
+        id: BUILTIN_SHELL_ID.into(),
+        label: "Shell".into(),
+        launch: LauncherPresetLaunch::Shell,
+        built_in: true,
+    }
+}
+
+fn builtin_managed_agent(id: &str, label: &str, kind: ManagedAgentKind) -> ResolvedLauncherPreset {
     ResolvedLauncherPreset {
         id: id.into(),
         label: label.into(),
-        agent_hint: agent_hint.map(str::to_string),
-        argv,
-        env: HashMap::new(),
-        cwd: None,
+        launch: LauncherPresetLaunch::ManagedAgent {
+            kind,
+            args: Vec::new(),
+        },
         built_in: true,
     }
 }
@@ -464,13 +480,19 @@ fn resolve_config_preset(
         .map(|cwd| validate_cwd(&cwd).map(|_| cwd))
         .transpose()
         .map_err(|err| format!("invalid preset {id}: {err}"))?;
+    let mut env = preset.env;
+    if let Some(agent_hint) = &agent_hint {
+        env.insert("HERDR_AGENT".to_string(), agent_hint.clone());
+    }
     Ok(ResolvedLauncherPreset {
         id,
         label,
-        agent_hint,
-        argv: Some(argv),
-        env: preset.env,
-        cwd,
+        launch: LauncherPresetLaunch::CustomCommand(CustomCommandPreset {
+            argv,
+            env,
+            cwd,
+            agent_hint,
+        }),
         built_in: false,
     })
 }
@@ -790,8 +812,11 @@ mod tests {
             &HashSet::new(),
         )
         .unwrap();
-        assert_eq!(preset.launch_env()["HERDR_AGENT"], "codex");
-        assert_eq!(preset.launch_env()["FOO"], "bar");
+        let LauncherPresetLaunch::CustomCommand(command) = &preset.launch else {
+            panic!("expected custom command");
+        };
+        assert_eq!(command.env["HERDR_AGENT"], "codex");
+        assert_eq!(command.env["FOO"], "bar");
     }
 
     #[test]
@@ -808,8 +833,11 @@ mod tests {
             &HashSet::new(),
         )
         .unwrap();
-        assert!(preset.agent_hint.is_none());
-        assert_eq!(preset.launch_env()["HERDR_AGENT"], "codex");
+        let LauncherPresetLaunch::CustomCommand(command) = &preset.launch else {
+            panic!("expected custom command");
+        };
+        assert!(command.agent_hint.is_none());
+        assert_eq!(command.env["HERDR_AGENT"], "codex");
     }
 
     #[test]
@@ -835,10 +863,12 @@ mod tests {
         let preset = ResolvedLauncherPreset {
             id: "custom".into(),
             label: "Custom".into(),
-            agent_hint: None,
-            argv: Some(vec!["custom".into()]),
-            env: HashMap::new(),
-            cwd: None,
+            launch: LauncherPresetLaunch::CustomCommand(CustomCommandPreset {
+                argv: vec!["custom".into()],
+                env: HashMap::new(),
+                cwd: None,
+                agent_hint: None,
+            }),
             built_in: false,
         };
         let root = LayoutNode::Pane {
@@ -852,7 +882,10 @@ mod tests {
             root,
             "pane-1",
             SplitDirection::Right,
-            &preset,
+            match &preset.launch {
+                LauncherPresetLaunch::CustomCommand(command) => command,
+                _ => panic!("expected custom command"),
+            },
             "Custom",
         )
         .unwrap();
@@ -867,6 +900,56 @@ mod tests {
         };
         assert_eq!(first.pane_id.as_deref(), Some("pane-1"));
         assert_eq!(second.command, Some(vec!["custom".into()]));
+    }
+
+    #[test]
+    fn built_in_agents_are_explicit_managed_agents_with_empty_args() {
+        let store =
+            LauncherPresetStore::load_from_path(Path::new("/definitely/missing.json")).unwrap();
+        let codex = store.preset(BUILTIN_CODEX_ID).unwrap();
+
+        assert_eq!(
+            codex.launch,
+            LauncherPresetLaunch::ManagedAgent {
+                kind: ManagedAgentKind::Codex,
+                args: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn ssh_wrapper_remains_an_exact_custom_command() {
+        let argv = vec![
+            "ssh".to_string(),
+            "-t".to_string(),
+            "devbox".to_string(),
+            "cd /repo && exec codex".to_string(),
+        ];
+        let preset = resolve_config_preset(
+            LauncherPresetConfig {
+                id: Some("remote-codex".into()),
+                label: Some("Remote Codex".into()),
+                argv: Some(argv.clone()),
+                agent_hint: Some("codex".into()),
+                env: HashMap::from([("TERM".into(), "xterm-256color".into())]),
+                cwd: None,
+            },
+            &HashSet::new(),
+        )
+        .unwrap();
+
+        let LauncherPresetLaunch::CustomCommand(command) = &preset.launch else {
+            panic!("expected custom command");
+        };
+        assert_eq!(command.argv, argv);
+        assert_eq!(command.env["TERM"], "xterm-256color");
+        assert_eq!(command.env["HERDR_AGENT"], "codex");
+        assert_eq!(command.agent_hint.as_deref(), Some("codex"));
+
+        let LayoutNode::Pane { pane } = layout_leaf_for_preset(command, "Remote Codex") else {
+            panic!("expected pane");
+        };
+        assert_eq!(pane.command, Some(argv));
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {

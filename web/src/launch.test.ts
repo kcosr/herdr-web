@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentArgv, fallbackLaunchSpec, resolveLaunchSpec } from "./launch";
+import { resolveLaunchSpec } from "./launch";
 import { shellCommand, shellQuote } from "./shell";
 import type { PaneInfo } from "./types";
 
@@ -17,18 +17,12 @@ const pane = (pane_id: string, label?: string, display_agent?: string) =>
   }) satisfies PaneInfo;
 
 describe("launch helpers", () => {
-  it("maps supported agents to argv", () => {
-    expect(agentArgv("codex")).toEqual(["codex"]);
-    expect(agentArgv("claude")).toEqual(["claude"]);
-    expect(agentArgv("pi")).toEqual(["pi"]);
-    expect(agentArgv("grok")).toEqual(["grok"]);
-    expect(agentArgv("opencode")).toEqual(["opencode"]);
-  });
-
   it("keeps custom launch titles", () => {
-    expect(resolveLaunchSpec({ ...fallbackLaunchSpec("codex"), title: "reviewer" }, [
-      pane("1", "Codex"),
-    ])).toEqual({
+    expect(resolveLaunchSpec({
+      presetId: "builtin:codex",
+      label: "Codex",
+      title: "reviewer",
+    }, [pane("1", "Codex")])).toEqual({
       presetId: "builtin:codex",
       label: "Codex",
       title: "reviewer",
@@ -37,11 +31,21 @@ describe("launch helpers", () => {
 
   it("uniquifies default agent launch titles", () => {
     expect(
-      resolveLaunchSpec(fallbackLaunchSpec("codex"), [
+      resolveLaunchSpec({ presetId: "builtin:codex", label: "Codex", title: "Codex" }, [
         pane("1", "Codex"),
         pane("2", undefined, "Codex 2"),
       ]),
     ).toEqual({ presetId: "builtin:codex", label: "Codex", title: "Codex 3" });
+  });
+
+  it("only exempts the exact built-in shell preset from title uniquification", () => {
+    const existing = [pane("1", "Shell")];
+    expect(
+      resolveLaunchSpec({ presetId: "builtin:shell", label: "Shell", title: "Shell" }, existing),
+    ).toEqual({ presetId: "builtin:shell", label: "Shell", title: "Shell" });
+    expect(
+      resolveLaunchSpec({ presetId: "custom:shell", label: "Shell", title: "Shell" }, existing),
+    ).toEqual({ presetId: "custom:shell", label: "Shell", title: "Shell 2" });
   });
 });
 

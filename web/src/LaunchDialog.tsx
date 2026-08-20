@@ -1,10 +1,11 @@
 import { Terminal } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { AgentIcon, agentIconKindFromHint } from "./AgentIcon";
 import { launchPresetLabel } from "./launch";
 import type { LaunchSpec, LaunchTarget } from "./launch";
 import type { LauncherPresetOption } from "./launcherPresets";
+import { trapFocusWithin, useFocusReturn } from "./overlayFocus";
 
 export function LaunchDialog({
   target,
@@ -21,17 +22,14 @@ export function LaunchDialog({
   onCancel: () => void;
   onSubmit: (spec: LaunchSpec) => void;
 }) {
-  const firstOption = options[0] ?? {
-    id: "builtin:shell",
-    label: "Shell",
-    agent_hint: null,
-    built_in: true,
-  };
-  const [presetId, setPresetId] = useState(firstOption.id);
-  const [title, setTitle] = useState(() => firstOption.label);
+  const firstOption = options[0] ?? null;
+  const [presetId, setPresetId] = useState(firstOption?.id ?? "");
+  const [title, setTitle] = useState(() => firstOption?.label ?? "");
   const inputRef = useRef<HTMLInputElement | null>(null);
   const optionRefs = useRef(new Map<string, HTMLButtonElement>());
-  const selectedLabelRef = useRef(firstOption.label);
+  const selectedLabelRef = useRef(firstOption?.label ?? "");
+  const titleId = useId();
+  useFocusReturn();
 
   const matchedOption = options.find((option) => option.id === presetId) ?? null;
   const selectedOption = matchedOption ?? firstOption;
@@ -83,26 +81,38 @@ export function LaunchDialog({
       return;
     }
     const trimmed = title.trim();
-    if (trimmed) {
+    if (trimmed && selectedOption) {
       onSubmit({ presetId, label: selectedOption.label, title: trimmed });
     }
   };
 
   return (
     <div className="overlay-root">
-      <button className="overlay-scrim" type="button" aria-label="Cancel" onClick={onCancel} />
+      <button
+        className="overlay-scrim"
+        type="button"
+        tabIndex={-1}
+        aria-label="Cancel"
+        onClick={onCancel}
+      />
       <form
         className="modal launch-modal"
         role="dialog"
         aria-modal="true"
+        aria-labelledby={titleId}
         onSubmit={submit}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
+            event.preventDefault();
             onCancel();
+            return;
           }
+          trapFocusWithin(event);
         }}
       >
-        <div className="modal-title">{launchTitle(target)}</div>
+        <div id={titleId} className="modal-title">
+          {launchTitle(target)}
+        </div>
         <div className="launch-grid" role="radiogroup" aria-label="Launch type">
           {options.length === 0 ? (
             <div className="launch-empty mono" role="status">
@@ -167,7 +177,7 @@ export function LaunchDialog({
             ref={inputRef}
             className="field"
             value={title}
-            placeholder={selectedOption.label}
+            placeholder={selectedOption?.label ?? ""}
             disabled={busy}
             spellCheck={false}
             autoComplete="off"

@@ -11,6 +11,10 @@ import { terminalLoupeCursorGeometry } from "./terminalLoupeCursorGeometry";
 import { terminalTapFocusAction } from "./terminalTapFocus";
 import type { TerminalTapFocusResult } from "./terminalTapFocus";
 import {
+  terminalAccessibleText,
+  TerminalAccessibleTextPublisher,
+} from "./terminalAccessibleText";
+import {
   beginTouchSelectionEndpointDrag,
   commitTouchSelectionStart,
   completeTouchSelection,
@@ -27,6 +31,18 @@ import type {
   MobileTouchSelectionEndpointTimeoutMs,
 } from "./mobileTerminalPrefs";
 import { DEFAULT_TERMINAL_FONT_SIZE_PX } from "./terminalPrefs";
+import {
+  beforeInputOutput,
+  idleTerminalImeState,
+  imeTextareaAnchor,
+  isImeComposingKeyEvent,
+  keyboardEventOutput,
+  reduceTerminalImeState,
+  shouldDeferBeforeInputToIme,
+  textareaDelta,
+} from "./terminalImeInput";
+import type { TerminalImeState } from "./terminalImeInput";
+import { installTerminalImeFocusRedirect } from "./terminalImeFocus";
 
 const TERMINAL_FONT_FAMILY =
   'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "DejaVu Sans Mono", monospace';
@@ -45,6 +61,7 @@ const TOUCH_LOUPE_TARGET_OFFSET_Y_PX = 48;
 const TOUCH_ENDPOINT_HIT_WIDTH_PX = 72;
 const TOUCH_ENDPOINT_HIT_HEIGHT_PX = 72;
 const TOUCH_ENDPOINT_RING_DIAMETER_PX = 42;
+const TERMINAL_ACCESSIBLE_SCREEN_DEBOUNCE_MS = 160;
 const TAP_URL_PATTERN = /\bhttps?:\/\/[^\s"'<>`]+/giu;
 
 type GhosttyModule = typeof import("ghostty-web");
@@ -93,8 +110,10 @@ type TerminalBufferLine = {
   getCell(x: number):
     | {
         getCodepoint(): number;
+        getChars(): string;
         getWidth(): number;
         getHyperlinkId(): number;
+        isInvisible(): number;
         // Raw ghostty cell data; grapheme_len > 0 marks a multi-codepoint cluster.
         cell?: { grapheme_len?: number };
       }
@@ -108,6 +127,7 @@ export type MobileTerminalTouchEvent =
 export type TerminalRenderer = {
   mount(container: HTMLElement): Promise<TerminalSize>;
   write(data: string | Uint8Array): void;
+  setAccessibleScreenListener(callback: ((text: string) => void) | null): void;
   onInput(callback: (data: string) => void): () => void;
   onScroll(callback: (lines: number) => void): () => void;
   setTapFocusHandler(callback: (() => TerminalTapFocusResult) | null): void;
@@ -134,6 +154,10 @@ export class GhosttyRenderer implements TerminalRenderer {
   #scrollCallback: ((lines: number) => void) | null = null;
   #touchCleanup: (() => void) | null = null;
   #mobileInputCleanup: (() => void) | null = null;
+  #imeFocusCleanup: (() => void) | null = null;
+  #accessibleScreenCallback: ((text: string) => void) | null = null;
+  #accessibleScreenCleanup: (() => void) | null = null;
+  #accessibleScreenPublisher: TerminalAccessibleTextPublisher | null = null;
   #tapFocusHandler: (() => TerminalTapFocusResult) | null = null;
   #mobileLongPressBehavior: MobileLongPressBehavior = "off";
   #mobileTouchSelectionHandler: ((event: MobileTerminalTouchEvent) => void) | null = null;
@@ -188,6 +212,9 @@ export class GhosttyRenderer implements TerminalRenderer {
     terminal.loadAddon(fitAddon);
     terminal.open(container);
     terminal.attachCustomKeyEventHandler((event) => {
+      if (isImeComposingKeyEvent(event)) {
+        return false;
+      }
       const output = customKeyboardEventOutput(event);
       if (!output) {
         return false;
@@ -206,13 +233,35 @@ export class GhosttyRenderer implements TerminalRenderer {
     terminal.renderer?.getCanvas().style.setProperty("image-rendering", "auto");
     this.#terminal = terminal;
     this.#fitAddon = fitAddon;
+    this.#installAccessibleScreenPublisher();
     this.#installScrollHandlers();
     this.#installMobileInputBridge();
+    this.#installImeFocusRedirect();
     return this.fit();
   }
 
   write(data: string | Uint8Array) {
-    this.#terminal?.write(data);
+    const terminal = this.#terminal;
+    if (!terminal) {
+      return;
+    }
+    if (!this.#accessibleScreenPublisher) {
+      terminal.write(data);
+      return;
+    }
+    terminal.write(data, () => {
+      if (this.#isCurrentTerminal(terminal)) {
+        this.#accessibleScreenPublisher?.request();
+      }
+    });
+  }
+
+  setAccessibleScreenListener(callback: ((text: string) => void) | null) {
+    if (this.#accessibleScreenCallback === callback) {
+      return;
+    }
+    this.#accessibleScreenCallback = callback;
+    this.#installAccessibleScreenPublisher();
   }
 
   onInput(callback: (data: string) => void) {
@@ -250,6 +299,7 @@ export class GhosttyRenderer implements TerminalRenderer {
   fit() {
     const terminal = this.#requireTerminal();
     this.#fitAddon?.fit();
+    this.#accessibleScreenPublisher?.request();
     return {
       cols: terminal.cols,
       rows: terminal.rows,
@@ -273,22 +323,27 @@ export class GhosttyRenderer implements TerminalRenderer {
   }
 
   focus() {
-    this.#terminal?.focus();
+    this.focusTextInput();
   }
 
   focusTextInput() {
-    const textarea = this.#terminal?.textarea;
-    if (!textarea) {
+    const terminal = this.#terminal;
+    const textarea = terminal?.textarea;
+    if (!textarea || !terminal) {
       this.#terminal?.focus();
       return;
     }
     this.#textInputTapGraceUntil = performance.now() + TERMINAL_TEXT_INPUT_TAP_GRACE_MS;
+    positionGhosttyTextareaForInput(textarea, terminal);
     textarea.classList.add("ghostty-keyboard-input");
     textarea.focus({ preventScroll: true });
     window.setTimeout(() => {
       if (textarea.isConnected) {
+        positionGhosttyTextareaForInput(textarea, this.#terminal);
         textarea.classList.add("ghostty-keyboard-input");
-        textarea.focus({ preventScroll: true });
+        if (document.activeElement !== textarea) {
+          textarea.focus({ preventScroll: true });
+        }
       }
     }, 0);
   }
@@ -307,6 +362,10 @@ export class GhosttyRenderer implements TerminalRenderer {
     this.#touchCleanup = null;
     this.#mobileInputCleanup?.();
     this.#mobileInputCleanup = null;
+    this.#imeFocusCleanup?.();
+    this.#imeFocusCleanup = null;
+    this.#accessibleScreenCallback = null;
+    this.#disposeAccessibleScreenPublisher();
     this.#fitAddon?.dispose();
     this.#fitAddon = null;
     this.#terminal?.dispose();
@@ -323,6 +382,48 @@ export class GhosttyRenderer implements TerminalRenderer {
 
   #isCurrentTerminal(terminal: Terminal) {
     return this.#terminal === terminal;
+  }
+
+  #installAccessibleScreenPublisher() {
+    this.#disposeAccessibleScreenPublisher();
+    const terminal = this.#terminal;
+    const callback = this.#accessibleScreenCallback;
+    if (!terminal || !callback || this.#disposed) {
+      return;
+    }
+
+    const publisher = new TerminalAccessibleTextPublisher(
+      () => {
+        if (!this.#isCurrentTerminal(terminal)) {
+          return null;
+        }
+        try {
+          return terminalAccessibleScreenText(terminal);
+        } catch (error) {
+          if (!isGhosttyDisposedError(error)) {
+            console.warn("terminal accessible screen snapshot skipped", error);
+          }
+          return null;
+        }
+      },
+      callback,
+      TERMINAL_ACCESSIBLE_SCREEN_DEBOUNCE_MS,
+    );
+    const scrollDisposable = terminal.onScroll(() => publisher.request());
+    const bufferDisposable = terminal.buffer.onBufferChange(() => publisher.request());
+    this.#accessibleScreenPublisher = publisher;
+    this.#accessibleScreenCleanup = () => {
+      scrollDisposable.dispose();
+      bufferDisposable.dispose();
+    };
+    publisher.request(0);
+  }
+
+  #disposeAccessibleScreenPublisher() {
+    this.#accessibleScreenCleanup?.();
+    this.#accessibleScreenCleanup = null;
+    this.#accessibleScreenPublisher?.dispose();
+    this.#accessibleScreenPublisher = null;
   }
 
   #hasMouseTracking(terminal: Terminal) {
@@ -1088,16 +1189,59 @@ export class GhosttyRenderer implements TerminalRenderer {
   #installMobileInputBridge() {
     const terminal = this.#requireTerminal();
     const textarea = terminal.textarea;
-    if (!textarea) {
+    const host = this.#container;
+    if (!textarea || !host) {
       return;
     }
     textarea.classList.add("ghostty-hidden-input");
     hideGhosttyTextarea(textarea);
-    cleanupEditableArtifacts(this.#container);
+    cleanupEditableArtifacts(host);
+
+    const preeditOverlay = document.createElement("div");
+    preeditOverlay.className = "ghostty-ime-preedit";
+    preeditOverlay.setAttribute("aria-hidden", "true");
+    preeditOverlay.hidden = true;
+    host.append(preeditOverlay);
 
     let lastKeydown: { data: string; time: number } | null = null;
     let processedTextareaValue = "";
+    let imeState: TerminalImeState = idleTerminalImeState();
+
+    const sendTerminalText = (output: string) => {
+      terminal.input(output, true);
+      cleanupEditableArtifacts(host);
+    };
+    const clearTextareaState = () => {
+      textarea.value = "";
+      processedTextareaValue = "";
+      lastKeydown = null;
+    };
+    const hidePreedit = () => {
+      preeditOverlay.hidden = true;
+      preeditOverlay.textContent = "";
+    };
+    const refreshCompositionUi = () => {
+      positionGhosttyTextareaForInput(textarea, terminal);
+      if (imeState.phase !== "composing" || !imeState.preedit) {
+        hidePreedit();
+        return;
+      }
+      updateImePreeditOverlay(preeditOverlay, imeState.preedit, textarea, terminal);
+    };
+
     const onKeydown = (event: KeyboardEvent) => {
+      if (imeState.phase === "composing" || isImeComposingKeyEvent(event)) {
+        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === "function") {
+          event.stopImmediatePropagation();
+        }
+        return;
+      }
+      if (imeState.pendingInput !== null) {
+        // A real keydown marks the boundary after any trailing composition
+        // edit, so cancellation suppression must not consume this new key.
+        imeState = reduceTerminalImeState(imeState, { type: "settle" }).state;
+      }
       const customOutput = textareaKeyboardEventOutput(event);
       if (customOutput) {
         event.preventDefault();
@@ -1105,10 +1249,8 @@ export class GhosttyRenderer implements TerminalRenderer {
         if (typeof event.stopImmediatePropagation === "function") {
           event.stopImmediatePropagation();
         }
-        textarea.value = "";
-        processedTextareaValue = "";
-        terminal.input(customOutput, true);
-        cleanupEditableArtifacts(this.#container);
+        clearTextareaState();
+        sendTerminalText(customOutput);
         return;
       }
       const output = keyboardEventOutput(event);
@@ -1117,6 +1259,9 @@ export class GhosttyRenderer implements TerminalRenderer {
       }
     };
     const onBeforeInput = (event: InputEvent) => {
+      if (shouldDeferBeforeInputToIme(imeState, event)) {
+        return;
+      }
       const output = beforeInputOutput(event);
       if (!output) {
         return;
@@ -1130,16 +1275,13 @@ export class GhosttyRenderer implements TerminalRenderer {
 
       const now = performance.now();
       if (lastKeydown && lastKeydown.data === output && now - lastKeydown.time < 100) {
-        textarea.value = "";
-        processedTextareaValue = "";
-        cleanupEditableArtifacts(this.#container);
+        clearTextareaState();
+        cleanupEditableArtifacts(host);
         return;
       }
 
-      textarea.value = "";
-      processedTextareaValue = "";
-      terminal.input(output, true);
-      cleanupEditableArtifacts(this.#container);
+      clearTextareaState();
+      sendTerminalText(output);
     };
     const sendTextareaDelta = () => {
       const value = textarea.value;
@@ -1150,22 +1292,54 @@ export class GhosttyRenderer implements TerminalRenderer {
       const output = textareaDelta(processedTextareaValue, value);
       processedTextareaValue = value;
       if (output) {
-        terminal.input(output, true);
+        sendTerminalText(output);
+      } else {
+        cleanupEditableArtifacts(host);
       }
-      cleanupEditableArtifacts(this.#container);
     };
-    const onInput = () => {
+    const onInput = (event: Event) => {
+      const inputEvent = event as InputEvent;
+      const transition = reduceTerminalImeState(imeState, {
+        type: "input",
+        data: inputEvent.data,
+        inputType: inputEvent.inputType,
+        isComposing: inputEvent.isComposing,
+        textareaValue: textarea.value,
+      });
+      imeState = transition.state;
+      if (transition.suppressInput) {
+        if (transition.clearTextarea) {
+          clearTextareaState();
+        }
+        refreshCompositionUi();
+        cleanupEditableArtifacts(host);
+        return;
+      }
       sendTextareaDelta();
     };
     const onCompositionStart = (event: CompositionEvent) => {
+      imeState = reduceTerminalImeState(imeState, {
+        type: "compositionstart",
+        data: event.data,
+        textareaValue: textarea.value,
+      }).state;
       processedTextareaValue = textarea.value;
+      lastKeydown = null;
+      textarea.classList.add("ghostty-ime-composing");
+      refreshCompositionUi();
       event.stopPropagation();
       if (typeof event.stopImmediatePropagation === "function") {
         event.stopImmediatePropagation();
       }
-      cleanupEditableArtifacts(this.#container);
+      cleanupEditableArtifacts(host);
     };
     const onCompositionUpdate = (event: CompositionEvent) => {
+      imeState = reduceTerminalImeState(imeState, {
+        type: "compositionupdate",
+        data: event.data,
+        textareaValue: textarea.value,
+      }).state;
+      refreshCompositionUi();
       event.stopPropagation();
       if (typeof event.stopImmediatePropagation === "function") {
         event.stopImmediatePropagation();
@@ -1176,14 +1350,57 @@ export class GhosttyRenderer implements TerminalRenderer {
       if (typeof event.stopImmediatePropagation === "function") {
         event.stopImmediatePropagation();
       }
-      sendTextareaDelta();
-      textarea.value = "";
-      processedTextareaValue = "";
-      cleanupEditableArtifacts(this.#container);
+      const transition = reduceTerminalImeState(imeState, {
+        type: "compositionend",
+        data: event.data,
+        textareaValue: textarea.value,
+      });
+      imeState = transition.state;
+      textarea.classList.remove("ghostty-ime-composing");
+      hidePreedit();
+      if (transition.clearTextarea) {
+        clearTextareaState();
+      }
+      if (transition.output) {
+        sendTerminalText(transition.output);
+      } else {
+        cleanupEditableArtifacts(host);
+      }
+      if (document.activeElement === textarea) {
+        positionGhosttyTextareaForInput(textarea, terminal);
+      } else {
+        hideGhosttyTextarea(textarea);
+      }
+
+      // A browser's trailing input event, when present, is dispatched in the
+      // same event task. Do not let a successful commit's one-shot dedupe
+      // affect a later key. Cancellation remains armed until the next keydown
+      // because browsers may replay canceled preedit after a microtask.
+      const endedState = imeState;
+      if (
+        endedState.phase === "idle" &&
+        endedState.pendingInput?.kind === "cancellation"
+      ) {
+        return;
+      }
+      queueMicrotask(() => {
+        if (imeState === endedState) {
+          imeState = reduceTerminalImeState(imeState, { type: "settle" }).state;
+        }
+      });
+    };
+    const onFocus = () => {
+      textarea.classList.add("ghostty-keyboard-input");
+      positionGhosttyTextareaForInput(textarea, terminal);
     };
     const onBlur = () => {
       textarea.classList.remove("ghostty-keyboard-input");
+      textarea.classList.remove("ghostty-ime-composing");
+      imeState = reduceTerminalImeState(imeState, { type: "reset" }).state;
+      clearTextareaState();
       this.#textInputTapGraceUntil = 0;
+      hidePreedit();
+      hideGhosttyTextarea(textarea);
     };
 
     textarea.addEventListener("keydown", onKeydown, { capture: true });
@@ -1192,6 +1409,7 @@ export class GhosttyRenderer implements TerminalRenderer {
     textarea.addEventListener("compositionstart", onCompositionStart, { capture: true });
     textarea.addEventListener("compositionupdate", onCompositionUpdate, { capture: true });
     textarea.addEventListener("compositionend", onCompositionEnd, { capture: true });
+    textarea.addEventListener("focus", onFocus);
     textarea.addEventListener("blur", onBlur);
     this.#mobileInputCleanup = () => {
       textarea.removeEventListener("keydown", onKeydown, { capture: true });
@@ -1200,8 +1418,27 @@ export class GhosttyRenderer implements TerminalRenderer {
       textarea.removeEventListener("compositionstart", onCompositionStart, { capture: true });
       textarea.removeEventListener("compositionupdate", onCompositionUpdate, { capture: true });
       textarea.removeEventListener("compositionend", onCompositionEnd, { capture: true });
+      textarea.removeEventListener("focus", onFocus);
       textarea.removeEventListener("blur", onBlur);
+      preeditOverlay.remove();
     };
+  }
+
+  #installImeFocusRedirect() {
+    const terminal = this.#requireTerminal();
+    const container = this.#container;
+    const textarea = terminal.textarea;
+    if (!container || !textarea) {
+      return;
+    }
+
+    this.#imeFocusCleanup?.();
+    this.#imeFocusCleanup = installTerminalImeFocusRedirect({
+      container,
+      textarea,
+      hasAlternateTapFocus: () => this.#tapFocusHandler !== null,
+      focusTextarea: () => this.focusTextInput(),
+    });
   }
 }
 
@@ -1216,6 +1453,103 @@ function hideGhosttyTextarea(textarea: HTMLTextAreaElement) {
   textarea.style.background = "transparent";
   textarea.style.caretColor = "transparent";
   textarea.style.overflow = "hidden";
+  textarea.style.fontFamily = "";
+  textarea.style.fontSize = "";
+  textarea.style.lineHeight = "";
+  textarea.style.zIndex = "";
+  textarea.style.setProperty("--ghostty-ime-left", "-10000px");
+  textarea.style.setProperty("--ghostty-ime-top", "0px");
+  textarea.style.setProperty("--ghostty-ime-width", "1px");
+  textarea.style.setProperty("--ghostty-ime-height", "1px");
+}
+
+function positionGhosttyTextareaForInput(
+  textarea: HTMLTextAreaElement,
+  terminal: Terminal | null | undefined,
+) {
+  if (!terminal) {
+    hideGhosttyTextarea(textarea);
+    return;
+  }
+  const canvas = terminal.renderer?.getCanvas();
+  const host = canvas ?? terminal.element;
+  const rect = host?.getBoundingClientRect();
+  const metrics = terminal.renderer?.getMetrics();
+  if (!rect || rect.width <= 0 || rect.height <= 0) {
+    hideGhosttyTextarea(textarea);
+    return;
+  }
+
+  const cursor = terminal.buffer?.active;
+  const anchor = imeTextareaAnchor({
+    terminalLeft: rect.left,
+    terminalTop: rect.top,
+    terminalWidth: rect.width,
+    terminalHeight: rect.height,
+    browserWidth: window.innerWidth,
+    browserHeight: window.innerHeight,
+    cellWidth: metrics?.width ?? 9,
+    cellHeight: metrics?.height ?? 16,
+    cursorCol: cursor?.cursorX ?? 0,
+    cursorRow: cursor?.cursorY ?? 0,
+    fontSizePx: terminal.options.fontSize ?? DEFAULT_TERMINAL_FONT_SIZE_PX,
+  });
+
+  textarea.style.position = "fixed";
+  textarea.style.left = `${anchor.left}px`;
+  textarea.style.top = `${anchor.top}px`;
+  textarea.style.width = `${anchor.width}px`;
+  textarea.style.height = `${anchor.height}px`;
+  textarea.style.opacity = "0";
+  textarea.style.color = "transparent";
+  textarea.style.background = "transparent";
+  textarea.style.caretColor = "transparent";
+  textarea.style.overflow = "hidden";
+  textarea.style.fontFamily = TERMINAL_FONT_FAMILY;
+  textarea.style.fontSize = `${anchor.fontSizePx}px`;
+  textarea.style.lineHeight = `${anchor.height}px`;
+  textarea.style.zIndex = "5";
+  textarea.style.setProperty("--ghostty-ime-left", `${anchor.left}px`);
+  textarea.style.setProperty("--ghostty-ime-top", `${anchor.top}px`);
+  textarea.style.setProperty("--ghostty-ime-width", `${anchor.width}px`);
+  textarea.style.setProperty("--ghostty-ime-height", `${anchor.height}px`);
+}
+
+function updateImePreeditOverlay(
+  overlay: HTMLDivElement,
+  preedit: string,
+  textarea: HTMLTextAreaElement,
+  terminal: Terminal,
+) {
+  if (!preedit) {
+    overlay.hidden = true;
+    overlay.textContent = "";
+    return;
+  }
+
+  const canvas = terminal.renderer?.getCanvas();
+  const terminalRect = (canvas ?? terminal.element)?.getBoundingClientRect();
+  const fontSize = terminal.options.fontSize ?? DEFAULT_TERMINAL_FONT_SIZE_PX;
+  const lineHeight = textarea.style.height || `${Math.ceil(fontSize * 1.2)}px`;
+  const anchorLeft = Number.parseFloat(textarea.style.left) || 1;
+  const anchorTop = Number.parseFloat(textarea.style.top) || 1;
+  const visibleLeft = Math.max(4, terminalRect?.left ?? 4);
+  const visibleRight = Math.min(window.innerWidth - 4, terminalRect?.right ?? window.innerWidth - 4);
+  const maxWidth = Math.max(1, Math.min(576, visibleRight - visibleLeft));
+
+  overlay.hidden = false;
+  overlay.textContent = preedit;
+  overlay.style.left = `${anchorLeft}px`;
+  overlay.style.top = `${anchorTop}px`;
+  overlay.style.maxWidth = `${maxWidth}px`;
+  overlay.style.fontFamily = TERMINAL_FONT_FAMILY;
+  overlay.style.fontSize = `${fontSize}px`;
+  overlay.style.lineHeight = lineHeight;
+  overlay.style.minHeight = lineHeight;
+
+  const overlayRect = overlay.getBoundingClientRect();
+  const maxLeft = Math.max(visibleLeft, visibleRight - overlayRect.width);
+  overlay.style.left = `${clampNumber(anchorLeft, visibleLeft, maxLeft)}px`;
 }
 
 function isGhosttyDisposedError(error: unknown) {
@@ -1230,63 +1564,6 @@ function cleanupEditableArtifacts(container: HTMLElement | null) {
     if (node.nodeType === Node.TEXT_NODE) {
       node.remove();
     }
-  }
-}
-
-function beforeInputOutput(event: InputEvent) {
-  switch (event.inputType) {
-    case "insertText":
-    case "insertReplacementText":
-      return event.data ? event.data.replace(/\n/g, "\r") : null;
-    case "insertLineBreak":
-    case "insertParagraph":
-      return "\r";
-    case "deleteContentBackward":
-      return "\x7F";
-    case "deleteContentForward":
-      return "\x1B[3~";
-    default:
-      return null;
-  }
-}
-
-function textareaDelta(previousValue: string, nextValue: string) {
-  if (nextValue.startsWith(previousValue)) {
-    return nextValue.slice(previousValue.length).replace(/\n/g, "\r");
-  }
-
-  const previousChars = Array.from(previousValue);
-  const nextChars = Array.from(nextValue);
-  let commonPrefixLength = 0;
-  while (
-    commonPrefixLength < previousChars.length &&
-    commonPrefixLength < nextChars.length &&
-    previousChars[commonPrefixLength] === nextChars[commonPrefixLength]
-  ) {
-    commonPrefixLength += 1;
-  }
-
-  const deletes = "\x7F".repeat(previousChars.length - commonPrefixLength);
-  const inserts = nextChars.slice(commonPrefixLength).join("").replace(/\n/g, "\r");
-  return `${deletes}${inserts}`;
-}
-
-function keyboardEventOutput(event: KeyboardEvent) {
-  if (event.ctrlKey || event.altKey || event.metaKey) {
-    return null;
-  }
-  if (event.key.length === 1) {
-    return event.key;
-  }
-  switch (event.key) {
-    case "Enter":
-      return "\r";
-    case "Backspace":
-      return "\x7F";
-    case "Delete":
-      return "\x1B[3~";
-    default:
-      return null;
   }
 }
 
@@ -1322,6 +1599,35 @@ function terminalBufferRow(terminal: Terminal, viewportRow: number) {
   const scrollbackLength = terminal.getScrollbackLength();
   const viewportY = Math.max(0, Math.floor(terminal.getViewportY()));
   return scrollbackLength + viewportRow - viewportY;
+}
+
+function terminalAccessibleScreenText(terminal: Terminal) {
+  return terminalAccessibleText({
+    rows: terminal.rows,
+    cols: terminal.cols,
+    buffer: terminal.buffer,
+    getViewportY: () => terminal.getViewportY(),
+    readGrapheme: (bufferType, row, column) => {
+      const wasmTerm = terminal.wasmTerm;
+      if (!wasmTerm) {
+        return null;
+      }
+      if (bufferType === "alternate") {
+        return typeof wasmTerm.getGraphemeString === "function"
+          ? wasmTerm.getGraphemeString(row, column)
+          : null;
+      }
+      const scrollbackLength = terminal.getScrollbackLength();
+      if (row < scrollbackLength) {
+        return typeof wasmTerm.getScrollbackGraphemeString === "function"
+          ? wasmTerm.getScrollbackGraphemeString(row, column)
+          : null;
+      }
+      return typeof wasmTerm.getGraphemeString === "function"
+        ? wasmTerm.getGraphemeString(row - scrollbackLength, column)
+        : null;
+    },
+  });
 }
 
 function selectTerminalViewportRange(

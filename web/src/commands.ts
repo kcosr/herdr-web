@@ -1,10 +1,7 @@
 // Mutating commands proxied through the bridge's allow-listed /api/command.
 
 import type { BridgeHttpUrl } from "./bridgeApi";
-import { agentArgv } from "./launch";
-import { legacyKindForLaunchSpec } from "./launch";
 import type { LaunchSpec, SplitDirection } from "./launch";
-import { shellCommand } from "./shell";
 
 export type CommandResult = { type?: string; [key: string]: unknown };
 export type LaunchPresetResult = {
@@ -101,6 +98,11 @@ export function createCommands(httpUrl: BridgeHttpUrl = sameOriginHttpUrl) {
       runCommand(httpUrl, "workspace.close", { workspace_id: workspaceId }),
     focusWorkspace: (workspaceId: string) =>
       runCommand(httpUrl, "workspace.focus", { workspace_id: workspaceId }),
+    moveWorkspaceBlock: (workspaceIds: string[], beforeWorkspaceId: string | null) =>
+      runCommand(httpUrl, "workspace.move_block", {
+        workspace_ids: workspaceIds,
+        before_workspace_id: beforeWorkspaceId,
+      }),
 
     createTab: (workspaceId: string, label?: string) =>
       runCommand(httpUrl, "tab.create", { workspace_id: workspaceId, focus: true, label }),
@@ -112,8 +114,6 @@ export function createCommands(httpUrl: BridgeHttpUrl = sameOriginHttpUrl) {
     renamePane: (paneId: string, label: string) =>
       runCommand(httpUrl, "pane.rename", { pane_id: paneId, label }),
     closePane: (paneId: string) => runCommand(httpUrl, "pane.close", { pane_id: paneId }),
-    runPaneCommand: (paneId: string, command: string) =>
-      runCommand(httpUrl, "pane.send_input", { pane_id: paneId, text: command, keys: ["Enter"] }),
     // Layout-mutating: requires the bridge allow-list to include `pane.split`.
     splitPane: (targetPaneId: string, direction: SplitDirection) =>
       runCommand(httpUrl, "pane.split", { target_pane_id: targetPaneId, direction, focus: true }),
@@ -131,50 +131,6 @@ export function createCommands(httpUrl: BridgeHttpUrl = sameOriginHttpUrl) {
         destination: { type: "new_workspace", label },
         focus: true,
       }),
-
-    startAgentSplit: (tabId: string, direction: SplitDirection, spec: LaunchSpec) =>
-      runCommand(httpUrl, "agent.start", {
-        name: spec.title,
-        tab_id: tabId,
-        split: direction,
-        focus: true,
-        argv: agentArgv(requiredLegacyKind(spec)),
-      }),
-
-    createLaunchTab: async (workspaceId: string, spec: LaunchSpec) => {
-      const result = await api.createTab(workspaceId);
-      const paneId = createdPaneId(result);
-      if (!paneId) {
-        throw new Error("new tab did not return a root pane");
-      }
-      const title = spec.title.trim();
-      if (title) {
-        await api.renamePane(paneId, title);
-      }
-      const kind = requiredLegacyKind(spec);
-      if (kind !== "shell") {
-        await api.runPaneCommand(paneId, shellCommand(agentArgv(kind)));
-      }
-      return result;
-    },
-
-    splitLaunchPane: async (
-      targetPaneId: string,
-      tabId: string,
-      direction: SplitDirection,
-      spec: LaunchSpec,
-    ) => {
-      const kind = requiredLegacyKind(spec);
-      if (kind !== "shell") {
-        return api.startAgentSplit(tabId, direction, spec);
-      }
-      const result = await api.splitPane(targetPaneId, direction);
-      const paneId = createdPaneId(result);
-      if (paneId && spec.title.trim()) {
-        await api.renamePane(paneId, spec.title.trim());
-      }
-      return result;
-    },
 
     launchPresetTab: (workspaceId: string, spec: LaunchSpec) =>
       runLaunchPreset(httpUrl, {
@@ -199,11 +155,3 @@ export function createCommands(httpUrl: BridgeHttpUrl = sameOriginHttpUrl) {
 }
 
 export const commands = createCommands();
-
-function requiredLegacyKind(spec: LaunchSpec) {
-  const kind = legacyKindForLaunchSpec(spec);
-  if (!kind) {
-    throw new Error("custom launcher presets require a newer bridge");
-  }
-  return kind;
-}

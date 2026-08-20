@@ -2,6 +2,49 @@ use std::collections::HashMap;
 
 use super::*;
 
+fn protocol_schema_entry<T: schemars::JsonSchema>(name: &str) -> serde_json::Value {
+    let mut schema = serde_json::to_value(schemars::schema_for!(T)).unwrap();
+    rewrite_schema_refs(&mut schema, name);
+    schema
+}
+
+fn rewrite_schema_refs(value: &mut serde_json::Value, schema_name: &str) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(serde_json::Value::String(reference)) = object.get_mut("$ref") {
+                if let Some(path) = reference.strip_prefix("#/") {
+                    *reference = format!("#/schemas/{schema_name}/{path}");
+                }
+            }
+            for child in object.values_mut() {
+                rewrite_schema_refs(child, schema_name);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                rewrite_schema_refs(item, schema_name);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn protocol_schema_document() -> serde_json::Value {
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Herdr API",
+        "schema_version": 1,
+        "protocol": crate::protocol::PROTOCOL_VERSION,
+        "schemas": {
+            "request": protocol_schema_entry::<Request>("request"),
+            "success_response": protocol_schema_entry::<SuccessResponse>("success_response"),
+            "error_response": protocol_schema_entry::<ErrorResponse>("error_response"),
+            "event": protocol_schema_entry::<EventEnvelope>("event"),
+            "subscription_event": protocol_schema_entry::<SubscriptionEventEnvelope>("subscription_event"),
+        },
+    })
+}
+
 #[test]
 fn request_uses_dot_method_names() {
     let request = Request {
@@ -19,51 +62,91 @@ fn request_uses_dot_method_names() {
 }
 
 #[test]
-fn ping_request_json_fixture_matches_reviewed_snapshot() {
-    let request = Request {
-        id: "api-client:status".into(),
-        method: Method::Ping(PingParams::default()),
+fn agent_start_and_prompt_requests_round_trip() {
+    let start = Request {
+        id: "start".into(),
+        method: Method::AgentStart(AgentStartParams {
+            name: "reviewer".into(),
+            kind: "pi".into(),
+            pane_id: "w1:p2".into(),
+            args: vec!["--no-session".into()],
+            timeout_ms: Some(30_000),
+        }),
     };
-
+    let start_json = serde_json::to_value(&start).unwrap();
+    assert_eq!(start_json["method"], "agent.start");
+    assert_eq!(start_json["params"]["pane_id"], "w1:p2");
     assert_eq!(
-        serde_json::to_value(&request).unwrap(),
-        serde_json::json!({
-            "id": "api-client:status",
-            "method": "ping",
-            "params": {}
-        })
+        serde_json::from_value::<Request>(start_json).unwrap(),
+        start
+    );
+
+    let prompt = Request {
+        id: "prompt".into(),
+        method: Method::AgentPrompt(AgentPromptParams {
+            target: "reviewer".into(),
+            text: "review this".into(),
+            wait: None,
+        }),
+    };
+    let prompt_json = serde_json::to_value(&prompt).unwrap();
+    assert_eq!(prompt_json["method"], "agent.prompt");
+    assert_eq!(
+        serde_json::from_value::<Request>(prompt_json).unwrap(),
+        prompt
+    );
+
+    let prompt_and_wait = Request {
+        id: "prompt-and-wait".into(),
+        method: Method::AgentPrompt(AgentPromptParams {
+            target: "reviewer".into(),
+            text: "review this".into(),
+            wait: Some(AgentPromptWaitOptions {
+                until: vec![AgentStatus::Idle, AgentStatus::Done],
+                timeout_ms: Some(120_000),
+            }),
+        }),
+    };
+    let prompt_and_wait_json = serde_json::to_value(&prompt_and_wait).unwrap();
+    assert_eq!(
+        prompt_and_wait_json["params"]["wait"]["until"],
+        serde_json::json!(["idle", "done"])
+    );
+    assert_eq!(
+        prompt_and_wait_json["params"]["wait"]["timeout_ms"],
+        120_000
+    );
+    assert_eq!(
+        serde_json::from_value::<Request>(prompt_and_wait_json).unwrap(),
+        prompt_and_wait
     );
 }
 
 #[test]
-fn pong_response_json_fixture_matches_reviewed_snapshot() {
-    let response = SuccessResponse {
-        id: "api-client:status".into(),
-        result: ResponseResult::Pong {
-            version: "0.7.0".into(),
-            protocol: 16,
-            capabilities: Some(ServerCapabilities {
-                live_handoff: true,
-                detached_server_daemon: true,
-            }),
-        },
-    };
-
-    assert_eq!(
-        serde_json::to_value(&response).unwrap(),
-        serde_json::json!({
-            "id": "api-client:status",
-            "result": {
-                "type": "pong",
-                "version": "0.7.0",
-                "protocol": 16,
-                "capabilities": {
-                    "live_handoff": true,
-                    "detached_server_daemon": true
+fn bundled_protocol_schema_refs_resolve_inside_bundle() {
+    fn assert_no_standalone_refs(value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(serde_json::Value::String(reference)) = object.get("$ref") {
+                    assert!(
+                        !reference.starts_with("#/$defs/"),
+                        "schema bundle contains standalone ref {reference}"
+                    );
+                }
+                for child in object.values() {
+                    assert_no_standalone_refs(child);
                 }
             }
-        })
-    );
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    assert_no_standalone_refs(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assert_no_standalone_refs(&protocol_schema_document());
 }
 
 #[test]
@@ -185,6 +268,49 @@ fn client_window_title_requests_round_trip() {
 }
 
 #[test]
+fn agent_view_requests_round_trip() {
+    let set_json = serde_json::json!({
+        "id": "view-set",
+        "method": "agent.view.set",
+        "params": {
+            "source": "example.views",
+            "label": "current + attention",
+            "filter": {
+                "op": "any",
+                "filters": [
+                    {
+                        "op": "eq",
+                        "field": "workspace_id",
+                        "value": {"context": "current_workspace_id"}
+                    },
+                    {
+                        "op": "in",
+                        "field": "status",
+                        "values": ["blocked", "done"]
+                    }
+                ]
+            },
+            "sort": [
+                {"field": "attention", "order": "desc"},
+                {"field": "state_change_seq", "order": "desc"}
+            ]
+        }
+    });
+    let request: Request = serde_json::from_value(set_json.clone()).unwrap();
+    assert!(matches!(request.method, Method::AgentViewSet(_)));
+    assert_eq!(serde_json::to_value(request).unwrap(), set_json);
+
+    let clear_json = serde_json::json!({
+        "id": "view-clear",
+        "method": "agent.view.clear",
+        "params": {"source": "example.views"}
+    });
+    let request: Request = serde_json::from_value(clear_json.clone()).unwrap();
+    assert!(matches!(request.method, Method::AgentViewClear(_)));
+    assert_eq!(serde_json::to_value(request).unwrap(), clear_json);
+}
+
+#[test]
 fn unknown_method_is_rejected() {
     let json = r#"{"id":"req_1","method":"nope","params":{}}"#;
     let err = serde_json::from_str::<Request>(json)
@@ -258,10 +384,13 @@ fn pane_read_defaults_to_text_format() {
     "#;
 
     let request: Request = serde_json::from_str(json).unwrap();
+    let serialized = serde_json::to_value(&request).unwrap();
+    assert!(serialized["params"].get("intent").is_none());
     let Method::PaneRead(params) = request.method else {
         panic!("wrong method parsed");
     };
     assert_eq!(params.format, ReadFormat::Text);
+    assert_eq!(params.intent, ReadIntent::Interactive);
 }
 
 #[test]
@@ -298,18 +427,75 @@ fn pane_process_info_request_round_trips() {
 
 #[test]
 fn event_envelope_round_trips() {
-    let event = EventEnvelope {
-        event: EventKind::PaneOutputChanged,
-        data: EventData::PaneOutputChanged {
-            pane_id: "p_1".into(),
-            workspace_id: "w_1".into(),
-            revision: 42,
+    let events = [
+        EventEnvelope {
+            event: EventKind::PaneOutputChanged,
+            data: EventData::PaneOutputChanged {
+                pane_id: "p_1".into(),
+                workspace_id: "w_1".into(),
+                revision: 42,
+            },
         },
-    };
+        EventEnvelope {
+            event: EventKind::WorkspaceMoved,
+            data: EventData::WorkspaceMoved {
+                workspace_id: "w_1".into(),
+                insert_index: 2,
+                workspaces: vec![],
+            },
+        },
+        EventEnvelope {
+            event: EventKind::WorkspaceReordered,
+            data: EventData::WorkspaceReordered {
+                workspace_ids: vec!["w_1".into(), "w_2".into()],
+                before_workspace_id: Some("w_3".into()),
+                workspaces: vec![],
+            },
+        },
+        EventEnvelope {
+            event: EventKind::TabMoved,
+            data: EventData::TabMoved {
+                tab_id: "w_1:1".into(),
+                workspace_id: "w_1".into(),
+                insert_index: 1,
+                tabs: vec![],
+            },
+        },
+        EventEnvelope {
+            event: EventKind::LayoutUpdated,
+            data: EventData::LayoutUpdated {
+                layout: PaneLayoutSnapshot {
+                    workspace_id: "w_1".into(),
+                    tab_id: "w_1:1".into(),
+                    zoomed: false,
+                    area: PaneLayoutRect {
+                        x: 0,
+                        y: 0,
+                        width: 100,
+                        height: 24,
+                    },
+                    focused_pane_id: "w_1-1".into(),
+                    panes: vec![PaneLayoutPane {
+                        pane_id: "w_1-1".into(),
+                        focused: true,
+                        rect: PaneLayoutRect {
+                            x: 0,
+                            y: 0,
+                            width: 100,
+                            height: 24,
+                        },
+                    }],
+                    splits: vec![],
+                },
+            },
+        },
+    ];
 
-    let json = serde_json::to_string(&event).unwrap();
-    let restored: EventEnvelope = serde_json::from_str(&json).unwrap();
-    assert_eq!(restored, event);
+    for event in events {
+        let json = serde_json::to_string(&event).unwrap();
+        let restored: EventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, event);
+    }
 }
 
 #[test]
@@ -450,113 +636,16 @@ fn session_snapshot_request_and_response_round_trip() {
         id: "req_snapshot".into(),
         result: ResponseResult::SessionSnapshot {
             snapshot: Box::new(SessionSnapshot {
-                version: "0.7.2".into(),
+                version: "0.1.2".into(),
                 protocol: 16,
-                focused_workspace_id: Some("w_1".into()),
-                focused_tab_id: Some("t_1".into()),
-                focused_pane_id: Some("p_1".into()),
-                workspaces: vec![WorkspaceInfo {
-                    workspace_id: "w_1".into(),
-                    number: 1,
-                    label: "herdr".into(),
-                    focused: true,
-                    pane_count: 1,
-                    tab_count: 1,
-                    active_tab_id: "t_1".into(),
-                    agent_status: AgentStatus::Working,
-                    worktree: None,
-                }],
-                tabs: vec![TabInfo {
-                    tab_id: "t_1".into(),
-                    workspace_id: "w_1".into(),
-                    number: 1,
-                    label: "1".into(),
-                    focused: true,
-                    pane_count: 1,
-                    agent_status: AgentStatus::Working,
-                }],
-                panes: vec![PaneInfo {
-                    pane_id: "p_1".into(),
-                    terminal_id: "term_1".into(),
-                    workspace_id: "w_1".into(),
-                    tab_id: "t_1".into(),
-                    focused: true,
-                    cwd: Some("/work/herdr".into()),
-                    foreground_cwd: Some("/work/herdr".into()),
-                    label: Some("Review".into()),
-                    agent: Some("codex".into()),
-                    title: Some("Codex".into()),
-                    display_agent: Some("Codex".into()),
-                    agent_status: AgentStatus::Working,
-                    terminal_title: None,
-                    terminal_title_stripped: None,
-                    state_labels: HashMap::from([("phase".into(), "review".into())]),
-                    tokens: HashMap::new(),
-                    agent_session: None,
-                    scroll: Some(PaneScrollInfo {
-                        offset_from_bottom: 4,
-                        max_offset_from_bottom: 80,
-                        viewport_rows: 24,
-                    }),
-                    revision: 7,
-                }],
-                layouts: vec![PaneLayoutSnapshot {
-                    workspace_id: "w_1".into(),
-                    tab_id: "t_1".into(),
-                    zoomed: false,
-                    area: PaneLayoutRect {
-                        x: 0,
-                        y: 0,
-                        width: 120,
-                        height: 40,
-                    },
-                    focused_pane_id: "p_1".into(),
-                    panes: vec![PaneLayoutPane {
-                        pane_id: "p_1".into(),
-                        focused: true,
-                        rect: PaneLayoutRect {
-                            x: 0,
-                            y: 0,
-                            width: 120,
-                            height: 40,
-                        },
-                    }],
-                    splits: vec![PaneLayoutSplit {
-                        id: "root".into(),
-                        direction: SplitDirection::Right,
-                        ratio: 1.0,
-                        rect: PaneLayoutRect {
-                            x: 0,
-                            y: 0,
-                            width: 120,
-                            height: 40,
-                        },
-                    }],
-                }],
-                agents: vec![AgentInfo {
-                    terminal_id: "term_1".into(),
-                    name: Some("codex".into()),
-                    agent: Some("codex".into()),
-                    title: Some("Codex".into()),
-                    display_agent: Some("Codex".into()),
-                    agent_status: AgentStatus::Working,
-                    screen_detection_skipped: false,
-                    terminal_title: None,
-                    terminal_title_stripped: None,
-                    state_labels: HashMap::from([("phase".into(), "review".into())]),
-                    tokens: HashMap::new(),
-                    agent_session: None,
-                    workspace_id: "w_1".into(),
-                    launch_pending: false,
-                    interactive_ready: false,
-                    state_change_seq: 0,
-                    tab_id: "t_1".into(),
-                    pane_id: "p_1".into(),
-                    focused: true,
-                    cwd: Some("/work/herdr".into()),
-                    foreground_cwd: Some("/work/herdr".into()),
-                    revision: 7,
-                }],
+                focused_workspace_id: None,
+                focused_tab_id: None,
+                focused_pane_id: None,
+                workspaces: Vec::new(),
+                tabs: Vec::new(),
+                panes: Vec::new(),
+                layouts: Vec::new(),
+                agents: Vec::new(),
             }),
         },
     };
@@ -594,6 +683,7 @@ fn worktree_request_and_response_round_trip() {
                 tab_count: 1,
                 active_tab_id: "w_1:1".into(),
                 agent_status: AgentStatus::Unknown,
+                tokens: HashMap::new(),
                 worktree: Some(WorkspaceWorktreeInfo {
                     repo_key: "/repo/herdr/.git".into(),
                     repo_name: "herdr".into(),
@@ -622,10 +712,10 @@ fn worktree_request_and_response_round_trip() {
                 label: None,
                 agent: None,
                 title: None,
-                display_agent: None,
-                agent_status: AgentStatus::Unknown,
                 terminal_title: None,
                 terminal_title_stripped: None,
+                display_agent: None,
+                agent_status: AgentStatus::Unknown,
                 state_labels: HashMap::new(),
                 tokens: HashMap::new(),
                 agent_session: None,
@@ -679,6 +769,7 @@ fn worktree_lifecycle_events_round_trip() {
         tab_count: 1,
         active_tab_id: "w_2:1".into(),
         agent_status: AgentStatus::Unknown,
+        tokens: HashMap::new(),
         worktree: Some(WorkspaceWorktreeInfo {
             repo_key: "/repo/herdr/.git".into(),
             repo_name: "herdr".into(),
@@ -718,7 +809,7 @@ fn worktree_lifecycle_events_round_trip() {
             event: EventKind::WorktreeRemoved,
             data: EventData::WorktreeRemoved {
                 workspace_id: "w_2".into(),
-                workspace: None,
+                workspace: Some(workspace.clone()),
                 worktree: WorktreeInfo {
                     open_workspace_id: None,
                     ..worktree.clone()
@@ -917,6 +1008,111 @@ fn layout_export_apply_round_trip() {
     let json = serde_json::to_string(&response).unwrap();
     let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
     assert_eq!(restored, response);
+
+    let response = SuccessResponse {
+        id: "layout_ratio".into(),
+        result: ResponseResult::LayoutSplitRatioSet {
+            layout: LayoutDescription {
+                workspace_id: "w1".into(),
+                tab_id: "w1:1".into(),
+                zoomed: false,
+                focused_pane_id: "w1-1".into(),
+                root: LayoutNode::Pane {
+                    pane: LayoutPane {
+                        pane_id: Some("w1-1".into()),
+                        ..Default::default()
+                    },
+                },
+            },
+        },
+    };
+    let json = serde_json::to_string(&response).unwrap();
+    assert!(json.contains("\"type\":\"layout_split_ratio_set\""));
+    let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, response);
+}
+
+#[test]
+fn authority_mutation_requests_round_trip() {
+    let workspace_move = Request {
+        id: "move_ws".into(),
+        method: Method::WorkspaceMove(WorkspaceMoveParams {
+            workspace_id: "w1".into(),
+            insert_index: 2,
+        }),
+    };
+    let json = serde_json::to_value(&workspace_move).unwrap();
+    assert_eq!(json["method"], "workspace.move");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, workspace_move);
+
+    let workspace_move_block = Request {
+        id: "move_ws_block".into(),
+        method: Method::WorkspaceMoveBlock(WorkspaceMoveBlockParams {
+            workspace_ids: vec!["w1".into(), "w2".into()],
+            before_workspace_id: Some("w3".into()),
+        }),
+    };
+    let json = serde_json::to_value(&workspace_move_block).unwrap();
+    assert_eq!(json["method"], "workspace.move_block");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, workspace_move_block);
+
+    let tab_move = Request {
+        id: "move_tab".into(),
+        method: Method::TabMove(TabMoveParams {
+            tab_id: "w1:1".into(),
+            insert_index: 1,
+        }),
+    };
+    let json = serde_json::to_value(&tab_move).unwrap();
+    assert_eq!(json["method"], "tab.move");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, tab_move);
+
+    let pane_focus = Request {
+        id: "focus_pane".into(),
+        method: Method::PaneFocus(PaneTarget {
+            pane_id: "w1:1".into(),
+        }),
+    };
+    let json = serde_json::to_value(&pane_focus).unwrap();
+    assert_eq!(json["method"], "pane.focus");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, pane_focus);
+
+    let split_ratio = Request {
+        id: "set_ratio".into(),
+        method: Method::LayoutSetSplitRatio(LayoutSetSplitRatioParams {
+            tab_id: Some("w1:1".into()),
+            pane_id: None,
+            path: vec![false, true],
+            ratio: 0.6,
+        }),
+    };
+    let json = serde_json::to_value(&split_ratio).unwrap();
+    assert_eq!(json["method"], "layout.set_split_ratio");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, split_ratio);
+
+    let subscription = Request {
+        id: "sub_moves".into(),
+        method: Method::EventsSubscribe(EventsSubscribeParams {
+            subscriptions: vec![
+                Subscription::WorkspaceMoved {},
+                Subscription::WorkspaceReordered {},
+                Subscription::TabMoved {},
+                Subscription::LayoutUpdated {},
+            ],
+        }),
+    };
+    let json = serde_json::to_string(&subscription).unwrap();
+    assert!(json.contains("\"type\":\"workspace.moved\""));
+    assert!(json.contains("\"type\":\"workspace.reordered\""));
+    assert!(json.contains("\"type\":\"tab.moved\""));
+    assert!(json.contains("\"type\":\"layout.updated\""));
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, subscription);
 }
 
 #[test]
@@ -944,10 +1140,10 @@ fn create_response_round_trips_with_root_pane() {
                 label: None,
                 agent: None,
                 title: None,
-                display_agent: None,
-                agent_status: AgentStatus::Unknown,
                 terminal_title: None,
                 terminal_title_stripped: None,
+                display_agent: None,
+                agent_status: AgentStatus::Unknown,
                 state_labels: HashMap::new(),
                 tokens: HashMap::new(),
                 agent_session: None,
@@ -1060,12 +1256,12 @@ fn plugin_pane_open_request_round_trips() {
         method: Method::PluginPaneOpen(PluginPaneOpenParams {
             plugin_id: "example.board".into(),
             entrypoint: "board".into(),
-            placement: Some(PluginPanePlacement::Zoomed),
-            width: None,
-            height: None,
+            placement: Some(PluginPanePlacement::Popup),
+            width: Some(crate::popup_size::PopupSize::Cells(90)),
+            height: Some(crate::popup_size::PopupSize::Percent(80)),
             workspace_id: None,
-            target_pane_id: Some("1-1".into()),
-            direction: Some(SplitDirection::Right),
+            target_pane_id: None,
+            direction: None,
             cwd: Some("/tmp".into()),
             focus: true,
             env: [("HERDR_ROLE".to_string(), "board".to_string())].into(),
@@ -1074,7 +1270,23 @@ fn plugin_pane_open_request_round_trips() {
 
     let json = serde_json::to_value(&request).unwrap();
     assert_eq!(json["method"], "plugin.pane.open");
+    assert_eq!(json["params"]["placement"], "popup");
+    assert_eq!(json["params"]["width"], 90);
+    assert_eq!(json["params"]["height"], "80%");
     assert_eq!(json["params"]["env"]["HERDR_ROLE"], "board");
     let restored: Request = serde_json::from_value(json).unwrap();
     assert_eq!(restored, request);
+}
+
+#[test]
+fn popup_close_request_round_trips() {
+    let request = Request {
+        id: "popup-close".into(),
+        method: Method::PopupClose(EmptyParams::default()),
+    };
+
+    let json = serde_json::to_value(request).unwrap();
+
+    assert_eq!(json["method"], "popup.close");
+    assert_eq!(json["params"], serde_json::json!({}));
 }

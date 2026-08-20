@@ -116,6 +116,157 @@ Files: CHANGELOG.md, AGENTS.md, web/src/App.tsx, web/src/paneSearch.ts, bridge/s
 
 ### Removed
 
+## [0.4.3] - 2026-08-17
+
+### Added
+
+- Added an optional screen-reader text mirror for visible terminal contents, with bounded updates
+  and concealed-cell filtering. [PR #64](https://github.com/kcosr/herdr-web/pull/64), based on the
+  concept proposed by
+  [shuv (@shuv1337)](https://github.com/shuv1337) in
+  [PR #37](https://github.com/kcosr/herdr-web/pull/37).
+
+### Fixed
+
+- Improved keyboard focus behavior for dialogs and action menus: modal focus stays contained,
+  menus support arrow, Home, and End navigation, Tab exits menus normally, and dismissing an
+  overlay restores its opener. [PR #62](https://github.com/kcosr/herdr-web/pull/62), based on work
+  proposed by [shuv (@shuv1337)](https://github.com/shuv1337) in
+  [PR #37](https://github.com/kcosr/herdr-web/pull/37).
+
+## [0.4.2] - 2026-08-15
+
+### Added
+
+- Added `npm run dev` to supervise the bridge and Vite HMR server together, wait for bridge
+  readiness, proxy API and WebSocket traffic, and stop both processes cleanly.
+  [PR #57](https://github.com/kcosr/herdr-web/pull/57), based on work proposed by
+  [Hopkins (@LosEcher)](https://github.com/LosEcher) in
+  [PR #51](https://github.com/kcosr/herdr-web/pull/51).
+- Declared the existing Herdr logo as the browser favicon.
+  [PR #56](https://github.com/kcosr/herdr-web/pull/56), contributed by
+  [Craig P. Motlin (@motlin)](https://github.com/motlin).
+
+### Changed
+
+- Static bridge responses now explicitly revalidate HTML and public files while caching successful
+  content-hashed Vite assets as immutable. Error responses are never marked immutable.
+  [PR #57](https://github.com/kcosr/herdr-web/pull/57), based on work proposed by
+  [Hopkins (@LosEcher)](https://github.com/LosEcher) in
+  [PR #51](https://github.com/kcosr/herdr-web/pull/51).
+
+### Fixed
+
+- Fixed CJK and other IME terminal input so preedit stays local, committed text is sent exactly
+  once, canceled composition is discarded, and the candidate window and visible preedit stay near
+  the terminal cursor. [PR #58](https://github.com/kcosr/herdr-web/pull/58), based on work proposed
+  by [Hopkins (@LosEcher)](https://github.com/LosEcher) in
+  [PR #51](https://github.com/kcosr/herdr-web/pull/51).
+- Fixed icons rendering slightly off-center in square icon buttons (sidebar section header
+  actions and the tab bar's new-tab button) by resetting the user-agent button padding, and
+  removed the per-icon transform that compensated for it.
+  [PR #55](https://github.com/kcosr/herdr-web/pull/55), contributed by
+  [Philippe SEGATORI (@tigitz)](https://github.com/tigitz).
+
+## [0.4.1] - 2026-08-05
+
+### Breaking Changes
+
+- Herdr `v0.8.0` or newer with terminal protocol exactly `19` is now required. The bridge rejects
+  the previous protocol `17` baseline and other unreviewed protocols instead of attempting a
+  backward-compatible wire fallback. [PR #48](https://github.com/kcosr/herdr-web/pull/48)
+
+### Added
+
+- Added a contextual Move Space mode to the Spaces menu. The selected space card becomes draggable,
+  retains a cancel control and arrow/Home/End keyboard support, mutes unrelated sidebar actions
+  until the move is completed or canceled, and moves worktree groups atomically within their host's
+  canonical workspace order. [PR #48](https://github.com/kcosr/herdr-web/pull/48)
+- Added persistent expand/collapse controls to grouped Agents, Tabs, and Spaces headers, including
+  independent, visually nested host and workspace controls for Host + workspace grouping and a
+  bulk expand/collapse control for the current Agents or Tabs list.
+  [PR #47](https://github.com/kcosr/herdr-web/pull/47)
+- Added a default-off Display setting that combines same-named workspaces across hosts when using
+  Workspace grouping, while retaining host context on each agent or pane row.
+  [PR #47](https://github.com/kcosr/herdr-web/pull/47)
+
+### Changed
+
+- Refreshed the minimal vendored Herdr compatibility sources to the `v0.8.0`/protocol `19`
+  baseline, including the current API schemas, terminal wire definitions, and input model shims.
+  [PR #48](https://github.com/kcosr/herdr-web/pull/48)
+- Follow Herdr's canonical workspace order when atomic worktree groups are reordered.
+  [PR #48](https://github.com/kcosr/herdr-web/pull/48)
+- Simplified Workspace grouping in the Agents and Tabs sidebars to show workspace-only group
+  headers and move host context into each detail row. Host + workspace grouping keeps its nested
+  host and workspace headers. [PR #47](https://github.com/kcosr/herdr-web/pull/47)
+
+### Fixed
+
+- Fixed built-in agent launches against Herdr `v0.8.0` by waiting for a newly created pane's shell
+  to become available before starting the managed agent.
+  [PR #48](https://github.com/kcosr/herdr-web/pull/48)
+
+## [0.4.0] - 2026-07-30
+
+### Breaking Changes
+
+- Herdr `v0.7.5` or newer with terminal protocol exactly `17` is now required. The bridge rejects
+  older protocol `16` daemons and unreviewed newer protocols rather than attempting a
+  backward-compatible wire fallback. [PR #45](https://github.com/kcosr/herdr-web/pull/45)
+- Removed the obsolete `custom_status` field from bridge snapshots and activity events; agent
+  presentation now uses Herdr's `state_labels`, title, display-agent, and status fields.
+  [PR #45](https://github.com/kcosr/herdr-web/pull/45)
+- Changed the default ungrouped Tabs and Spaces sidebar presentation to compact rows with inline
+  host, Space, and tab context instead of contextual headers. Agent panes in Tabs also use the
+  Agents row presentation and agent-aware ordering by default. Choose a grouping mode to restore
+  contextual headers, or disable Agent features in Tabs to restore generic pane rows and the
+  original tab order. [PR #41](https://github.com/kcosr/herdr-web/pull/41)
+
+### Added
+
+- Added a default-on client-local Sync navigation setting. Browser tabs and windows with sync off
+  can view different panes through the same bridge without publishing or following shared pane
+  selection or changing Herdr's focused tab through ordinary navigation.
+  [PR #42](https://github.com/kcosr/herdr-web/pull/42)
+- Added default-on Agent features in Tabs, including consistent Agents row metadata and pin
+  placement, agent-aware sorting, and pinned-only and active-only filters. Non-agent tabs remain
+  visible at the bottom of agent-aware sorts; disabling the setting restores generic pane rows.
+  [PR #41](https://github.com/kcosr/herdr-web/pull/41)
+- Added multi-host Spaces controls: Spaces can be shown as a flat list with host context or grouped
+  under host headers, and the default-on Multi-host Space selection setting can be disabled to limit
+  Space-scoped Agents, Tabs, and Notes to one globally selected Space. All scope remains unchanged.
+  [PR #41](https://github.com/kcosr/herdr-web/pull/41)
+
+### Changed
+
+- Refreshed the minimal vendored Herdr compatibility sources to the `v0.7.5`/protocol `17` baseline,
+  including the current API schemas and terminal wire definitions.
+  [PR #45](https://github.com/kcosr/herdr-web/pull/45)
+- Updated launching for Herdr `v0.7.5`: built-in agents use the managed `agent.start` flow after the
+  destination pane is created. The bridge waits for interactive readiness and rolls back its new
+  tab or pane after rejection, early process exit, or timeout. Custom launcher presets continue to
+  execute their exact configured `argv`. [PR #45](https://github.com/kcosr/herdr-web/pull/45)
+- Store the Sync navigation setting browser-wide while keeping sync-off pane selections only in
+  memory. The app no longer creates per-tab navigation storage records.
+  [PR #43](https://github.com/kcosr/herdr-web/pull/43)
+- Simplified agent-row metadata by removing generic status text already communicated by the status
+  indicator and badge, while retaining bridge-defined state labels.
+  [PR #41](https://github.com/kcosr/herdr-web/pull/41)
+
+### Fixed
+
+- Cleared and remounted the mobile terminal command field after Send or Stage so stale native input
+  cannot prefix the next command. [PR #44](https://github.com/kcosr/herdr-web/pull/44), with an
+  earlier implementation contributed by
+  [Alexander Makarov (@AlexanderMakarov)](https://github.com/AlexanderMakarov) in
+  [PR #38](https://github.com/kcosr/herdr-web/pull/38).
+- Fixed client-local navigation synchronization across reloads, reconnects, lagging snapshots, and
+  rapid multi-client selection races. Sync-off split navigation now stays local, and independent
+  clients no longer rewrite shared navigation persistence. After a bridge restart, the focused
+  Herdr pane now seeds shared navigation so synced clients immediately converge.
+  [PR #43](https://github.com/kcosr/herdr-web/pull/43)
+
 ## [0.3.3] - 2026-07-19
 
 ### Added

@@ -1,27 +1,46 @@
 import { describe, expect, it } from "vitest";
 import {
+  areAllVisibleSidebarGroupsCollapsed,
+  agentSubtitle,
+  applySnapshotOverlays,
+  buildCombinedTabWorkspaceGroups,
+  buildScopedAgentGroups,
   buildVisibleAgentPaneEntries,
+  buildVisibleScopedWorkspaces,
   buildVisibleScopedNotes,
+  buildVisibleTabEntries,
+  buildVisibleTabWorkspaceGroups,
   canAddNoteFromPaneMenu,
+  filterCollapsedAgentPaneEntries,
+  filterCollapsedTabEntries,
   mergeCreatedPaneNoteList,
   mergePendingPaneNotesIntoList,
   noteDraftStorageKey,
-  buildVisibleScopedWorkspaces,
-  buildVisibleTabEntries,
+  parseCombineMatchingWorkspaceNames,
+  parseCollapsedSidebarGroups,
   isInFlightNoteSaveVisible,
+  launcherEmptyMessage,
   menuItems,
   nextVisibleAgentPaneEntry,
   nextVisibleTabEntry,
   resolveInitialSelectedBridgeId,
+  resolveEffectiveSpaceGroup,
   resolveCreatedPaneNoteForTarget,
   paneNoteListContains,
   shouldBlockDirtyNoteAutosave,
   shouldCollapseHostScope,
+  shouldRenderAgentRowInTabs,
+  sidebarRowContext,
+  shouldOfferSpaceHostGrouping,
+  shouldShowSidebarSort,
+  shouldShowTabDivider,
   shouldShowLastStatusChangeSort,
+  sidebarGroupCollapseKey,
   sortScopedAgentPanes,
   stableBridgeRefreshOffsetMs,
+  updateCollapsedSidebarGroups,
 } from "./App";
-import type { BridgeConnectionView } from "./App";
+import type { BridgeConnectionRef, BridgeConnectionView } from "./App";
 import type { BridgeRuntime } from "./bridge";
 import { agentActivityKey } from "./agentActivity";
 import {
@@ -40,6 +59,46 @@ describe("App connection guards", () => {
     expect(currentConnectionSnapshot(snapshot, "configured:a", "configured:b")).toBeNull();
   });
 
+  it("keeps a recent selection event over a lagging snapshot until the snapshot catches up", () => {
+    const data = multiPaneSnapshot(
+      [workspace("workspace-a", 1)],
+      [
+        pane("pane-a", "workspace-a", "tab-a"),
+        pane("pane-b", "workspace-a", "tab-a"),
+      ],
+    );
+    const ref: BridgeConnectionRef = {
+      connectionKey: "bridge-a",
+      snapshot: data,
+      activityGeneration: 1,
+      resyncBarrierGeneration: 1,
+      activityLog: [],
+      sharedSelectionOverride: {
+        paneId: "pane-b",
+        expiresAtMs: Date.now() + 2000,
+      },
+    };
+
+    expect(
+      applySnapshotOverlays({ ...data, selected_pane_id: "pane-a" }, ref, 1)
+        .selected_pane_id,
+    ).toBe("pane-b");
+    expect(ref.sharedSelectionOverride?.paneId).toBe("pane-b");
+
+    expect(
+      applySnapshotOverlays({ ...data, selected_pane_id: "pane-b" }, ref, 1)
+        .selected_pane_id,
+    ).toBe("pane-b");
+    expect(ref.sharedSelectionOverride).toBeNull();
+
+    ref.sharedSelectionOverride = { paneId: "pane-b", expiresAtMs: 0 };
+    expect(
+      applySnapshotOverlays({ ...data, selected_pane_id: "pane-a" }, ref, 1)
+        .selected_pane_id,
+    ).toBe("pane-a");
+    expect(ref.sharedSelectionOverride).toBeNull();
+  });
+
   it("rejects async results from stale backend connections", () => {
     expect(isConnectionResultCurrent("configured:a", "configured:a")).toBe(true);
     expect(isConnectionResultCurrent("configured:b", "configured:a")).toBe(false);
@@ -47,6 +106,53 @@ describe("App connection guards", () => {
 });
 
 describe("App multi-bridge helpers", () => {
+  it("reports actionable launcher unavailability and load errors", () => {
+    expect(launcherEmptyMessage(false, false, null)).toBe(
+      "Bridge is not ready. Close this dialog and reconnect.",
+    );
+    expect(launcherEmptyMessage(true, false, null)).toBe(
+      "Launching is unavailable on this bridge. Update the bridge and reconnect.",
+    );
+    expect(
+      launcherEmptyMessage(true, true, {
+        connectionKey: "bridge-a",
+        response: null,
+        loadState: "error",
+        error: "request timed out",
+      }),
+    ).toBe(
+      "Could not load launcher presets: request timed out. Close and reopen this dialog to retry.",
+    );
+  });
+
+  it("keeps agent subtitles compact by omitting redundant status text", () => {
+    expect(
+      agentSubtitle(
+        {
+          ...pane("agent", "workspace-a", "tab-a", "working"),
+          state_labels: { working: "Reviewing" },
+          cwd: "/work/project",
+        },
+        workspace("workspace-a", 1),
+        "tab-a",
+        "host-a",
+      ),
+    ).toBe("host-a · workspace-a · tab-a · project · Reviewing");
+    expect(
+      agentSubtitle({
+        ...pane("agent", "workspace-a", "tab-a", "working"),
+        state_labels: { working: "Running" },
+      }),
+    ).toBe("Running");
+    expect(agentSubtitle(pane("agent", "workspace-a", "tab-a", "working"))).toBe("");
+    expect(
+      agentSubtitle({
+        ...pane("agent", "workspace-a", "tab-a", "unknown"),
+        state_labels: { unknown: "Connecting" },
+      }),
+    ).toBe("Connecting");
+  });
+
   it("uses display preference selection before store fallback", () => {
     expect(resolveInitialSelectedBridgeId("bridge-b", ["bridge-a", "bridge-b"], "bridge-a")).toBe(
       "bridge-b",
@@ -67,12 +173,71 @@ describe("App multi-bridge helpers", () => {
     expect(shouldCollapseHostScope("selected", 1, true)).toBe(false);
   });
 
+  it("offers Spaces host grouping only when all of multiple hosts are visible", () => {
+    expect(shouldOfferSpaceHostGrouping("all", 2)).toBe(true);
+    expect(shouldOfferSpaceHostGrouping("all", 1)).toBe(false);
+    expect(shouldOfferSpaceHostGrouping("selected", 2)).toBe(false);
+    expect(resolveEffectiveSpaceGroup("host", "all", 2)).toBe("host");
+    expect(resolveEffectiveSpaceGroup("host", "all", 1)).toBe("none");
+    expect(resolveEffectiveSpaceGroup("host", "selected", 2)).toBe("none");
+  });
+
   it("keeps bridge refresh offsets deterministic and inside the fallback interval", () => {
     const first = stableBridgeRefreshOffsetMs("bridge-a");
     expect(stableBridgeRefreshOffsetMs("bridge-a")).toBe(first);
     expect(first).toBeGreaterThanOrEqual(0);
     expect(first).toBeLessThan(10000);
     expect(stableBridgeRefreshOffsetMs("bridge-b")).toBeLessThan(10000);
+  });
+
+  it("keeps ungrouped tab lists flat even for multi-tab and split-pane workspaces", () => {
+    expect(shouldShowTabDivider("none", 3, 2)).toBe(false);
+    expect(shouldShowTabDivider("workspace", 3, 1)).toBe(true);
+    expect(shouldShowTabDivider("host", 1, 2)).toBe(true);
+    expect(shouldShowTabDivider("hostWorkspace", 1, 1)).toBe(false);
+  });
+
+  it("uses the Agents classifier only when agent rendering in Tabs is enabled", () => {
+    const agentPane = {
+      ...pane("agent", "workspace-a", "tab-a", "unknown"),
+      agent: "codex",
+    };
+    expect(shouldRenderAgentRowInTabs(agentPane, true)).toBe(true);
+    expect(shouldRenderAgentRowInTabs(agentPane, false)).toBe(false);
+    expect(
+      shouldRenderAgentRowInTabs(pane("shell", "workspace-a", "tab-a", "unknown"), true),
+    ).toBe(false);
+    expect(
+      shouldRenderAgentRowInTabs(
+        {
+          ...pane("state-label", "workspace-a", "tab-a", "unknown"),
+          state_labels: { idle: "Waiting" },
+        },
+        true,
+      ),
+    ).toBe(true);
+    expect(
+      shouldRenderAgentRowInTabs(
+        { ...pane("shell-title", "workspace-a", "tab-a", "unknown"), title: "vim" },
+        true,
+      ),
+    ).toBe(true);
+    expect(
+      shouldRenderAgentRowInTabs(
+        {
+          ...pane("terminal-title", "workspace-a", "tab-a", "unknown"),
+          terminal_title: "vim README.md",
+        },
+        true,
+      ),
+    ).toBe(false);
+  });
+
+  it("shows agent sort options in Tabs only when agent features are enabled", () => {
+    expect(shouldShowSidebarSort("agents", false)).toBe(true);
+    expect(shouldShowSidebarSort("tabs", true)).toBe(true);
+    expect(shouldShowSidebarSort("tabs", false)).toBe(false);
+    expect(shouldShowSidebarSort("notes", true)).toBe(false);
   });
 
   it("sorts scoped agents by bridge display order, workspace, tab, then scoped pane id", () => {
@@ -123,6 +288,60 @@ describe("App multi-bridge helpers", () => {
         (item) => `${item.bridgeId}:${item.pane.pane_id}`,
       ),
     ).toEqual(["bridge-a:pane-a", "bridge-b:pane-b"]);
+  });
+
+  it("limits Space scope to one host when multi-host Space selection is disabled", () => {
+    const bridgeViews = [
+      bridgeView(
+        "bridge-a",
+        bridgeSnapshot("workspace-a", "tab-a", pane("pane-a", "workspace-a", "tab-a")),
+      ),
+      bridgeView(
+        "bridge-b",
+        bridgeSnapshot("workspace-b", "tab-b", pane("pane-b", "workspace-b", "tab-b")),
+      ),
+    ];
+
+    const scopedWorkspaces = buildVisibleScopedWorkspaces(
+      bridgeViews,
+      "bridge-a",
+      "all",
+      "space",
+      bridgeViews[0].snapshot?.workspaces[0] ?? null,
+      { "bridge-a": "workspace-a", "bridge-b": "workspace-b" },
+      false,
+    );
+
+    expect(
+      scopedWorkspaces.map((entry) => `${entry.bridgeId}:${entry.workspace.workspace_id}`),
+    ).toEqual(["bridge-a:workspace-a"]);
+  });
+
+  it("keeps every workspace in All scope when multi-host Space selection is disabled", () => {
+    const bridgeViews = [
+      bridgeView(
+        "bridge-a",
+        bridgeSnapshot("workspace-a", "tab-a", pane("pane-a", "workspace-a", "tab-a")),
+      ),
+      bridgeView(
+        "bridge-b",
+        bridgeSnapshot("workspace-b", "tab-b", pane("pane-b", "workspace-b", "tab-b")),
+      ),
+    ];
+
+    const scopedWorkspaces = buildVisibleScopedWorkspaces(
+      bridgeViews,
+      "bridge-a",
+      "all",
+      "all",
+      bridgeViews[0].snapshot?.workspaces[0] ?? null,
+      { "bridge-a": "workspace-a", "bridge-b": "workspace-b" },
+      false,
+    );
+
+    expect(
+      scopedWorkspaces.map((entry) => `${entry.bridgeId}:${entry.workspace.workspace_id}`),
+    ).toEqual(["bridge-a:workspace-a", "bridge-b:workspace-b"]);
   });
 
   it("limits visible shortcut entries to the selected host in selected-host scope", () => {
@@ -183,6 +402,267 @@ describe("App multi-bridge helpers", () => {
         "attention",
       ).map((item) => `${item.bridgeId}:${item.pane.pane_id}`),
     ).toEqual(["bridge-a:pane-a", "bridge-b:pane-b"]);
+  });
+
+  it("uses workspace-only headers when grouping workspaces across hosts", () => {
+    const sharedWorkspace = workspace("shared-workspace", 1);
+    const entries = [
+      entry("host-a", 0, sharedWorkspace, pane("pane-a", "shared-workspace", "tab-a"), 1),
+      entry(
+        "host-b",
+        1,
+        sharedWorkspace,
+        pane("pane-b", "shared-workspace", "tab-b", "blocked"),
+        1,
+      ),
+    ];
+    const groups = buildScopedAgentGroups(entries, "workspace");
+
+    expect(groups.map((group) => group.label)).toEqual([
+      "shared-workspace",
+      "shared-workspace",
+    ]);
+
+    const combinedGroups = buildScopedAgentGroups(entries, "workspace", true);
+    expect(combinedGroups).toHaveLength(1);
+    expect(combinedGroups[0]).toMatchObject({
+      key: "workspace-name:shared-workspace",
+      label: "shared-workspace",
+      status: "blocked",
+    });
+    expect(combinedGroups[0].panes.map((item) => item.bridgeId)).toEqual(["host-a", "host-b"]);
+  });
+
+  it("combines matching Tab workspace groups across hosts without merging their entries", () => {
+    const bridgeViews = [
+      bridgeView(
+        "host-a",
+        bridgeSnapshot("shared-workspace", "tab-a", pane("pane-a", "shared-workspace", "tab-a")),
+      ),
+      bridgeView(
+        "host-b",
+        bridgeSnapshot("shared-workspace", "tab-b", pane("pane-b", "shared-workspace", "tab-b")),
+      ),
+    ];
+    const scopedWorkspaces = buildVisibleScopedWorkspaces(
+      bridgeViews,
+      "host-a",
+      "all",
+      "all",
+      null,
+      {},
+    );
+
+    const combinedGroups = buildCombinedTabWorkspaceGroups(
+      buildVisibleTabWorkspaceGroups(scopedWorkspaces),
+    );
+
+    expect(combinedGroups).toHaveLength(1);
+    expect(combinedGroups[0].label).toBe("shared-workspace");
+    expect(combinedGroups[0].workspaces.map((group) => group.bridgeId)).toEqual([
+      "host-a",
+      "host-b",
+    ]);
+
+    const bridgeViewsWithInterleavedWorkspace = [
+      bridgeView(
+        "host-a",
+        multiPaneSnapshot(
+          [workspace("shared-workspace", 1), workspace("unique-workspace", 2)],
+          [
+            pane("pane-a", "shared-workspace", "tab-a"),
+            pane("pane-unique", "unique-workspace", "tab-unique"),
+          ],
+        ),
+      ),
+      bridgeViews[1],
+    ];
+    const interleavedWorkspaces = buildVisibleScopedWorkspaces(
+      bridgeViewsWithInterleavedWorkspace,
+      "host-a",
+      "all",
+      "all",
+      null,
+      {},
+    );
+    expect(
+      buildVisibleTabEntries(
+        interleavedWorkspaces,
+        bridgeViewsWithInterleavedWorkspace,
+        "all",
+        "workspace",
+        new Set(),
+        false,
+        true,
+        "workspace",
+        new Map(),
+        false,
+        true,
+      ).map((item) => `${item.bridgeId}:${item.tab.tab_id}`),
+    ).toEqual(["host-a:tab-a", "host-b:tab-b", "host-a:tab-unique"]);
+  });
+
+  it("keeps the matching-name preference default-off and boolean-only", () => {
+    expect(parseCombineMatchingWorkspaceNames(undefined)).toBe(false);
+    expect(parseCombineMatchingWorkspaceNames("true")).toBe(false);
+    expect(parseCombineMatchingWorkspaceNames("true", true)).toBe(true);
+    expect(parseCombineMatchingWorkspaceNames(false, true)).toBe(false);
+    expect(parseCombineMatchingWorkspaceNames(true)).toBe(true);
+  });
+
+  it("parses persisted collapsed groups as a bounded unique string list", () => {
+    expect(parseCollapsedSidebarGroups(undefined)).toEqual([]);
+    expect(parseCollapsedSidebarGroups(undefined, ["existing-group"])).toEqual([
+      "existing-group",
+    ]);
+    expect(parseCollapsedSidebarGroups(["group-a", 3, "", "group-a", "group-b"])).toEqual([
+      "group-a",
+      "group-b",
+    ]);
+    expect(parseCollapsedSidebarGroups(Array.from({ length: 5000 }, (_, index) => `g-${index}`)))
+      .toHaveLength(4096);
+  });
+
+  it("collapses and expands a visible set of sidebar groups without changing other groups", () => {
+    expect(
+      updateCollapsedSidebarGroups(
+        ["other-group", "visible-a"],
+        ["visible-a", "visible-b"],
+        true,
+      ),
+    ).toEqual(["other-group", "visible-a", "visible-b"]);
+    expect(
+      updateCollapsedSidebarGroups(
+        ["other-group", "visible-a", "visible-b"],
+        ["visible-a", "visible-b"],
+        false,
+      ),
+    ).toEqual(["other-group"]);
+
+    const manyVisibleGroups = Array.from({ length: 300 }, (_, index) => `visible-${index}`);
+    const collapsed = updateCollapsedSidebarGroups(
+      ["other-group"],
+      manyVisibleGroups,
+      true,
+    );
+    expect(collapsed).toEqual(["other-group", ...manyVisibleGroups]);
+    expect(updateCollapsedSidebarGroups(collapsed, manyVisibleGroups, false)).toEqual([
+      "other-group",
+    ]);
+  });
+
+  it("uses visible host state to choose the nested bulk group action", () => {
+    const hostKey = sidebarGroupCollapseKey("agents", "hostWorkspace", "host", "bridge-a");
+    const workspaceKey = sidebarGroupCollapseKey(
+      "agents",
+      "hostWorkspace",
+      "workspace",
+      "bridge-a:workspace-a",
+    );
+
+    expect(
+      areAllVisibleSidebarGroupsCollapsed(
+        [hostKey, workspaceKey],
+        "hostWorkspace",
+        "all",
+        new Set([hostKey]),
+      ),
+    ).toBe(true);
+    expect(
+      areAllVisibleSidebarGroupsCollapsed(
+        [hostKey, workspaceKey],
+        "hostWorkspace",
+        "all",
+        new Set([workspaceKey]),
+      ),
+    ).toBe(false);
+    expect(
+      areAllVisibleSidebarGroupsCollapsed(
+        [workspaceKey],
+        "workspace",
+        "all",
+        new Set([workspaceKey]),
+      ),
+    ).toBe(true);
+  });
+
+  it("hides keyboard-navigation entries inside collapsed nested groups", () => {
+    const bridgeViews = agentParityBridgeViews();
+    const scopedWorkspaces = buildVisibleScopedWorkspaces(
+      bridgeViews,
+      "bridge-a",
+      "all",
+      "all",
+      null,
+      {},
+    );
+    const agentEntries = buildVisibleAgentPaneEntries(
+      scopedWorkspaces,
+      bridgeViews,
+      "all",
+      "hostWorkspace",
+      "workspace",
+    );
+    const collapsedAgentGroups = new Set([
+      sidebarGroupCollapseKey("agents", "hostWorkspace", "workspace", "bridge-a:workspace-a"),
+      sidebarGroupCollapseKey("agents", "hostWorkspace", "host", "bridge-b"),
+    ]);
+    expect(
+      filterCollapsedAgentPaneEntries(
+        agentEntries,
+        "hostWorkspace",
+        "all",
+        false,
+        collapsedAgentGroups,
+      ).map((entry) => `${entry.bridgeId}:${entry.pane.pane_id}`),
+    ).toEqual(["bridge-a:pane-b"]);
+
+    const tabEntries = buildVisibleTabEntries(
+      scopedWorkspaces,
+      bridgeViews,
+      "all",
+      "workspace",
+    );
+    const collapsedTabGroups = new Set([
+      sidebarGroupCollapseKey(
+        "tabs",
+        "workspace",
+        "workspace",
+        "workspace-name:workspace-a",
+      ),
+    ]);
+    expect(
+      filterCollapsedTabEntries(
+        tabEntries,
+        "workspace",
+        "all",
+        true,
+        collapsedTabGroups,
+      ).map((entry) => `${entry.bridgeId}:${entry.tab.tab_id}`),
+    ).toEqual(["bridge-a:tab-b"]);
+  });
+
+  it("moves host context into rows only for flat and workspace grouping", () => {
+    expect(sidebarRowContext("none", "all", "host-a", "workspace-a")).toEqual({
+      bridgeLabel: "host-a",
+      workspaceLabel: "workspace-a",
+    });
+    expect(sidebarRowContext("host", "all", "host-a", "workspace-a")).toEqual({
+      bridgeLabel: undefined,
+      workspaceLabel: "workspace-a",
+    });
+    expect(sidebarRowContext("workspace", "all", "host-a", "workspace-a")).toEqual({
+      bridgeLabel: "host-a",
+      workspaceLabel: undefined,
+    });
+    expect(sidebarRowContext("hostWorkspace", "all", "host-a", "workspace-a")).toEqual({
+      bridgeLabel: undefined,
+      workspaceLabel: undefined,
+    });
+    expect(sidebarRowContext("workspace", "selected", "host-a", "workspace-a")).toEqual({
+      bridgeLabel: undefined,
+      workspaceLabel: undefined,
+    });
   });
 
   it("allows flat all-host agent shortcuts to follow attention priority across hosts", () => {
@@ -513,6 +993,19 @@ describe("App multi-bridge helpers", () => {
     expect(menuItems("tab", false, false, false, false, "pane", true)).toEqual([]);
   });
 
+  it("offers contextual workspace moving only when the bridge supports it", () => {
+    expect(menuItems("space", false, true, false, false, "pane", false, true)).toEqual([
+      { key: "rename", label: "Rename" },
+      { key: "newtab", label: "New tab" },
+      { key: "reorder", label: "Move space" },
+      { key: "close", label: "Close space", danger: true },
+    ]);
+    expect(menuItems("space", false, true)).not.toContainEqual({
+      key: "reorder",
+      label: "Move space",
+    });
+  });
+
   it("requires a current note-capable pane before showing add-note", () => {
     const eligible = {
       kind: "pane" as const,
@@ -666,6 +1159,230 @@ describe("App multi-bridge helpers", () => {
     ).toEqual(["bridge-a:tab-a", "bridge-b:tab-b"]);
   });
 
+  it("sorts agent tabs first by attention while keeping plain tabs stable at the bottom", () => {
+    const snapshot = multiPaneSnapshot(
+      [workspace("workspace-a", 1)],
+      [
+        pane("shell-a", "workspace-a", "tab-shell-a", "unknown"),
+        pane("idle", "workspace-a", "tab-idle", "idle"),
+        pane("blocked", "workspace-a", "tab-blocked", "blocked"),
+        pane("shell-b", "workspace-a", "tab-shell-b", "unknown"),
+      ],
+    );
+    const bridgeViews = [bridgeView("bridge-a", snapshot)];
+    const scopedWorkspaces = buildVisibleScopedWorkspaces(
+      bridgeViews,
+      "bridge-a",
+      "selected",
+      "all",
+      null,
+      {},
+    );
+
+    expect(
+      buildVisibleTabEntries(
+        scopedWorkspaces,
+        bridgeViews,
+        "selected",
+        "none",
+        new Set(),
+        false,
+        true,
+        "attention",
+      ).map((entry) => entry.tab.tab_id),
+    ).toEqual(["tab-blocked", "tab-idle", "tab-shell-a", "tab-shell-b"]);
+    expect(
+      buildVisibleTabEntries(
+        scopedWorkspaces,
+        bridgeViews,
+        "selected",
+        "none",
+        new Set(),
+        false,
+        false,
+        "attention",
+      ).map((entry) => entry.tab.tab_id),
+    ).toEqual(["tab-shell-a", "tab-idle", "tab-blocked", "tab-shell-b"]);
+  });
+
+  it("sorts agent tabs across workspace boundaries when grouping by host", () => {
+    const snapshot = multiPaneSnapshot(
+      [workspace("workspace-a", 1), workspace("workspace-b", 2)],
+      [
+        pane("shell", "workspace-a", "tab-shell", "unknown"),
+        pane("blocked", "workspace-b", "tab-blocked", "blocked"),
+      ],
+    );
+    const bridgeViews = [bridgeView("bridge-a", snapshot)];
+    const scopedWorkspaces = buildVisibleScopedWorkspaces(
+      bridgeViews,
+      "bridge-a",
+      "selected",
+      "all",
+      null,
+      {},
+    );
+
+    expect(
+      buildVisibleTabEntries(
+        scopedWorkspaces,
+        bridgeViews,
+        "selected",
+        "host",
+        new Set(),
+        false,
+        true,
+        "attention",
+      ).map((entry) => entry.tab.tab_id),
+    ).toEqual(["tab-blocked", "tab-shell"]);
+  });
+
+  it("shows only active agents when the Tabs active-only filter is enabled", () => {
+    const snapshot = multiPaneSnapshot(
+      [workspace("workspace-a", 1)],
+      [
+        pane("shell", "workspace-a", "tab-shell", "unknown"),
+        pane("idle", "workspace-a", "tab-idle", "idle"),
+        pane("working", "workspace-a", "tab-working", "working"),
+        pane("blocked", "workspace-a", "tab-blocked", "blocked"),
+      ],
+    );
+    const bridgeViews = [bridgeView("bridge-a", snapshot)];
+    const scopedWorkspaces = buildVisibleScopedWorkspaces(
+      bridgeViews,
+      "bridge-a",
+      "selected",
+      "all",
+      null,
+      {},
+    );
+
+    expect(
+      buildVisibleTabEntries(
+        scopedWorkspaces,
+        bridgeViews,
+        "selected",
+        "none",
+        new Set(),
+        false,
+        true,
+        "workspace",
+        new Map(),
+        true,
+      ).flatMap((entry) => entry.panes.map((paneInfo) => paneInfo.pane_id)),
+    ).toEqual(["working", "blocked"]);
+  });
+
+  it("sorts agent tabs within workspace boundaries for workspace grouping", () => {
+    const snapshot = multiPaneSnapshot(
+      [workspace("workspace-a", 1), workspace("workspace-b", 2)],
+      [
+        pane("shell-a", "workspace-a", "tab-shell-a", "unknown"),
+        pane("blocked", "workspace-a", "tab-blocked", "blocked"),
+        pane("shell-b", "workspace-b", "tab-shell-b", "unknown"),
+        pane("working", "workspace-b", "tab-working", "working"),
+      ],
+    );
+    const bridgeViews = [bridgeView("bridge-a", snapshot)];
+    const scopedWorkspaces = buildVisibleScopedWorkspaces(
+      bridgeViews,
+      "bridge-a",
+      "selected",
+      "all",
+      null,
+      {},
+    );
+
+    expect(
+      buildVisibleTabEntries(
+        scopedWorkspaces,
+        bridgeViews,
+        "selected",
+        "workspace",
+        new Set(),
+        false,
+        true,
+        "attention",
+      ).map((entry) => `${entry.workspace.workspace_id}:${entry.tab.tab_id}`),
+    ).toEqual([
+      "workspace-a:tab-blocked",
+      "workspace-a:tab-shell-a",
+      "workspace-b:tab-working",
+      "workspace-b:tab-shell-b",
+    ]);
+  });
+
+  it("omits workspace groups emptied by the Tabs active-only filter", () => {
+    const snapshot = multiPaneSnapshot(
+      [workspace("workspace-a", 1), workspace("workspace-b", 2)],
+      [
+        pane("idle", "workspace-a", "tab-idle", "idle"),
+        pane("blocked", "workspace-b", "tab-blocked", "blocked"),
+      ],
+    );
+    const bridgeViews = [bridgeView("bridge-a", snapshot)];
+    const scopedWorkspaces = buildVisibleScopedWorkspaces(
+      bridgeViews,
+      "bridge-a",
+      "selected",
+      "all",
+      null,
+      {},
+    );
+
+    expect(
+      buildVisibleTabWorkspaceGroups(
+        scopedWorkspaces,
+        new Set(),
+        false,
+        true,
+        "workspace",
+        new Map(),
+        true,
+      ).map((group) => group.workspace.workspace_id),
+    ).toEqual(["workspace-b"]);
+  });
+
+  it("sorts tabs by their most recently active agent pane", () => {
+    const snapshot = multiPaneSnapshot(
+      [workspace("workspace-a", 1)],
+      [
+        pane("agent-a-old", "workspace-a", "tab-a", "idle"),
+        pane("agent-a-new", "workspace-a", "tab-a", "idle"),
+        pane("agent-b", "workspace-a", "tab-b", "idle"),
+        pane("shell", "workspace-a", "tab-shell", "unknown"),
+      ],
+    );
+    const bridgeViews = [bridgeView("bridge-a", snapshot)];
+    const scopedWorkspaces = buildVisibleScopedWorkspaces(
+      bridgeViews,
+      "bridge-a",
+      "selected",
+      "all",
+      null,
+      {},
+    );
+    const activity = new Map([
+      [agentActivityKey("bridge-a", "agent-a-old", "agent-a-old-terminal"), 100],
+      [agentActivityKey("bridge-a", "agent-a-new", "agent-a-new-terminal"), 500],
+      [agentActivityKey("bridge-a", "agent-b", "agent-b-terminal"), 300],
+    ]);
+
+    expect(
+      buildVisibleTabEntries(
+        scopedWorkspaces,
+        bridgeViews,
+        "selected",
+        "none",
+        new Set(),
+        false,
+        true,
+        "lastStatusChange",
+        activity,
+      ).map((entry) => entry.tab.tab_id),
+    ).toEqual(["tab-a", "tab-b", "tab-shell"]);
+  });
+
   it("filters tab entries to pinned panes", () => {
     const snapshot = multiPaneSnapshot(
       [workspace("workspace-a", 1)],
@@ -783,6 +1500,7 @@ describe("App multi-bridge helpers", () => {
         "space",
         bridgeViews[0].snapshot?.workspaces[0] ?? null,
         { "bridge-a": "workspace-a" },
+        true,
         false,
         false,
       ).map((entry) => entry.note.note_id),
@@ -799,8 +1517,40 @@ describe("App multi-bridge helpers", () => {
         { "bridge-a": "workspace-a" },
         true,
         true,
+        true,
       ).map((entry) => entry.note.note_id),
     ).toEqual(["deleted", "archived", "unresolved-other-space", "active-linked"]);
+  });
+
+  it("limits Space-scoped notes to one host when multi-host Space selection is disabled", () => {
+    const bridgeViews = [
+      bridgeView(
+        "bridge-a",
+        bridgeSnapshot("workspace-a", "tab-a", pane("pane-a", "workspace-a", "tab-a")),
+      ),
+      bridgeView(
+        "bridge-b",
+        bridgeSnapshot("workspace-b", "tab-b", pane("pane-b", "workspace-b", "tab-b")),
+      ),
+    ];
+
+    expect(
+      buildVisibleScopedNotes(
+        bridgeViews,
+        {
+          ...notesState("bridge-a", "store-a", [note("note-a", "workspace-a", "linked")]),
+          ...notesState("bridge-b", "store-b", [note("note-b", "workspace-b", "linked")]),
+        },
+        "bridge-a",
+        "all",
+        "space",
+        bridgeViews[0].snapshot?.workspaces[0] ?? null,
+        { "bridge-a": "workspace-a", "bridge-b": "workspace-b" },
+        false,
+        false,
+        false,
+      ).map((entry) => `${entry.bridgeId}:${entry.note.note_id}`),
+    ).toEqual(["bridge-a:note-a"]);
   });
 
   it("dedupes all-host notes by note identity when two bridge profiles point at the same store", () => {
@@ -845,6 +1595,7 @@ describe("App multi-bridge helpers", () => {
         "all",
         null,
         {},
+        true,
         false,
         false,
       ).map((entry) => `${entry.bridgeId}:${entry.note.session_key}:${entry.note.note_id}`),
@@ -870,6 +1621,7 @@ describe("App multi-bridge helpers", () => {
       "all",
       null,
       {},
+      true,
       false,
       false,
     );
@@ -900,6 +1652,7 @@ describe("App multi-bridge helpers", () => {
       "all",
       null,
       {},
+      true,
       false,
       false,
     );

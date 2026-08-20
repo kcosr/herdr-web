@@ -58,7 +58,6 @@ describe("parseActivityMessage", () => {
           agent: "codex",
           title: null,
           display_agent: null,
-          custom_status: null,
           state_labels: {},
         }),
       ),
@@ -102,7 +101,7 @@ describe("parseActivityMessage", () => {
 
 describe("applyActivityMessage", () => {
   it("patches known panes and recomputes aggregate status", () => {
-    const data = snapshot([{ ...pane("pane-1"), title: "Old", custom_status: "old" }]);
+    const data = snapshot([{ ...pane("pane-1"), title: "Old", state_labels: { idle: "Waiting" } }]);
     const result = applyActivityMessage(data, {
       type: "pane.agent_status_changed",
       pane_id: "pane-1",
@@ -111,7 +110,6 @@ describe("applyActivityMessage", () => {
       agent: "codex",
       title: "Reviewing",
       display_agent: "Codex",
-      custom_status: "running tests",
       state_labels: { working: "Running" },
     });
 
@@ -121,7 +119,6 @@ describe("applyActivityMessage", () => {
       agent: "codex",
       title: "Reviewing",
       display_agent: "Codex",
-      custom_status: "running tests",
       state_labels: { working: "Running" },
     });
     expect(result.snapshot?.workspaces[0].agent_status).toBe("working");
@@ -135,7 +132,7 @@ describe("applyActivityMessage", () => {
         agent: "codex",
         title: "Old",
         display_agent: "Codex",
-        custom_status: "old",
+        state_labels: { idle: "Waiting" },
       },
     ]);
     const result = applyActivityMessage(data, {
@@ -146,7 +143,6 @@ describe("applyActivityMessage", () => {
       agent: null,
       title: null,
       display_agent: null,
-      custom_status: null,
       state_labels: {},
     });
 
@@ -154,7 +150,6 @@ describe("applyActivityMessage", () => {
     expect(result.snapshot?.panes[0].agent).toBeUndefined();
     expect(result.snapshot?.panes[0].title).toBeUndefined();
     expect(result.snapshot?.panes[0].display_agent).toBeUndefined();
-    expect(result.snapshot?.panes[0].custom_status).toBeUndefined();
     expect(result.snapshot?.panes[0].state_labels).toEqual({});
   });
 
@@ -170,7 +165,6 @@ describe("applyActivityMessage", () => {
         agent: null,
         title: null,
         display_agent: null,
-        custom_status: null,
         state_labels: {},
       }).status,
     ).toBe("resync");
@@ -196,7 +190,6 @@ describe("replayActivityMessages", () => {
             agent: null,
             title: "old",
             display_agent: null,
-            custom_status: null,
             state_labels: {},
           },
         },
@@ -210,7 +203,6 @@ describe("replayActivityMessages", () => {
             agent: "codex",
             title: "new",
             display_agent: "Codex",
-            custom_status: "running",
             state_labels: { working: "Running" },
           },
         },
@@ -221,7 +213,7 @@ describe("replayActivityMessages", () => {
     expect(replayed.panes[0]).toMatchObject({
       agent_status: "working",
       title: "new",
-      custom_status: "running",
+      state_labels: { working: "Running" },
     });
   });
 
@@ -240,7 +232,6 @@ describe("replayActivityMessages", () => {
             agent: null,
             title: "missing",
             display_agent: null,
-            custom_status: null,
             state_labels: {},
           },
         },
@@ -255,7 +246,6 @@ describe("replayActivityMessages", () => {
             agent: null,
             title: "blocked",
             display_agent: null,
-            custom_status: null,
             state_labels: {},
           },
         },

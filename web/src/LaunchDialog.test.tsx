@@ -96,6 +96,34 @@ describe("LaunchDialog", () => {
     expect(createButton(container).disabled).toBe(true);
   });
 
+  it("selects and titles the first preset when an initially empty list loads", async () => {
+    const { container, onSubmit, root } = await renderDialog([], "Loading launchers…");
+
+    await act(async () => {
+      root.render(
+        <LaunchDialog
+          target={{ mode: "tab", workspaceId: "space-1" }}
+          options={[preset("builtin:codex", "Codex", "codex", true)]}
+          onCancel={vi.fn()}
+          onSubmit={onSubmit}
+        />,
+      );
+    });
+
+    expect(launchOptions(container)[0].getAttribute("aria-checked")).toBe("true");
+    expect(titleInput(container).value).toBe("Codex");
+    expect(createButton(container).disabled).toBe(false);
+
+    await act(async () => {
+      createButton(container).click();
+    });
+    expect(onSubmit).toHaveBeenCalledWith({
+      presetId: "builtin:codex",
+      label: "Codex",
+      title: "Codex",
+    });
+  });
+
   it("reselects the first option when the current preset disappears from the list", async () => {
     const { container, root } = await renderDialog([
       preset("builtin:shell", "Shell", null, true),
@@ -159,6 +187,31 @@ describe("LaunchDialog", () => {
     expect(titleInput(container).value).toBe("reviewer");
     expect(launchOptions(container)[0].getAttribute("aria-checked")).toBe("true");
   });
+
+  it("contains modal focus and restores the opener", async () => {
+    const opener = document.createElement("button");
+    document.body.appendChild(opener);
+    opener.focus();
+    const { container, root } = await renderDialog([
+      preset("builtin:shell", "Shell", null, true),
+    ]);
+    const dialog = requiredElement<HTMLFormElement>(container, '[role="dialog"]');
+    const option = launchOptions(container)[0];
+    const create = createButton(container);
+
+    expect(dialog.getAttribute("aria-labelledby")).toBe(
+      requiredElement(container, ".modal-title").id,
+    );
+    expect(requiredElement<HTMLButtonElement>(container, ".overlay-scrim").tabIndex).toBe(-1);
+    create.focus();
+    await press(create, "Tab");
+    expect(document.activeElement).toBe(option);
+    await press(option, "Tab", { shiftKey: true });
+    expect(document.activeElement).toBe(create);
+
+    await act(async () => root.render(null));
+    expect(document.activeElement).toBe(opener);
+  });
 });
 
 async function renderDialog(options: LauncherPresetOption[], emptyMessage?: string) {
@@ -203,6 +256,25 @@ function createButton(container: HTMLElement) {
     throw new Error("missing create button");
   }
   return button;
+}
+
+async function press(target: HTMLElement, key: string, init: KeyboardEventInit = {}) {
+  const event = new KeyboardEvent("keydown", {
+    ...init,
+    key,
+    bubbles: true,
+    cancelable: true,
+  });
+  await act(async () => target.dispatchEvent(event));
+  return event;
+}
+
+function requiredElement<T extends Element = HTMLElement>(container: ParentNode, selector: string) {
+  const element = container.querySelector<T>(selector);
+  if (!element) {
+    throw new Error(`missing element: ${selector}`);
+  }
+  return element;
 }
 
 function preset(

@@ -51,7 +51,6 @@ export function parseActivityEventData(data: unknown): ActivityParseResult {
     !isNullableString(parsed.agent) ||
     !isNullableString(parsed.title) ||
     !isNullableString(parsed.display_agent) ||
-    !isNullableString(parsed.custom_status) ||
     !isStringRecord(parsed.state_labels)
   ) {
     return { status: "invalid_known" };
@@ -66,7 +65,6 @@ export function parseActivityEventData(data: unknown): ActivityParseResult {
       agent: parsed.agent,
       title: parsed.title,
       display_agent: parsed.display_agent,
-      custom_status: parsed.custom_status,
       state_labels: parsed.state_labels,
     },
   };
@@ -119,7 +117,6 @@ function applyPaneAgentStatusChanged(
           agent: nullableToOptional(message.agent),
           title: nullableToOptional(message.title),
           display_agent: nullableToOptional(message.display_agent),
-          custom_status: nullableToOptional(message.custom_status),
           state_labels: message.state_labels,
         }
       : pane,

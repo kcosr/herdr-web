@@ -1,14 +1,6 @@
-//! Minimal `PopupSize` shim required by the exact-copied `api::schema::plugins`
-//! module.
-//!
-//! Upstream Herdr's `popup_size` module also carries terminal geometry
-//! resolution (`resolve_popup_geometry`, `PopupResolvedGeometry`) used by the
-//! app runtime. `herdr-web` only needs the schema/wire type and its serde +
-//! JsonSchema behavior, so the geometry helpers and their `ratatui` dependency
-//! are intentionally not vendored.
-
 use std::borrow::Cow;
 
+use ratatui::layout::Rect;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +39,54 @@ impl PopupSize {
         }
         Err("string sizes must be percentages like 80%; use a number for cells".to_string())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PopupResolvedGeometry {
+    pub outer: Rect,
+    pub inner: Rect,
+}
+
+pub(crate) fn resolve_popup_geometry(
+    width: Option<PopupSize>,
+    height: Option<PopupSize>,
+    area: Rect,
+) -> Option<PopupResolvedGeometry> {
+    let default_width = area.width.saturating_div(2).max(6);
+    let default_height = area.height.saturating_div(2).max(4);
+    let outer_width = width
+        .map(|width| width.resolve(area.width))
+        .unwrap_or(default_width)
+        .max(6)
+        .min(area.width);
+    let outer_height = height
+        .map(|height| height.resolve(area.height))
+        .unwrap_or(default_height)
+        .max(4)
+        .min(area.height);
+    if outer_width < 6 || outer_height < 4 {
+        return None;
+    }
+
+    let outer_x = area.x + (area.width.saturating_sub(outer_width)) / 2;
+    let outer_y = area.y + (area.height.saturating_sub(outer_height)) / 2;
+    let pane_inner_width = outer_width.saturating_sub(2);
+    let pane_inner_height = outer_height.saturating_sub(2);
+    let terminal_cols = if pane_inner_width <= 4 {
+        pane_inner_width
+    } else {
+        pane_inner_width.saturating_sub(1)
+    };
+    let inner = Rect::new(
+        outer_x.saturating_add(1),
+        outer_y.saturating_add(1),
+        terminal_cols,
+        pane_inner_height,
+    );
+    Some(PopupResolvedGeometry {
+        outer: Rect::new(outer_x, outer_y, outer_width, outer_height),
+        inner,
+    })
 }
 
 impl Serialize for PopupSize {
@@ -165,6 +205,48 @@ mod tests {
         assert_eq!(
             serde_json::to_value(PopupSize::Cells(120)).unwrap(),
             serde_json::json!(120)
+        );
+    }
+
+    #[test]
+    fn resolves_requested_outer_size_and_inner_terminal_area() {
+        let resolved = super::resolve_popup_geometry(
+            Some(PopupSize::Percent(80)),
+            Some(PopupSize::Percent(40)),
+            ratatui::layout::Rect::new(0, 0, 100, 30),
+        )
+        .unwrap();
+        assert_eq!(resolved.outer, ratatui::layout::Rect::new(10, 9, 80, 12));
+        assert_eq!(resolved.inner, ratatui::layout::Rect::new(11, 10, 77, 10));
+    }
+
+    #[test]
+    fn allows_full_terminal_outer_size() {
+        let resolved = super::resolve_popup_geometry(
+            Some(PopupSize::Percent(100)),
+            Some(PopupSize::Percent(100)),
+            ratatui::layout::Rect::new(4, 2, 100, 30),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.outer, ratatui::layout::Rect::new(4, 2, 100, 30));
+        assert_eq!(resolved.inner, ratatui::layout::Rect::new(5, 3, 97, 28));
+    }
+
+    #[test]
+    fn enforces_runtime_minimum_terminal_width() {
+        let resolved = super::resolve_popup_geometry(
+            Some(PopupSize::Cells(4)),
+            None,
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+        )
+        .unwrap();
+        assert_eq!(resolved.outer.width, 6);
+        assert_eq!(resolved.inner.width, 4);
+
+        assert!(
+            super::resolve_popup_geometry(None, None, ratatui::layout::Rect::new(0, 0, 5, 24),)
+                .is_none()
         );
     }
 }

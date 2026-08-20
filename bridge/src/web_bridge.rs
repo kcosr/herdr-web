@@ -16,7 +16,8 @@ use axum::extract::ws::{
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, RawQuery, State};
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
-    ACCESS_CONTROL_MAX_AGE, ACCESS_CONTROL_REQUEST_HEADERS, CONTENT_TYPE, HOST, ORIGIN, VARY,
+    ACCESS_CONTROL_MAX_AGE, ACCESS_CONTROL_REQUEST_HEADERS, CACHE_CONTROL, CONTENT_TYPE, HOST,
+    ORIGIN, VARY,
 };
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method as HttpMethod, StatusCode};
 use axum::middleware::{self, Next};
@@ -38,11 +39,11 @@ use tracing::{debug, info, warn};
 
 use herdr_compat::api::client::{ApiClient, ApiClientError};
 use herdr_compat::api::schema::{
-    AgentStartParams, AgentStatus, EmptyParams, EventsSubscribeParams, LayoutApplyParams,
-    LayoutExportParams, Method, PaneInfo, PaneLayoutSnapshot, PaneListParams, PaneMoveDestination,
-    PaneSplitParams, Request, ResponseResult, SessionSnapshot, SplitDirection, Subscription,
-    SubscriptionEventData, SubscriptionEventEnvelope, SubscriptionEventKind, TabCreateParams,
-    TabInfo, TabListParams, WorkspaceInfo,
+    AgentInfo, AgentStartParams, AgentStatus, AgentTarget, EmptyParams, EventsSubscribeParams,
+    LayoutApplyParams, LayoutExportParams, Method, PaneInfo, PaneLayoutSnapshot, PaneListParams,
+    PaneMoveDestination, PaneSplitParams, PaneTarget, Request, ResponseResult, SessionSnapshot,
+    SplitDirection, Subscription, SubscriptionEventData, SubscriptionEventEnvelope,
+    SubscriptionEventKind, TabCreateParams, TabInfo, TabListParams, TabTarget, WorkspaceInfo,
 };
 use herdr_compat::protocol::{
     self, AttachScrollDirection, AttachScrollSource, ClientKeybindings, ClientLaunchMode,
@@ -53,8 +54,9 @@ use herdr_compat::protocol::{
 use crate::agent_activity::{AgentActivityListResponse, AgentActivityManager};
 use crate::agent_pins::{AgentPinsError, AgentPinsListResponse, AgentPinsManager};
 use crate::launcher_presets::{
-    layout_leaf_for_preset, split_layout_with_command_preset, LauncherPresetStore,
-    ResolvedLauncherPreset, MAX_LABEL_BYTES,
+    layout_leaf_for_preset, split_layout_with_command_preset, CustomCommandPreset,
+    LauncherPresetLaunch, LauncherPresetStore, ManagedAgentKind, ResolvedLauncherPreset,
+    MAX_LABEL_BYTES,
 };
 use crate::notes::{
     AttachNoteRequest, CreateNoteRequest, NoteResponse, NotesError, NotesListQuery,
@@ -69,7 +71,8 @@ const DEFAULT_PORT: u16 = 8787;
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 const DEFAULT_STATIC_DIR: &str = "web/dist";
-const MIN_TERMINAL_ATTACH_PROTOCOL: u32 = 16;
+const MIN_HERDR_VERSION: (u64, u64, u64) = (0, 8, 0);
+const MIN_HERDR_VERSION_LABEL: &str = "0.8.0";
 const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 const MAX_NOTES_REQUEST_BYTES: usize = 512 * 1024;
 const MAX_TERMINAL_INPUT_CHUNK_BYTES: usize = 768 * 1024;
@@ -87,6 +90,11 @@ const ACTIVITY_WATCHER_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const ACTIVITY_WATCHER_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const ACTIVITY_RESUBSCRIBE_DEBOUNCE: Duration = Duration::from_millis(100);
 const ACTIVITY_READ_TIMEOUT: Duration = Duration::from_millis(250);
+const MANAGED_AGENT_SHELL_SETTLE_DELAY: Duration = Duration::from_millis(100);
+const MANAGED_AGENT_SHELL_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(300);
+const MANAGED_AGENT_SHELL_READY_TIMEOUT: Duration = Duration::from_secs(3);
+const MANAGED_AGENT_START_TIMEOUT: Duration = Duration::from_secs(30);
+const MANAGED_AGENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 static UPLOAD_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone)]
@@ -116,7 +124,6 @@ struct BridgeState {
     api: ApiClient,
     client_socket_path: PathBuf,
     request_policy: RequestPolicy,
-    daemon_version: Option<String>,
     terminal_sessions: Arc<Mutex<TerminalSessions>>,
     selected_pane_id: Arc<Mutex<Option<String>>>,
     agent_activity: Arc<AgentActivityManager>,
@@ -222,7 +229,6 @@ enum ActivityMessage {
         agent: Option<String>,
         title: Option<String>,
         display_agent: Option<String>,
-        custom_status: Option<String>,
         state_labels: HashMap<String, String>,
     },
     #[serde(rename = "resync_required")]
@@ -1083,8 +1089,15 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
     };
     let api = ApiClient::for_socket_path(crate::session::active_api_socket_path());
     let daemon_status = startup_daemon_status(&api)?;
-    let daemon_protocol = daemon_status.protocol.unwrap_or(PROTOCOL_VERSION);
+    let daemon_protocol = daemon_status
+        .protocol
+        .expect("startup_daemon_status validates protocol");
+    let daemon_version = daemon_status
+        .version
+        .as_deref()
+        .expect("startup_daemon_status validates version");
     info!(
+        version = daemon_version,
         protocol = daemon_protocol,
         "herdr-web bridge connected to compatible Herdr daemon"
     );
@@ -1100,7 +1113,6 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         api,
         client_socket_path: crate::session::active_client_socket_path(),
         request_policy: request_policy.clone(),
-        daemon_version: daemon_status.version,
         terminal_sessions: Arc::new(Mutex::new(TerminalSessions::default())),
         selected_pane_id: Arc::new(Mutex::new(None)),
         agent_activity,
@@ -1224,6 +1236,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         )
         .fallback_service(
             ServiceBuilder::new()
+                .layer(middleware::from_fn(add_static_cache_headers))
                 .layer(CompressionLayer::new())
                 .service(ServeDir::new(options.static_dir)),
         )
@@ -1259,6 +1272,28 @@ async fn add_security_headers(
         insert_cors_headers(headers, origin);
     }
     response
+}
+
+async fn add_static_cache_headers(request: AxumRequest, next: Next) -> Response {
+    let path = request.uri().path().to_string();
+    let mut response = next.run(request).await;
+    let status = response.status();
+    insert_static_cache_header(response.headers_mut(), &path, status);
+    response
+}
+
+fn insert_static_cache_header(headers: &mut HeaderMap, path: &str, status: StatusCode) {
+    if headers.contains_key(CACHE_CONTROL)
+        || (!status.is_success() && status != StatusCode::NOT_MODIFIED)
+    {
+        return;
+    }
+    let value = if path.starts_with("/assets/") {
+        HeaderValue::from_static("public, max-age=31536000, immutable")
+    } else {
+        HeaderValue::from_static("no-cache")
+    };
+    headers.insert(CACHE_CONTROL, value);
 }
 
 async fn preflight_handler(
@@ -1445,6 +1480,8 @@ const ALLOWED_COMMANDS: &[&str] = &[
     "workspace.rename",
     "workspace.close",
     "workspace.focus",
+    // Atomic same-session workspace ordering; the browser supplies explicit ids only.
+    "workspace.move_block",
     "tab.create",
     "tab.rename",
     "tab.close",
@@ -1689,6 +1726,38 @@ fn validate_web_command(method: &Method) -> Result<(), BridgeError> {
                 ));
             }
         }
+        Method::WorkspaceMoveBlock(params) => {
+            if params.workspace_ids.is_empty() || params.workspace_ids.len() > 256 {
+                return Err(BridgeError::BadRequest(
+                    "workspace.move_block requires between 1 and 256 workspace_ids".to_string(),
+                ));
+            }
+            let mut unique_ids = HashSet::with_capacity(params.workspace_ids.len());
+            if params.workspace_ids.iter().any(|workspace_id| {
+                workspace_id.trim().is_empty()
+                    || workspace_id.len() > 256
+                    || !unique_ids.insert(workspace_id.as_str())
+            }) {
+                return Err(BridgeError::BadRequest(
+                    "workspace.move_block workspace_ids must be unique, non-empty, and at most 256 bytes"
+                        .to_string(),
+                ));
+            }
+            if params
+                .before_workspace_id
+                .as_deref()
+                .is_some_and(|workspace_id| {
+                    workspace_id.trim().is_empty()
+                        || workspace_id.len() > 256
+                        || unique_ids.contains(workspace_id)
+                })
+            {
+                return Err(BridgeError::BadRequest(
+                    "workspace.move_block before_workspace_id must be a distinct valid workspace id"
+                        .to_string(),
+                ));
+            }
+        }
         Method::TabCreate(params) => {
             if params
                 .workspace_id
@@ -1884,6 +1953,7 @@ struct LauncherPresetError {
     status: StatusCode,
     code: &'static str,
     message: String,
+    herdr_code: Option<String>,
 }
 
 impl LauncherPresetError {
@@ -1892,6 +1962,7 @@ impl LauncherPresetError {
             status: StatusCode::BAD_REQUEST,
             code: "invalid_preset_launch",
             message: message.into(),
+            herdr_code: None,
         }
     }
 
@@ -1900,6 +1971,7 @@ impl LauncherPresetError {
             status: StatusCode::FORBIDDEN,
             code: "forbidden",
             message: message.into(),
+            herdr_code: None,
         }
     }
 
@@ -1908,6 +1980,7 @@ impl LauncherPresetError {
             status: StatusCode::NOT_FOUND,
             code: "preset_not_found",
             message: message.into(),
+            herdr_code: None,
         }
     }
 
@@ -1916,6 +1989,7 @@ impl LauncherPresetError {
             status: StatusCode::CONFLICT,
             code: "layout_changed",
             message: message.into(),
+            herdr_code: None,
         }
     }
 
@@ -1924,6 +1998,16 @@ impl LauncherPresetError {
             status: StatusCode::BAD_GATEWAY,
             code: "herdr_launch_failed",
             message: message.into(),
+            herdr_code: None,
+        }
+    }
+
+    fn from_herdr_error(code: String, message: String) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code: "herdr_launch_failed",
+            message,
+            herdr_code: Some(code),
         }
     }
 
@@ -2015,17 +2099,7 @@ async fn launcher_presets_handler(
     headers: HeaderMap,
 ) -> Result<Json<crate::launcher_presets::LauncherPresetsResponse>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
-    let mut response = state.launcher_presets.response();
-    if state
-        .daemon_version
-        .as_deref()
-        .is_some_and(herdr_version_before_launcher_hint_support)
-    {
-        response.warnings.push(
-            "connected Herdr is older than v0.7.1; agent_hint launches still run, but wrapper/SSH detection may ignore HERDR_AGENT".to_string(),
-        );
-    }
-    Ok(Json(response))
+    Ok(Json(state.launcher_presets.response()))
 }
 
 async fn launcher_preset_launch_handler(
@@ -2087,15 +2161,56 @@ fn launch_preset_blocking(
     title: &str,
     target: LauncherPresetLaunchTarget,
 ) -> Result<LauncherPresetLaunchResponse, LauncherPresetError> {
+    let mut api = HerdrLauncherApi(api);
+    launch_preset_with(&mut api, preset, title, target)
+}
+
+trait LauncherApiRequest {
+    fn request(&mut self, id: &str, method: Method) -> Result<ResponseResult, LauncherPresetError>;
+
+    fn now(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
+
+    fn wait(&mut self, duration: Duration) {
+        thread::sleep(duration);
+    }
+}
+
+struct HerdrLauncherApi<'a>(&'a ApiClient);
+
+impl LauncherApiRequest for HerdrLauncherApi<'_> {
+    fn request(&mut self, id: &str, method: Method) -> Result<ResponseResult, LauncherPresetError> {
+        api_request(self.0, id, method).map_err(|err| match err {
+            BridgeError::Api(ApiClientError::ErrorResponse(response)) => {
+                LauncherPresetError::from_herdr_error(response.error.code, response.error.message)
+            }
+            err => LauncherPresetError::launch_failed(err.to_string()),
+        })
+    }
+}
+
+fn launch_preset_with(
+    api: &mut impl LauncherApiRequest,
+    preset: &ResolvedLauncherPreset,
+    title: &str,
+    target: LauncherPresetLaunchTarget,
+) -> Result<LauncherPresetLaunchResponse, LauncherPresetError> {
     match target {
         LauncherPresetLaunchTarget::Tab { workspace_id } => {
             if workspace_id.trim().is_empty() {
                 return Err(LauncherPresetError::invalid("workspace_id is required"));
             }
-            if preset.is_builtin_shell() {
-                launch_builtin_shell_tab(api, preset, title, workspace_id)
-            } else {
-                launch_layout_tab(api, preset, title, workspace_id)
+            match &preset.launch {
+                LauncherPresetLaunch::Shell => {
+                    launch_builtin_shell_tab(api, preset, title, workspace_id)
+                }
+                LauncherPresetLaunch::ManagedAgent { kind, args } => {
+                    launch_managed_agent_tab(api, preset, title, workspace_id, *kind, args)
+                }
+                LauncherPresetLaunch::CustomCommand(command) => {
+                    launch_layout_tab(api, preset, title, workspace_id, command)
+                }
             }
         }
         LauncherPresetLaunchTarget::Split {
@@ -2108,12 +2223,28 @@ fn launch_preset_blocking(
                     "tab_id and target_pane_id are required",
                 ));
             }
-            if preset.is_builtin_shell() {
-                launch_builtin_shell_split(api, preset, title, target_pane_id, direction)
-            } else if preset.agent_hint.is_some() {
-                launch_agent_split(api, preset, title, target_pane_id, direction)
-            } else {
-                launch_layout_split(api, preset, title, tab_id, target_pane_id, direction)
+            match &preset.launch {
+                LauncherPresetLaunch::Shell => {
+                    launch_builtin_shell_split(api, preset, title, target_pane_id, direction)
+                }
+                LauncherPresetLaunch::ManagedAgent { kind, args } => launch_managed_agent_split(
+                    api,
+                    preset,
+                    title,
+                    target_pane_id,
+                    direction,
+                    *kind,
+                    args,
+                ),
+                LauncherPresetLaunch::CustomCommand(command) => launch_layout_split(
+                    api,
+                    preset,
+                    title,
+                    tab_id,
+                    target_pane_id,
+                    direction,
+                    command,
+                ),
             }
         }
     }
@@ -2129,13 +2260,12 @@ impl LauncherPresetLaunchTarget {
 }
 
 fn launch_builtin_shell_tab(
-    api: &ApiClient,
+    api: &mut impl LauncherApiRequest,
     preset: &ResolvedLauncherPreset,
     title: &str,
     workspace_id: String,
 ) -> Result<LauncherPresetLaunchResponse, LauncherPresetError> {
-    let result = api_request(
-        api,
+    let result = api.request(
         "herdr-web:launcher:builtin-shell-tab",
         Method::TabCreate(TabCreateParams {
             workspace_id: Some(workspace_id),
@@ -2144,14 +2274,16 @@ fn launch_builtin_shell_tab(
             label: None,
             env: HashMap::new(),
         }),
-    )
-    .map_err(|err| LauncherPresetError::launch_failed(err.to_string()))?;
+    )?;
     let ResponseResult::TabCreated { tab, root_pane } = result else {
         return Err(LauncherPresetError::launch_failed(
             "unexpected response for shell tab launch",
         ));
     };
-    rename_launched_pane(api, &root_pane.pane_id, title)?;
+    if let Err(error) = rename_launched_pane(api, &root_pane.pane_id, title) {
+        rollback_created_tab(api, &tab.tab_id, &error);
+        return Err(error);
+    }
     Ok(LauncherPresetLaunchResponse {
         preset_id: preset.id.clone(),
         title: title.into(),
@@ -2162,14 +2294,13 @@ fn launch_builtin_shell_tab(
 }
 
 fn launch_builtin_shell_split(
-    api: &ApiClient,
+    api: &mut impl LauncherApiRequest,
     preset: &ResolvedLauncherPreset,
     title: &str,
     target_pane_id: String,
     direction: SplitDirection,
 ) -> Result<LauncherPresetLaunchResponse, LauncherPresetError> {
-    let result = api_request(
-        api,
+    let result = api.request(
         "herdr-web:launcher:builtin-shell-split",
         Method::PaneSplit(PaneSplitParams {
             workspace_id: None,
@@ -2180,14 +2311,16 @@ fn launch_builtin_shell_split(
             focus: true,
             env: HashMap::new(),
         }),
-    )
-    .map_err(|err| LauncherPresetError::launch_failed(err.to_string()))?;
+    )?;
     let ResponseResult::PaneInfo { pane } = result else {
         return Err(LauncherPresetError::launch_failed(
             "unexpected response for shell split launch",
         ));
     };
-    rename_launched_pane(api, &pane.pane_id, title)?;
+    if let Err(error) = rename_launched_pane(api, &pane.pane_id, title) {
+        rollback_created_pane(api, &pane.pane_id, &error);
+        return Err(error);
+    }
     Ok(LauncherPresetLaunchResponse {
         preset_id: preset.id.clone(),
         title: title.into(),
@@ -2197,91 +2330,259 @@ fn launch_builtin_shell_split(
     })
 }
 
-fn launch_agent_split(
-    api: &ApiClient,
+fn launch_managed_agent_tab(
+    api: &mut impl LauncherApiRequest,
+    preset: &ResolvedLauncherPreset,
+    title: &str,
+    workspace_id: String,
+    kind: ManagedAgentKind,
+    args: &[String],
+) -> Result<LauncherPresetLaunchResponse, LauncherPresetError> {
+    let result = api.request(
+        "herdr-web:launcher:managed-agent-tab",
+        Method::TabCreate(TabCreateParams {
+            workspace_id: Some(workspace_id),
+            cwd: None,
+            focus: true,
+            label: None,
+            env: HashMap::new(),
+        }),
+    )?;
+    let ResponseResult::TabCreated { tab, root_pane } = result else {
+        return Err(LauncherPresetError::launch_failed(
+            "unexpected response for managed agent tab launch",
+        ));
+    };
+    if let Err(error) = rename_launched_pane(api, &root_pane.pane_id, title) {
+        rollback_created_tab(api, &tab.tab_id, &error);
+        return Err(error);
+    }
+    if let Err(error) = start_managed_agent(api, &root_pane.pane_id, kind, args) {
+        rollback_created_tab(api, &tab.tab_id, &error);
+        return Err(error);
+    }
+    Ok(LauncherPresetLaunchResponse {
+        preset_id: preset.id.clone(),
+        title: title.into(),
+        workspace_id: tab.workspace_id,
+        tab_id: tab.tab_id,
+        pane_id: root_pane.pane_id,
+    })
+}
+
+fn launch_managed_agent_split(
+    api: &mut impl LauncherApiRequest,
     preset: &ResolvedLauncherPreset,
     title: &str,
     target_pane_id: String,
     direction: SplitDirection,
+    kind: ManagedAgentKind,
+    args: &[String],
 ) -> Result<LauncherPresetLaunchResponse, LauncherPresetError> {
-    let argv = preset
-        .argv
-        .clone()
-        .ok_or_else(|| LauncherPresetError::invalid("preset argv is required"))?;
-    let kind = preset
-        .agent_hint
-        .clone()
-        .ok_or_else(|| LauncherPresetError::invalid("preset agent kind is required"))?;
-
-    // Herdr protocol 19's `agent.start` starts a managed agent inside an
-    // existing pane and no longer creates or places the pane itself (the
-    // v0.7.2 `cwd`/`workspace_id`/`tab_id`/`split`/`focus`/`env` fields are
-    // gone). Create the split pane first, carrying the preset cwd/env, then
-    // start the agent kind in the resulting pane.
-    let split = api_request(
-        api,
-        "herdr-web:launcher:agent-split:pane",
+    let result = api.request(
+        "herdr-web:launcher:managed-agent-split",
         Method::PaneSplit(PaneSplitParams {
             workspace_id: None,
             target_pane_id: Some(target_pane_id),
             direction,
             ratio: None,
-            cwd: preset.cwd.clone(),
+            cwd: None,
             focus: true,
-            env: preset.launch_env(),
+            env: HashMap::new(),
         }),
-    )
-    .map_err(|err| LauncherPresetError::launch_failed(err.to_string()))?;
-    let ResponseResult::PaneInfo { pane } = split else {
+    )?;
+    let ResponseResult::PaneInfo { pane } = result else {
         return Err(LauncherPresetError::launch_failed(
-            "unexpected response for agent split pane creation",
+            "unexpected response for managed agent split launch",
         ));
     };
-
-    let result = api_request(
-        api,
-        "herdr-web:launcher:agent-split:start",
-        Method::AgentStart(AgentStartParams {
-            name: title.into(),
-            kind,
-            pane_id: pane.pane_id,
-            args: argv,
-            timeout_ms: None,
-        }),
-    )
-    .map_err(|err| LauncherPresetError::launch_failed(err.to_string()))?;
-    let ResponseResult::AgentStarted { agent, .. } = result else {
-        return Err(LauncherPresetError::launch_failed(
-            "unexpected response for agent split launch",
-        ));
-    };
+    if let Err(error) = rename_launched_pane(api, &pane.pane_id, title) {
+        rollback_created_pane(api, &pane.pane_id, &error);
+        return Err(error);
+    }
+    if let Err(error) = start_managed_agent(api, &pane.pane_id, kind, args) {
+        rollback_created_pane(api, &pane.pane_id, &error);
+        return Err(error);
+    }
     Ok(LauncherPresetLaunchResponse {
         preset_id: preset.id.clone(),
         title: title.into(),
-        workspace_id: agent.workspace_id,
-        tab_id: agent.tab_id,
-        pane_id: agent.pane_id,
+        workspace_id: pane.workspace_id,
+        tab_id: pane.tab_id,
+        pane_id: pane.pane_id,
     })
 }
 
+fn start_managed_agent(
+    api: &mut impl LauncherApiRequest,
+    pane_id: &str,
+    kind: ManagedAgentKind,
+    args: &[String],
+) -> Result<(), LauncherPresetError> {
+    let name = managed_agent_name(kind, pane_id);
+    // Herdr v0.8 can acknowledge pane creation before its process detector sees the shell as the
+    // pane's foreground job. The API exposes no shell-ready event or authoritative readiness flag,
+    // so allow that shell to settle and retry only the transient `agent_pane_busy` response.
+    let deadline = api.now() + MANAGED_AGENT_SHELL_READY_TIMEOUT;
+    api.wait(MANAGED_AGENT_SHELL_SETTLE_DELAY);
+    let mut retry_delay = MANAGED_AGENT_SHELL_RETRY_INITIAL_DELAY;
+    let result = loop {
+        match api.request(
+            "herdr-web:launcher:start-managed-agent",
+            Method::AgentStart(AgentStartParams {
+                name: name.clone(),
+                kind: kind.as_str().to_string(),
+                pane_id: pane_id.to_string(),
+                args: args.to_vec(),
+                timeout_ms: None,
+            }),
+        ) {
+            Ok(result) => break result,
+            Err(error)
+                if error.herdr_code.as_deref() == Some("agent_pane_busy")
+                    && api.now() < deadline =>
+            {
+                let remaining = deadline.saturating_duration_since(api.now());
+                api.wait(retry_delay.min(remaining));
+                retry_delay = retry_delay.saturating_mul(3);
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    let ResponseResult::AgentStarted { agent, .. } = result else {
+        return Err(LauncherPresetError::launch_failed(
+            "unexpected response for managed agent launch",
+        ));
+    };
+    let terminal_id = agent.terminal_id.clone();
+    wait_for_managed_agent(api, &name, pane_id, kind, &terminal_id, agent)
+}
+
+fn wait_for_managed_agent(
+    api: &mut impl LauncherApiRequest,
+    name: &str,
+    pane_id: &str,
+    kind: ManagedAgentKind,
+    terminal_id: &str,
+    mut agent: AgentInfo,
+) -> Result<(), LauncherPresetError> {
+    let deadline = std::time::Instant::now() + MANAGED_AGENT_START_TIMEOUT;
+    loop {
+        match managed_agent_launch_state(&agent, name, kind, terminal_id) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(error) => return Err(error),
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = api.request(
+                "herdr-web:launcher:managed-agent-timeout-reconcile",
+                Method::AgentGet(AgentTarget {
+                    target: name.to_string(),
+                }),
+            );
+            return Err(LauncherPresetError::launch_failed(
+                "timed out waiting for managed agent startup",
+            ));
+        }
+
+        agent = match api.request(
+            "herdr-web:launcher:managed-agent-ready",
+            Method::AgentGet(AgentTarget {
+                target: name.to_string(),
+            }),
+        ) {
+            Ok(ResponseResult::AgentInfo { agent }) => agent,
+            Ok(_) => {
+                return Err(LauncherPresetError::launch_failed(
+                    "unexpected response while waiting for managed agent startup",
+                ));
+            }
+            Err(_) => match api.request(
+                "herdr-web:launcher:managed-agent-ready-by-pane",
+                Method::AgentGet(AgentTarget {
+                    target: pane_id.to_string(),
+                }),
+            ) {
+                Ok(ResponseResult::AgentInfo { agent }) => agent,
+                Ok(_) => {
+                    return Err(LauncherPresetError::launch_failed(
+                        "unexpected response while resolving managed agent pane",
+                    ));
+                }
+                Err(_) => {
+                    thread::sleep(MANAGED_AGENT_POLL_INTERVAL);
+                    continue;
+                }
+            },
+        };
+        if !agent.interactive_ready && agent.launch_pending {
+            thread::sleep(MANAGED_AGENT_POLL_INTERVAL);
+        }
+    }
+}
+
+fn managed_agent_launch_state(
+    agent: &AgentInfo,
+    name: &str,
+    kind: ManagedAgentKind,
+    terminal_id: &str,
+) -> Result<bool, LauncherPresetError> {
+    if agent.terminal_id != terminal_id {
+        return Err(LauncherPresetError::launch_failed(format!(
+            "managed agent {name} no longer owns the target terminal"
+        )));
+    }
+    if agent.name.as_deref() != Some(name) {
+        return Err(LauncherPresetError::launch_failed(format!(
+            "managed agent was not found under the expected name {name}"
+        )));
+    }
+    if agent
+        .agent
+        .as_deref()
+        .is_some_and(|actual| actual != kind.as_str())
+    {
+        return Err(LauncherPresetError::launch_failed(format!(
+            "managed agent kind mismatch: expected {}, detected {}",
+            kind.as_str(),
+            agent.agent.as_deref().unwrap_or_default()
+        )));
+    }
+    if agent.interactive_ready {
+        return Ok(true);
+    }
+    if !agent.launch_pending {
+        return Err(LauncherPresetError::launch_failed(
+            "managed agent process exited before becoming interactive",
+        ));
+    }
+    Ok(false)
+}
+
+fn managed_agent_name(kind: ManagedAgentKind, pane_id: &str) -> String {
+    let hash = pane_id.bytes().fold(0xcbf29ce484222325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    });
+    format!("web-{}-{hash:016x}", kind.as_str())
+}
+
 fn launch_layout_tab(
-    api: &ApiClient,
+    api: &mut impl LauncherApiRequest,
     preset: &ResolvedLauncherPreset,
     title: &str,
     workspace_id: String,
+    layout_preset: &CustomCommandPreset,
 ) -> Result<LauncherPresetLaunchResponse, LauncherPresetError> {
-    let result = api_request(
-        api,
+    let result = api.request(
         "herdr-web:launcher:layout-tab",
         Method::LayoutApply(LayoutApplyParams {
             workspace_id: Some(workspace_id),
             tab_id: None,
             tab_label: Some(title.into()),
             focus: true,
-            root: layout_leaf_for_preset(preset, title),
+            root: layout_leaf_for_preset(layout_preset, title),
         }),
-    )
-    .map_err(|err| LauncherPresetError::launch_failed(err.to_string()))?;
+    )?;
     let ResponseResult::LayoutApply { layout } = result else {
         return Err(LauncherPresetError::launch_failed(
             "unexpected response for layout tab launch",
@@ -2297,22 +2598,21 @@ fn launch_layout_tab(
 }
 
 fn launch_layout_split(
-    api: &ApiClient,
+    api: &mut impl LauncherApiRequest,
     preset: &ResolvedLauncherPreset,
     title: &str,
     tab_id: String,
     target_pane_id: String,
     direction: SplitDirection,
+    layout_preset: &CustomCommandPreset,
 ) -> Result<LauncherPresetLaunchResponse, LauncherPresetError> {
-    let exported = api_request(
-        api,
+    let exported = api.request(
         "herdr-web:launcher:layout-export",
         Method::LayoutExport(LayoutExportParams {
             tab_id: Some(tab_id.clone()),
             pane_id: None,
         }),
-    )
-    .map_err(|err| LauncherPresetError::launch_failed(err.to_string()))?;
+    )?;
     let ResponseResult::LayoutExport { layout } = exported else {
         return Err(LauncherPresetError::launch_failed(
             "unexpected response for layout export",
@@ -2325,20 +2625,21 @@ fn launch_layout_split(
     }
     let original_root = layout.root.clone();
     let before_panes = layout_pane_ids(&original_root);
-    let root =
-        split_layout_with_command_preset(layout.root, &target_pane_id, direction, preset, title)
-            .map_err(|_| {
-                LauncherPresetError::layout_changed("target pane changed before launch")
-            })?;
-    let latest = api_request(
-        api,
+    let root = split_layout_with_command_preset(
+        layout.root,
+        &target_pane_id,
+        direction,
+        layout_preset,
+        title,
+    )
+    .map_err(|_| LauncherPresetError::layout_changed("target pane changed before launch"))?;
+    let latest = api.request(
         "herdr-web:launcher:layout-export-check",
         Method::LayoutExport(LayoutExportParams {
             tab_id: Some(tab_id.clone()),
             pane_id: None,
         }),
-    )
-    .map_err(|err| LauncherPresetError::launch_failed(err.to_string()))?;
+    )?;
     let ResponseResult::LayoutExport { layout: latest } = latest else {
         return Err(LauncherPresetError::launch_failed(
             "unexpected response for layout export check",
@@ -2349,8 +2650,7 @@ fn launch_layout_split(
             "tab layout changed before launch",
         ));
     }
-    let result = api_request(
-        api,
+    let result = api.request(
         "herdr-web:launcher:layout-split",
         Method::LayoutApply(LayoutApplyParams {
             workspace_id: None,
@@ -2359,8 +2659,7 @@ fn launch_layout_split(
             focus: true,
             root,
         }),
-    )
-    .map_err(|err| LauncherPresetError::launch_failed(err.to_string()))?;
+    )?;
     let ResponseResult::LayoutApply { layout } = result else {
         return Err(LauncherPresetError::launch_failed(
             "unexpected response for layout split launch",
@@ -2380,20 +2679,58 @@ fn launch_layout_split(
 }
 
 fn rename_launched_pane(
-    api: &ApiClient,
+    api: &mut impl LauncherApiRequest,
     pane_id: &str,
     title: &str,
 ) -> Result<(), LauncherPresetError> {
-    api_request(
-        api,
+    api.request(
         "herdr-web:launcher:rename-pane",
         Method::PaneRename(herdr_compat::api::schema::PaneRenameParams {
             pane_id: pane_id.into(),
             label: Some(title.into()),
         }),
-    )
-    .map_err(|err| LauncherPresetError::launch_failed(err.to_string()))?;
+    )?;
     Ok(())
+}
+
+fn rollback_created_tab(
+    api: &mut impl LauncherApiRequest,
+    tab_id: &str,
+    original_error: &LauncherPresetError,
+) {
+    if let Err(cleanup_error) = api.request(
+        "herdr-web:launcher:rollback-tab",
+        Method::TabClose(TabTarget {
+            tab_id: tab_id.to_string(),
+        }),
+    ) {
+        warn!(
+            tab_id,
+            original_error = %original_error.message,
+            cleanup_error = %cleanup_error.message,
+            "failed to roll back launcher-created tab"
+        );
+    }
+}
+
+fn rollback_created_pane(
+    api: &mut impl LauncherApiRequest,
+    pane_id: &str,
+    original_error: &LauncherPresetError,
+) {
+    if let Err(cleanup_error) = api.request(
+        "herdr-web:launcher:rollback-pane",
+        Method::PaneClose(PaneTarget {
+            pane_id: pane_id.to_string(),
+        }),
+    ) {
+        warn!(
+            pane_id,
+            original_error = %original_error.message,
+            cleanup_error = %cleanup_error.message,
+            "failed to roll back launcher-created pane"
+        );
+    }
 }
 
 fn layout_contains_pane(root: &herdr_compat::api::schema::LayoutNode, pane_id: &str) -> bool {
@@ -2697,6 +3034,7 @@ fn web_snapshot_from_session_snapshot(
     bridges: Vec<SnapshotBridgeInfo>,
 ) -> Snapshot {
     let SessionSnapshot {
+        focused_pane_id,
         workspaces,
         tabs,
         panes,
@@ -2704,7 +3042,11 @@ fn web_snapshot_from_session_snapshot(
         ..
     } = snapshot;
     let selected_pane_id = selected_pane_id
-        .filter(|pane_id| panes.iter().any(|pane| pane.pane_id == pane_id.as_str()));
+        .filter(|pane_id| panes.iter().any(|pane| pane.pane_id == pane_id.as_str()))
+        .or_else(|| {
+            focused_pane_id
+                .filter(|pane_id| panes.iter().any(|pane| pane.pane_id == pane_id.as_str()))
+        });
     let workspaces = workspaces
         .into_iter()
         .map(|workspace| {
@@ -4321,6 +4663,7 @@ fn structural_event_subscriptions() -> Vec<Subscription> {
         Subscription::WorkspaceUpdated {},
         Subscription::WorkspaceRenamed {},
         Subscription::WorkspaceMoved {},
+        Subscription::WorkspaceReordered {},
         Subscription::WorkspaceClosed {},
         Subscription::WorkspaceFocused {},
         Subscription::WorktreeCreated {},
@@ -4356,10 +4699,6 @@ fn activity_message_from_subscription_value(value: serde_json::Value) -> Option<
         agent: event.agent,
         title: event.title,
         display_agent: event.display_agent,
-        // Herdr protocol 19 removed `custom_status` from pane agent-status
-        // events (superseded by `state_labels`). The bridge keeps the field in
-        // its own activity payload for frontend compatibility, always null now.
-        custom_status: None,
         state_labels: event.state_labels,
     })
 }
@@ -4675,7 +5014,7 @@ fn shutdown_terminal_attach_stream(stream: &herdr_compat::ipc::LocalStream) {
 }
 
 fn terminal_attach_protocol(api: &ApiClient) -> Result<u32, BridgeError> {
-    daemon_protocol_from_status(api.status_with_timeout(DAEMON_STATUS_TIMEOUT)?)
+    validated_daemon_protocol(api.status_with_timeout(DAEMON_STATUS_TIMEOUT)?)
 }
 
 fn startup_daemon_status(api: &ApiClient) -> io::Result<herdr_compat::api::RuntimeStatus> {
@@ -4683,40 +5022,74 @@ fn startup_daemon_status(api: &ApiClient) -> io::Result<herdr_compat::api::Runti
         .status_with_timeout(DAEMON_STATUS_TIMEOUT)
         .map_err(BridgeError::from)
         .map_err(startup_daemon_error)?;
-    daemon_protocol_from_status(status.clone()).map_err(startup_daemon_error)?;
+    validated_daemon_protocol(status.clone()).map_err(startup_daemon_error)?;
     Ok(status)
 }
 
-fn daemon_protocol_from_status(
-    status: herdr_compat::api::RuntimeStatus,
-) -> Result<u32, BridgeError> {
+fn validated_daemon_protocol(status: herdr_compat::api::RuntimeStatus) -> Result<u32, BridgeError> {
+    let version = status.version.as_deref().ok_or_else(|| {
+        BridgeError::Protocol("Herdr daemon status did not include a version".to_string())
+    })?;
+    let version_triplet = parse_version_triplet(version).ok_or_else(|| {
+        BridgeError::Protocol(format!(
+            "Herdr daemon reported an invalid version {version:?}; need Herdr {MIN_HERDR_VERSION_LABEL} or newer with protocol {PROTOCOL_VERSION}"
+        ))
+    })?;
+    if version_triplet < MIN_HERDR_VERSION {
+        return Err(BridgeError::Protocol(format!(
+            "Herdr daemon {version} is too old for herdr-web; need Herdr {MIN_HERDR_VERSION_LABEL} or newer with protocol {PROTOCOL_VERSION}"
+        )));
+    }
+
     let protocol = status.protocol.ok_or_else(|| {
         BridgeError::Protocol("Herdr daemon status did not include a protocol".to_string())
     })?;
-    if supported_terminal_attach_protocol(protocol) {
+    if protocol == PROTOCOL_VERSION {
         Ok(protocol)
     } else {
-        Err(BridgeError::Protocol(unsupported_daemon_protocol_message(
-            protocol,
+        Err(BridgeError::Protocol(format!(
+            "Herdr daemon protocol {protocol} is incompatible with herdr-web; need protocol {PROTOCOL_VERSION}"
         )))
     }
 }
 
-fn herdr_version_before_launcher_hint_support(version: &str) -> bool {
-    let Some((major, minor, patch)) = parse_version_triplet(version) else {
-        return false;
-    };
-    (major, minor, patch) < (0, 7, 1)
-}
-
 fn parse_version_triplet(version: &str) -> Option<(u64, u64, u64)> {
-    let mut parts = version
-        .trim()
-        .trim_start_matches('v')
-        .split(['.', '-', '+']);
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next()?.parse().ok()?;
+    let version = version.trim();
+    let version = version.strip_prefix('v').unwrap_or(version);
+    let (release, build_metadata) = match version.split_once('+') {
+        Some((release, metadata)) => (release, Some(metadata)),
+        None => (version, None),
+    };
+    if release.contains('-')
+        || build_metadata.is_some_and(|metadata| {
+            metadata.is_empty()
+                || metadata.split('.').any(|identifier| {
+                    identifier.is_empty()
+                        || !identifier
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                })
+        })
+    {
+        return None;
+    }
+    let mut parts = release.split('.');
+    let parse_number = |part: Option<&str>| {
+        let part = part?;
+        if part.is_empty()
+            || !part.bytes().all(|byte| byte.is_ascii_digit())
+            || (part.len() > 1 && part.starts_with('0'))
+        {
+            return None;
+        }
+        part.parse().ok()
+    };
+    let major = parse_number(parts.next())?;
+    let minor = parse_number(parts.next())?;
+    let patch = parse_number(parts.next())?;
+    if parts.next().is_some() {
+        return None;
+    }
     Some((major, minor, patch))
 }
 
@@ -4729,25 +5102,43 @@ fn startup_daemon_error(err: BridgeError) -> io::Error {
     )
 }
 
-fn supported_terminal_attach_protocol(protocol: u32) -> bool {
-    (MIN_TERMINAL_ATTACH_PROTOCOL..=PROTOCOL_VERSION).contains(&protocol)
-}
-
-fn unsupported_daemon_protocol_message(protocol: u32) -> String {
-    if protocol < MIN_TERMINAL_ATTACH_PROTOCOL {
-        format!(
-            "Herdr daemon protocol {protocol} is too old for herdr-web; need protocol {MIN_TERMINAL_ATTACH_PROTOCOL} or newer"
-        )
-    } else {
-        format!(
-            "Herdr daemon protocol {protocol} is newer than this herdr-web bridge supports; need protocol {PROTOCOL_VERSION} or older"
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn static_cache_headers_revalidate_entrypoints_and_public_files() {
+        for path in ["/", "/index.html", "/manifest.json", "/herdr-logo.svg"] {
+            let mut headers = HeaderMap::new();
+            insert_static_cache_header(&mut headers, path, StatusCode::OK);
+            assert_eq!(headers.get(CACHE_CONTROL).unwrap(), "no-cache", "{path}");
+        }
+    }
+
+    #[test]
+    fn static_cache_headers_make_successful_vite_assets_immutable() {
+        let mut headers = HeaderMap::new();
+        insert_static_cache_header(&mut headers, "/assets/index-AbCd1234.js", StatusCode::OK);
+        assert_eq!(
+            headers.get(CACHE_CONTROL).unwrap(),
+            "public, max-age=31536000, immutable"
+        );
+    }
+
+    #[test]
+    fn static_cache_headers_do_not_cache_missing_assets() {
+        let mut headers = HeaderMap::new();
+        insert_static_cache_header(&mut headers, "/assets/missing.js", StatusCode::NOT_FOUND);
+        assert!(!headers.contains_key(CACHE_CONTROL));
+    }
+
+    #[test]
+    fn static_cache_headers_preserve_service_policy() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        insert_static_cache_header(&mut headers, "/index.html", StatusCode::OK);
+        assert_eq!(headers.get(CACHE_CONTROL).unwrap(), "no-store");
+    }
 
     #[test]
     fn coalescer_sends_first_output_immediately() {
@@ -5334,6 +5725,7 @@ mod tests {
         assert!(!ALLOWED_COMMANDS.contains(&"server.stop"));
         assert!(!ALLOWED_COMMANDS.contains(&"pane.send_keys"));
         assert!(!ALLOWED_COMMANDS.contains(&"pane.send_input"));
+        assert!(ALLOWED_COMMANDS.contains(&"workspace.move_block"));
         // pane.split is intentionally allowed so the web client can create splits.
         assert!(ALLOWED_COMMANDS.contains(&"pane.split"));
         assert!(ALLOWED_COMMANDS.contains(&"pane.focus_direction"));
@@ -5433,14 +5825,21 @@ mod tests {
     }
 
     #[test]
-    fn web_snapshot_adapter_drops_stale_selected_pane_ids() {
+    fn web_snapshot_adapter_falls_back_to_focused_pane_for_stale_selection() {
         let snapshot = web_snapshot_from_session_snapshot(
             test_session_snapshot(),
             Some("missing".to_string()),
             Vec::new(),
         );
 
-        assert_eq!(snapshot.selected_pane_id, None);
+        assert_eq!(snapshot.selected_pane_id.as_deref(), Some("pane-1"));
+    }
+
+    #[test]
+    fn web_snapshot_adapter_uses_focused_pane_before_shared_selection_exists() {
+        let snapshot = web_snapshot_from_session_snapshot(test_session_snapshot(), None);
+
+        assert_eq!(snapshot.selected_pane_id.as_deref(), Some("pane-1"));
     }
 
     #[test]
@@ -5459,6 +5858,9 @@ mod tests {
         assert!(subscriptions
             .iter()
             .any(|subscription| matches!(subscription, Subscription::WorkspaceMoved {})));
+        assert!(subscriptions
+            .iter()
+            .any(|subscription| matches!(subscription, Subscription::WorkspaceReordered {})));
         assert!(subscriptions
             .iter()
             .any(|subscription| matches!(subscription, Subscription::TabMoved {})));
@@ -5491,7 +5893,6 @@ mod tests {
                 agent: Some("codex".to_string()),
                 title: None,
                 display_agent: None,
-                custom_status: None,
                 state_labels: HashMap::new(),
             }
         );
@@ -5499,8 +5900,8 @@ mod tests {
         let json = serde_json::to_value(&message).unwrap();
         assert_eq!(json["title"], serde_json::Value::Null);
         assert_eq!(json["display_agent"], serde_json::Value::Null);
-        assert_eq!(json["custom_status"], serde_json::Value::Null);
         assert_eq!(json["state_labels"], serde_json::json!({}));
+        assert!(json.get("custom_status").is_none());
     }
 
     #[test]
@@ -5577,7 +5978,7 @@ mod tests {
 
     fn test_session_snapshot() -> SessionSnapshot {
         SessionSnapshot {
-            version: "0.7.2".to_string(),
+            version: "0.8.0".to_string(),
             protocol: PROTOCOL_VERSION,
             focused_workspace_id: Some("workspace-1".to_string()),
             focused_tab_id: Some("tab-1".to_string()),
@@ -5624,6 +6025,7 @@ mod tests {
             tab_count,
             active_tab_id: active_tab_id.to_string(),
             agent_status: AgentStatus::Idle,
+            tokens: HashMap::new(),
             worktree: None,
         }
     }
@@ -5711,10 +6113,10 @@ mod tests {
             label: None,
             agent: None,
             title: None,
-            display_agent: None,
-            agent_status: AgentStatus::Idle,
             terminal_title: None,
             terminal_title_stripped: None,
+            display_agent: None,
+            agent_status: AgentStatus::Idle,
             state_labels: HashMap::new(),
             tokens: HashMap::new(),
             agent_session: None,
@@ -6180,6 +6582,38 @@ mod tests {
     }
 
     #[test]
+    fn validates_atomic_workspace_reorder_commands() {
+        let valid: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "workspace.move_block",
+            "params": {
+                "workspace_ids": ["w1", "w1-child"],
+                "before_workspace_id": "w3"
+            }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&valid.method).is_ok());
+
+        for params in [
+            serde_json::json!({ "workspace_ids": [] }),
+            serde_json::json!({ "workspace_ids": ["w1", "w1"] }),
+            serde_json::json!({ "workspace_ids": [""] }),
+            serde_json::json!({
+                "workspace_ids": ["w1"],
+                "before_workspace_id": "w1"
+            }),
+        ] {
+            let invalid: Request = serde_json::from_value(serde_json::json!({
+                "id": "test",
+                "method": "workspace.move_block",
+                "params": params
+            }))
+            .unwrap();
+            assert!(validate_web_command(&invalid.method).is_err());
+        }
+    }
+
+    #[test]
     fn validates_narrow_workspace_and_tab_rename_commands() {
         let request: Request = serde_json::from_value(serde_json::json!({
             "id": "test",
@@ -6415,10 +6849,6 @@ mod tests {
 
     #[test]
     fn terminal_attach_accepts_daemon_protocol_19() {
-        // The Herdr v0.8.0 daemon speaks wire protocol 19. After the compat
-        // refresh, `PROTOCOL_VERSION` is 19 and the accept range is 16..=19, so
-        // a live protocol-19 daemon must attach without the "newer than this
-        // herdr-web bridge supports" rejection.
         assert_eq!(PROTOCOL_VERSION, 19);
         assert_eq!(MIN_TERMINAL_ATTACH_PROTOCOL, 16);
 
@@ -6426,10 +6856,8 @@ mod tests {
         assert!(supported_terminal_attach_protocol(16));
         assert!(supported_terminal_attach_protocol(17));
 
-        // A protocol-19 daemon status resolves to protocol 19 and is accepted.
         assert_eq!(daemon_protocol_from_status(runtime_status(19)).unwrap(), 19);
 
-        // Boundaries: 15 is too old, 20 is too new, each with exact wording.
         assert!(!supported_terminal_attach_protocol(15));
         assert_eq!(
             unsupported_daemon_protocol_message(15),
@@ -6444,39 +6872,97 @@ mod tests {
     }
 
     #[test]
-    fn daemon_status_protocol_accepts_supported_range() {
+    fn daemon_status_accepts_minimum_version_and_exact_protocol() {
         assert_eq!(
-            daemon_protocol_from_status(runtime_status(PROTOCOL_VERSION)).unwrap(),
+            validated_daemon_protocol(runtime_status("0.8.0", PROTOCOL_VERSION)).unwrap(),
+            PROTOCOL_VERSION
+        );
+        assert_eq!(
+            validated_daemon_protocol(runtime_status("1.0.0", PROTOCOL_VERSION)).unwrap(),
             PROTOCOL_VERSION
         );
     }
 
     #[test]
-    fn daemon_status_protocol_rejects_defensive_missing_protocol() {
+    fn daemon_status_rejects_missing_or_invalid_version() {
         let missing = herdr_compat::api::RuntimeStatus {
-            version: Some("0.7.0".to_string()),
+            version: None,
+            protocol: Some(PROTOCOL_VERSION),
+            capabilities: None,
+        };
+        assert!(validated_daemon_protocol(missing)
+            .unwrap_err()
+            .to_string()
+            .contains("did not include a version"));
+
+        let invalid = runtime_status("not-a-version", PROTOCOL_VERSION);
+        assert!(validated_daemon_protocol(invalid)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid version"));
+
+        for version in [
+            "0.8.0-preview",
+            "0.8.0.1",
+            "0.8.0+",
+            "0.8.0+bad_meta",
+            "0.08.0",
+        ] {
+            let error = validated_daemon_protocol(runtime_status(version, PROTOCOL_VERSION))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("invalid version"),
+                "{version:?} should be rejected as invalid: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_status_accepts_version_prefix_and_build_metadata() {
+        for version in ["v0.8.0", "0.8.0+linux-x86-64"] {
+            assert_eq!(
+                validated_daemon_protocol(runtime_status(version, PROTOCOL_VERSION)).unwrap(),
+                PROTOCOL_VERSION
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_status_rejects_version_before_0_8_0() {
+        let error = validated_daemon_protocol(runtime_status("0.7.5", PROTOCOL_VERSION))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("too old"));
+        assert!(error.contains(MIN_HERDR_VERSION_LABEL));
+    }
+
+    #[test]
+    fn daemon_status_rejects_missing_protocol() {
+        let missing = herdr_compat::api::RuntimeStatus {
+            version: Some(MIN_HERDR_VERSION_LABEL.to_string()),
             protocol: None,
             capabilities: None,
         };
-        assert!(daemon_protocol_from_status(missing)
+        assert!(validated_daemon_protocol(missing)
             .unwrap_err()
             .to_string()
             .contains("did not include a protocol"));
     }
 
     #[test]
-    fn daemon_status_protocol_rejects_unsupported_protocols() {
-        let too_old = daemon_protocol_from_status(runtime_status(MIN_TERMINAL_ATTACH_PROTOCOL - 1))
+    fn daemon_status_rejects_any_other_protocol() {
+        let older = validated_daemon_protocol(runtime_status("0.8.0", PROTOCOL_VERSION - 1))
             .unwrap_err()
             .to_string();
-        assert!(too_old.contains("too old"));
-        assert!(too_old.contains(&MIN_TERMINAL_ATTACH_PROTOCOL.to_string()));
+        assert!(older.contains("incompatible"));
+        assert!(older.contains(&PROTOCOL_VERSION.to_string()));
 
         assert!(
-            daemon_protocol_from_status(runtime_status(PROTOCOL_VERSION + 1))
+            validated_daemon_protocol(runtime_status("0.8.0", PROTOCOL_VERSION + 1))
                 .unwrap_err()
                 .to_string()
-                .contains("newer")
+                .contains("incompatible")
         );
     }
 
@@ -6505,12 +6991,374 @@ mod tests {
     }
 
     #[test]
-    fn detects_herdr_versions_before_launcher_hint_support() {
-        assert!(herdr_version_before_launcher_hint_support("0.7.0"));
-        assert!(herdr_version_before_launcher_hint_support("v0.7.0"));
-        assert!(!herdr_version_before_launcher_hint_support("0.7.1"));
-        assert!(!herdr_version_before_launcher_hint_support("0.8.0"));
-        assert!(!herdr_version_before_launcher_hint_support("not-a-version"));
+    fn managed_agent_launch_calls_create_rename_then_start() {
+        let pane = launcher_test_pane("pane-new", "workspace-1", "tab-new");
+        let tab = launcher_test_tab("tab-new", "workspace-1");
+        let name = managed_agent_name(ManagedAgentKind::Codex, "pane-new");
+        let mut pending = launcher_test_agent("pane-new", "workspace-1", "tab-new");
+        pending.name = Some(name.clone());
+        pending.agent = None;
+        let mut ready = pending.clone();
+        ready.agent = Some("codex".into());
+        ready.launch_pending = false;
+        ready.interactive_ready = true;
+        let mut api = MockLauncherApi::new([
+            Ok(ResponseResult::TabCreated {
+                tab,
+                root_pane: pane,
+            }),
+            Ok(ResponseResult::Ok {}),
+            Ok(ResponseResult::AgentStarted {
+                agent: pending,
+                argv: vec!["codex".into()],
+            }),
+            Ok(ResponseResult::AgentInfo { agent: ready }),
+        ]);
+        let preset = launcher_test_managed_preset(ManagedAgentKind::Codex);
+
+        let response = launch_preset_with(
+            &mut api,
+            &preset,
+            "Review",
+            LauncherPresetLaunchTarget::Tab {
+                workspace_id: "workspace-1".into(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(response.pane_id, "pane-new");
+        assert!(matches!(api.requests[0], Method::TabCreate(_)));
+        assert!(matches!(api.requests[1], Method::PaneRename(_)));
+        let Method::AgentStart(params) = &api.requests[2] else {
+            panic!("expected agent.start");
+        };
+        assert_eq!(params.kind, "codex");
+        assert_eq!(params.pane_id, "pane-new");
+        assert!(params.args.is_empty());
+        assert_eq!(params.timeout_ms, None);
+        assert!(valid_managed_agent_name(&params.name));
+        let Method::AgentGet(params) = &api.requests[3] else {
+            panic!("expected readiness poll");
+        };
+        assert_eq!(params.target, name);
+        assert_eq!(api.requests.len(), 4);
+        assert_eq!(api.waits, vec![MANAGED_AGENT_SHELL_SETTLE_DELAY]);
+    }
+
+    #[test]
+    fn managed_agent_launch_waits_for_new_shell_before_retrying_start() {
+        let pane = launcher_test_pane("pane-new", "workspace-1", "tab-new");
+        let tab = launcher_test_tab("tab-new", "workspace-1");
+        let name = managed_agent_name(ManagedAgentKind::Claude, "pane-new");
+        let mut pending = launcher_test_agent("pane-new", "workspace-1", "tab-new");
+        pending.name = Some(name);
+        pending.agent = None;
+        let mut ready = pending.clone();
+        ready.agent = Some("claude".into());
+        ready.launch_pending = false;
+        ready.interactive_ready = true;
+        let mut api = MockLauncherApi::new([
+            Ok(ResponseResult::TabCreated {
+                tab,
+                root_pane: pane,
+            }),
+            Ok(ResponseResult::Ok {}),
+            Err(LauncherPresetError::from_herdr_error(
+                "agent_pane_busy".into(),
+                "agent target pane pane-new is not an available shell".into(),
+            )),
+            Err(LauncherPresetError::from_herdr_error(
+                "agent_pane_busy".into(),
+                "agent target pane pane-new is not an available shell".into(),
+            )),
+            Err(LauncherPresetError::from_herdr_error(
+                "agent_pane_busy".into(),
+                "agent target pane pane-new is not an available shell".into(),
+            )),
+            Ok(ResponseResult::AgentStarted {
+                agent: pending,
+                argv: vec!["claude".into()],
+            }),
+            Ok(ResponseResult::AgentInfo { agent: ready }),
+        ]);
+        let preset = launcher_test_managed_preset(ManagedAgentKind::Claude);
+
+        let response = launch_preset_with(
+            &mut api,
+            &preset,
+            "Claude",
+            LauncherPresetLaunchTarget::Tab {
+                workspace_id: "workspace-1".into(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(response.pane_id, "pane-new");
+        assert_eq!(
+            api.requests
+                .iter()
+                .filter(|request| matches!(request, Method::AgentStart(_)))
+                .count(),
+            4
+        );
+        assert_eq!(
+            api.waits,
+            vec![
+                MANAGED_AGENT_SHELL_SETTLE_DELAY,
+                MANAGED_AGENT_SHELL_RETRY_INITIAL_DELAY,
+                Duration::from_millis(900),
+                Duration::from_millis(1700),
+            ]
+        );
+    }
+
+    #[test]
+    fn generated_managed_agent_names_are_safe_bounded_and_pane_specific() {
+        let first = managed_agent_name(ManagedAgentKind::OpenCode, "pane/ONE:🔥");
+        let second = managed_agent_name(ManagedAgentKind::OpenCode, "pane/TWO:🔥");
+
+        assert!(valid_managed_agent_name(&first));
+        assert!(valid_managed_agent_name(&second));
+        assert_ne!(first, second);
+        assert!(first.starts_with("web-opencode-"));
+    }
+
+    #[test]
+    fn failed_rename_rolls_back_the_created_tab() {
+        let pane = launcher_test_pane("pane-new", "workspace-1", "tab-new");
+        let tab = launcher_test_tab("tab-new", "workspace-1");
+        let mut api = MockLauncherApi::new([
+            Ok(ResponseResult::TabCreated {
+                tab,
+                root_pane: pane,
+            }),
+            Err(LauncherPresetError::launch_failed("rename failed")),
+            Ok(ResponseResult::Ok {}),
+        ]);
+        let preset = launcher_test_managed_preset(ManagedAgentKind::Claude);
+
+        let error = launch_preset_with(
+            &mut api,
+            &preset,
+            "Claude",
+            LauncherPresetLaunchTarget::Tab {
+                workspace_id: "workspace-1".into(),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.message, "rename failed");
+        assert!(matches!(api.requests[0], Method::TabCreate(_)));
+        assert!(matches!(api.requests[1], Method::PaneRename(_)));
+        let Method::TabClose(params) = &api.requests[2] else {
+            panic!("expected tab.close rollback");
+        };
+        assert_eq!(params.tab_id, "tab-new");
+    }
+
+    #[test]
+    fn failed_agent_start_rolls_back_split_and_preserves_error_if_cleanup_fails() {
+        let pane = launcher_test_pane("pane-new", "workspace-1", "tab-1");
+        let mut api = MockLauncherApi::new([
+            Ok(ResponseResult::PaneInfo { pane }),
+            Ok(ResponseResult::Ok {}),
+            Err(LauncherPresetError::launch_failed("agent start failed")),
+            Err(LauncherPresetError::launch_failed("cleanup failed")),
+        ]);
+        let preset = launcher_test_managed_preset(ManagedAgentKind::Pi);
+
+        let error = launch_preset_with(
+            &mut api,
+            &preset,
+            "pi",
+            LauncherPresetLaunchTarget::Split {
+                tab_id: "tab-1".into(),
+                target_pane_id: "pane-old".into(),
+                direction: SplitDirection::Right,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.message, "agent start failed");
+        assert!(matches!(api.requests[0], Method::PaneSplit(_)));
+        assert!(matches!(api.requests[1], Method::PaneRename(_)));
+        assert!(matches!(api.requests[2], Method::AgentStart(_)));
+        let Method::PaneClose(params) = &api.requests[3] else {
+            panic!("expected pane.close rollback");
+        };
+        assert_eq!(params.pane_id, "pane-new");
+    }
+
+    #[test]
+    fn managed_agent_process_exit_rolls_back_after_start_acknowledgement() {
+        let pane = launcher_test_pane("pane-new", "workspace-1", "tab-new");
+        let tab = launcher_test_tab("tab-new", "workspace-1");
+        let name = managed_agent_name(ManagedAgentKind::Claude, "pane-new");
+        let mut pending = launcher_test_agent("pane-new", "workspace-1", "tab-new");
+        pending.name = Some(name);
+        pending.agent = None;
+        let mut failed = pending.clone();
+        failed.launch_pending = false;
+        let mut api = MockLauncherApi::new([
+            Ok(ResponseResult::TabCreated {
+                tab,
+                root_pane: pane,
+            }),
+            Ok(ResponseResult::Ok {}),
+            Ok(ResponseResult::AgentStarted {
+                agent: pending,
+                argv: vec!["claude".into()],
+            }),
+            Ok(ResponseResult::AgentInfo { agent: failed }),
+            Ok(ResponseResult::Ok {}),
+        ]);
+        let preset = launcher_test_managed_preset(ManagedAgentKind::Claude);
+
+        let error = launch_preset_with(
+            &mut api,
+            &preset,
+            "Claude",
+            LauncherPresetLaunchTarget::Tab {
+                workspace_id: "workspace-1".into(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("exited before becoming interactive"));
+        assert!(matches!(api.requests[3], Method::AgentGet(_)));
+        let Method::TabClose(params) = &api.requests[4] else {
+            panic!("expected tab.close rollback");
+        };
+        assert_eq!(params.tab_id, "tab-new");
+    }
+
+    struct MockLauncherApi {
+        results: std::collections::VecDeque<Result<ResponseResult, LauncherPresetError>>,
+        requests: Vec<Method>,
+        waits: Vec<Duration>,
+        clock: std::time::Instant,
+    }
+
+    impl MockLauncherApi {
+        fn new(
+            results: impl IntoIterator<Item = Result<ResponseResult, LauncherPresetError>>,
+        ) -> Self {
+            Self {
+                results: results.into_iter().collect(),
+                requests: Vec::new(),
+                waits: Vec::new(),
+                clock: std::time::Instant::now(),
+            }
+        }
+    }
+
+    impl LauncherApiRequest for MockLauncherApi {
+        fn request(
+            &mut self,
+            _id: &str,
+            method: Method,
+        ) -> Result<ResponseResult, LauncherPresetError> {
+            self.requests.push(method);
+            self.results
+                .pop_front()
+                .expect("mock launcher response missing")
+        }
+
+        fn now(&self) -> std::time::Instant {
+            self.clock
+        }
+
+        fn wait(&mut self, duration: Duration) {
+            self.waits.push(duration);
+            self.clock += duration;
+        }
+    }
+
+    fn launcher_test_managed_preset(kind: ManagedAgentKind) -> ResolvedLauncherPreset {
+        ResolvedLauncherPreset {
+            id: format!("builtin:{}", kind.as_str()),
+            label: kind.as_str().to_string(),
+            launch: LauncherPresetLaunch::ManagedAgent {
+                kind,
+                args: Vec::new(),
+            },
+            built_in: true,
+        }
+    }
+
+    fn launcher_test_tab(tab_id: &str, workspace_id: &str) -> TabInfo {
+        TabInfo {
+            tab_id: tab_id.into(),
+            workspace_id: workspace_id.into(),
+            number: 1,
+            label: "Tab".into(),
+            focused: true,
+            pane_count: 1,
+            agent_status: AgentStatus::Idle,
+        }
+    }
+
+    fn launcher_test_pane(pane_id: &str, workspace_id: &str, tab_id: &str) -> PaneInfo {
+        PaneInfo {
+            pane_id: pane_id.into(),
+            terminal_id: format!("terminal-{pane_id}"),
+            workspace_id: workspace_id.into(),
+            tab_id: tab_id.into(),
+            focused: true,
+            cwd: None,
+            foreground_cwd: None,
+            label: None,
+            agent: None,
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            display_agent: None,
+            agent_status: AgentStatus::Idle,
+            state_labels: HashMap::new(),
+            tokens: HashMap::new(),
+            agent_session: None,
+            scroll: None,
+            revision: 1,
+        }
+    }
+
+    fn launcher_test_agent(
+        pane_id: &str,
+        workspace_id: &str,
+        tab_id: &str,
+    ) -> herdr_compat::api::schema::AgentInfo {
+        herdr_compat::api::schema::AgentInfo {
+            terminal_id: format!("terminal-{pane_id}"),
+            name: None,
+            agent: Some("codex".into()),
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            display_agent: None,
+            agent_status: AgentStatus::Working,
+            screen_detection_skipped: false,
+            state_labels: HashMap::new(),
+            tokens: HashMap::new(),
+            agent_session: None,
+            workspace_id: workspace_id.into(),
+            tab_id: tab_id.into(),
+            pane_id: pane_id.into(),
+            focused: true,
+            launch_pending: true,
+            interactive_ready: false,
+            state_change_seq: 1,
+            cwd: None,
+            foreground_cwd: None,
+            revision: 1,
+        }
+    }
+
+    fn valid_managed_agent_name(name: &str) -> bool {
+        let mut chars = name.chars();
+        matches!(chars.next(), Some('a'..='z'))
+            && name.len() <= 32
+            && chars
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_'))
     }
 
     #[test]
@@ -6567,9 +7415,9 @@ mod tests {
         }
     }
 
-    fn runtime_status(protocol: u32) -> herdr_compat::api::RuntimeStatus {
+    fn runtime_status(version: &str, protocol: u32) -> herdr_compat::api::RuntimeStatus {
         herdr_compat::api::RuntimeStatus {
-            version: Some("0.7.0".to_string()),
+            version: Some(version.to_string()),
             protocol: Some(protocol),
             capabilities: None,
         }

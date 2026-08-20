@@ -255,6 +255,7 @@ fn is_agent_like(pane: &PaneInfo) -> bool {
     pane.agent.is_some()
         || pane.display_agent.is_some()
         || pane.title.is_some()
+        || !pane.state_labels.is_empty()
         || pane.agent_status != AgentStatus::Unknown
 }
 
@@ -362,6 +363,37 @@ mod tests {
         assert!(!tracker.observe_snapshot(&[ordinary_pane("pane-1")], 100));
 
         assert!(tracker.list(&[ordinary_pane("pane-1")]).is_empty());
+    }
+
+    #[test]
+    fn nonempty_state_labels_identify_agent_panes() {
+        let mut tracker = AgentActivityTracker::default();
+        let mut pane = ordinary_pane("pane-1");
+        pane.state_labels
+            .insert("phase".to_string(), "reviewing".to_string());
+
+        assert!(!tracker.observe_snapshot(&[pane.clone()], 100));
+        assert_eq!(tracker.list(&[pane]).len(), 1);
+    }
+
+    #[test]
+    fn presentation_title_identifies_agent_panes() {
+        let mut tracker = AgentActivityTracker::default();
+        let mut pane = ordinary_pane("pane-1");
+        pane.title = Some("Reviewing".to_string());
+
+        assert!(!tracker.observe_snapshot(&[pane.clone()], 100));
+        assert_eq!(tracker.list(&[pane]).len(), 1);
+    }
+
+    #[test]
+    fn terminal_title_alone_does_not_identify_agent_panes() {
+        let mut tracker = AgentActivityTracker::default();
+        let mut pane = ordinary_pane("pane-1");
+        pane.terminal_title = Some("vim README.md".to_string());
+
+        assert!(!tracker.observe_snapshot(&[pane.clone()], 100));
+        assert!(tracker.list(&[pane]).is_empty());
     }
 
     #[test]
@@ -491,10 +523,10 @@ mod tests {
             agent: None,
             agent_session: None,
             title: None,
-            display_agent: None,
-            agent_status: AgentStatus::Unknown,
             terminal_title: None,
             terminal_title_stripped: None,
+            display_agent: None,
+            agent_status: AgentStatus::Unknown,
             state_labels: HashMap::new(),
             tokens: HashMap::new(),
             scroll: None,

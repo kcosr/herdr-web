@@ -11,8 +11,7 @@ import {
   X,
 } from "lucide-react";
 import {
-  lazy,
-  Suspense,
+
   useCallback,
   useEffect,
   useId,
@@ -64,9 +63,7 @@ import type {
 } from "./mobileTerminalPrefs";
 import type { PaneInfo } from "./types";
 
-const ParlayInput = lazy(() =>
-  import("./ParlayInput").then((mod) => ({ default: mod.ParlayInput })),
-);
+import { ParlayInput } from "./ParlayInput";
 
 type Props = {
   pane: PaneInfo | null;
@@ -112,6 +109,12 @@ type Props = {
   onNextAgentPane?: () => void;
   /** Return to the previous agent pane (mobile "previous agent" command). */
   onPrevAgentPane?: () => void;
+  /** Whether to maintain a hidden plain-text mirror of the visible terminal viewport. */
+  terminalScreenReaderText?: boolean;
+  /** Pane-specific accessible name for the terminal and its screen mirror. */
+  accessibilityLabel?: string;
+  /** Whether this is the currently selected terminal in a split. */
+  selected?: boolean;
 };
 
 type UploadCandidate = {
@@ -177,6 +180,9 @@ export function TerminalView({
   focusToken = 0,
   onNextAgentPane = () => {},
   onPrevAgentPane = () => {},
+  terminalScreenReaderText = false,
+  accessibilityLabel = "Terminal",
+  selected = false,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLElement | null>(null);
@@ -205,6 +211,7 @@ export function TerminalView({
   const [connectionState, setConnectionState] = useState<TerminalConnectionState>("idle");
   const [closeReason, setCloseReason] = useState<string | null>(null);
   const [rendererReady, setRendererReady] = useState<TerminalRendererReady | null>(null);
+  const [accessibleScreen, setAccessibleScreen] = useState("");
   const [hasAttachedForTerminal, setHasAttachedForTerminal] = useState(false);
   const [showConnectionOverlay, setShowConnectionOverlay] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
@@ -493,6 +500,7 @@ export function TerminalView({
     overlayTerminalIdRef.current = terminalId;
     rendererReadyRef.current = null;
     setRendererReady(null);
+    setAccessibleScreen("");
     setHasAttachedForTerminal(false);
     setShowConnectionOverlay(false);
     setCloseReason(null);
@@ -626,6 +634,27 @@ export function TerminalView({
     pane?.terminal_id,
     sendTerminalInputData,
   ]);
+
+  useEffect(() => {
+    setAccessibleScreen("");
+    const ready = rendererReady;
+    if (!terminalScreenReaderText || !ready) {
+      ready?.renderer.setAccessibleScreenListener(null);
+      return;
+    }
+
+    const { renderer, generation, terminalId } = ready;
+    renderer.setAccessibleScreenListener((text) => {
+      if (
+        rendererRef.current === renderer &&
+        rendererGenerationRef.current === generation &&
+        terminalIdRef.current === terminalId
+      ) {
+        setAccessibleScreen(text);
+      }
+    });
+    return () => renderer.setAccessibleScreenListener(null);
+  }, [rendererReady, terminalScreenReaderText]);
 
   useEffect(() => {
     const terminalId = pane?.terminal_id ?? null;
@@ -1341,7 +1370,8 @@ export function TerminalView({
     <section
       ref={stageRef}
       className="terminal-stage"
-      aria-label="Selected pane terminal"
+      aria-label={accessibilityLabel}
+      aria-current={selected ? "true" : undefined}
       onDragOverCapture={(event) => {
         if (event.dataTransfer.types.includes("Files")) {
           event.preventDefault();
@@ -1351,6 +1381,17 @@ export function TerminalView({
       onPasteCapture={handlePaste}
     >
       <div ref={hostRef} className="terminal-host" />
+      {pane && terminalScreenReaderText ? (
+        <div
+          className="terminal-accessible-screen sr-only"
+          role="region"
+          tabIndex={-1}
+          aria-label={`${accessibilityLabel} screen contents`}
+          aria-live="off"
+        >
+          {accessibleScreen}
+        </div>
+      ) : null}
       <input
         ref={fileInputRef}
         className="terminal-file-input"
@@ -1481,7 +1522,7 @@ function MobileSelectionActions({
   );
 }
 
-function MobileTerminalControls({
+export function MobileTerminalControls({
   commandInputRef,
   disabled,
   uploadDisabled,
@@ -1522,21 +1563,33 @@ function MobileTerminalControls({
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [value, setValue] = useState("");
+  const [fieldKey, setFieldKey] = useState(0);
   const [expanded, setExpanded] = useState(false);
   const [ctrlLatch, setCtrlLatch] = useState(false);
   const setCommandInputNode = (node: HTMLInputElement | HTMLTextAreaElement | null) => {
     commandInputRef.current = node;
   };
-  const submit = () => {
-    onSubmitCommand(value);
+  const clearCommandInput = () => {
     setValue("");
+    const node = commandInputRef.current;
+    if (node) {
+      node.value = "";
+      node.defaultValue = "";
+    }
+    setFieldKey((key) => key + 1);
+  };
+  const submit = () => {
+    const command = value;
+    clearCommandInput();
+    onSubmitCommand(command);
   };
   const stage = () => {
     if (value.length === 0) {
       return;
     }
-    onStageCommand(value);
-    setValue("");
+    const command = value;
+    clearCommandInput();
+    onStageCommand(command);
   };
   const sendKey = (key: TerminalKey) => {
     onInput(ctrlLatch && key.ctrlData ? key.ctrlData : key.data);
@@ -1546,10 +1599,18 @@ function MobileTerminalControls({
   };
 
   useLayoutEffect(() => {
+    const node = commandInputRef.current;
+    if (fieldKey > 0 && node) {
+      node.value = "";
+      node.defaultValue = "";
+    }
+  }, [commandInputRef, fieldKey]);
+
+  useLayoutEffect(() => {
     if (expandingInput) {
       autosizeMobileCommandTextarea(commandInputRef.current);
     }
-  }, [commandInputRef, controlsScalePercent, expandingInput, value]);
+  }, [commandInputRef, controlsScalePercent, expandingInput, fieldKey, value]);
 
   useLayoutEffect(() => {
     const root = rootRef.current;
@@ -1728,8 +1789,8 @@ function MobileTerminalControls({
         >
           <Smartphone size={15} />
         </button>
-        <Suspense fallback={null}>
-          <ParlayInput
+        <ParlayInput
+            key={fieldKey}
             value={value}
             onValueChange={setValue}
             onVoiceSubmit={(text) => {
@@ -1745,7 +1806,6 @@ function MobileTerminalControls({
             onKeyDown={onCommandTextareaKeyDown}
             inputRef={setCommandInputNode}
           />
-        </Suspense>
         <button
           className="term-send term-stage-command"
           type="button"

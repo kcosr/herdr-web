@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  FALLBACK_LAUNCHER_PRESETS,
-  legacyKindForPresetId,
   parseLauncherPresetsResponse,
   supportsLauncherPresets,
 } from "./launcherPresets";
@@ -41,8 +39,15 @@ describe("launcher presets", () => {
     });
   });
 
-  it("falls back to built-ins for malformed responses", () => {
-    expect(parseLauncherPresetsResponse({}).presets).toEqual(FALLBACK_LAUNCHER_PRESETS);
+  it("rejects malformed responses instead of inventing launcher options", () => {
+    expect(() => parseLauncherPresetsResponse({})).toThrow("invalid launcher presets response");
+    expect(() =>
+      parseLauncherPresetsResponse({
+        version: 1,
+        presets: [{ id: "builtin:codex", label: "Codex", built_in: true }],
+        warnings: [],
+      }),
+    ).toThrow("invalid launcher preset");
   });
 
   it("preserves an intentionally empty preset list", () => {
@@ -57,15 +62,5 @@ describe("launcher presets", () => {
       presets: [],
       warnings: [],
     });
-  });
-
-  it("maps built-in preset ids to legacy launch kinds", () => {
-    expect(legacyKindForPresetId("builtin:shell")).toBe("shell");
-    expect(legacyKindForPresetId("builtin:codex")).toBe("codex");
-    expect(legacyKindForPresetId("builtin:claude")).toBe("claude");
-    expect(legacyKindForPresetId("builtin:pi")).toBe("pi");
-    expect(legacyKindForPresetId("builtin:grok")).toBe("grok");
-    expect(legacyKindForPresetId("builtin:opencode")).toBe("opencode");
-    expect(legacyKindForPresetId("custom")).toBeNull();
   });
 });

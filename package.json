@@ -4,8 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "dev": "node scripts/dev.mjs",
     "dev:web": "npm run dev --prefix web",
     "build:web": "npm run build --prefix web",
+    "test:dev": "node --test scripts/dev.test.mjs",
     "test:web": "npm run test --prefix web",
     "lint:web": "npm run lint --prefix web",
     "vendor:check": "scripts/check-vendor.sh",
@@ -17,7 +19,7 @@
     "android:open": "cap open android",
     "package:tarball": "scripts/package-tarball.sh",
     "build": "npm run build:web && npm run bridge:build",
-    "test": "npm run test:web && npm run bridge:test",
+    "test": "npm run test:dev && npm run test:web && npm run bridge:test",
     "lint": "npm run lint:web && npm run bridge:fmt",
     "check": "npm run vendor:check && npm run lint && npm run test && npm run build"
   },

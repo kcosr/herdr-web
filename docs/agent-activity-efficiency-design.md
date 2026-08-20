@@ -79,7 +79,6 @@ Normal activity messages are full replacements for the pane agent presentation f
   "agent": "codex",
   "title": "Reviewing changes",
   "display_agent": "Codex",
-  "custom_status": "running tests",
   "state_labels": { "working": "Running" }
 }
 ```
@@ -134,7 +133,7 @@ On a valid `pane.agent_status_changed` message, the browser:
 
 - finds the pane by `pane_id`
 - verifies the pane still belongs to the reported `workspace_id`
-- replaces `agent_status`, `agent`, `title`, `display_agent`, `custom_status`, and `state_labels`
+- replaces `agent_status`, `agent`, `title`, `display_agent`, and `state_labels`
 - recomputes the affected workspace and tab aggregate statuses
 
 If the pane is missing or belongs to a different workspace, the browser does not create or move the

@@ -1,4 +1,12 @@
-import type { AgentStatus, PaneInfo, Snapshot, TabInfo, WorkspaceInfo } from "./types";
+import type {
+  AgentStatus,
+  LayoutRect,
+  PaneInfo,
+  Snapshot,
+  TabInfo,
+  WorkspaceInfo,
+} from "./types";
+import type { PaneFocusDirection } from "./commands";
 
 const statusRank: Record<AgentStatus, number> = {
   blocked: 0,
@@ -8,18 +16,29 @@ const statusRank: Record<AgentStatus, number> = {
   unknown: 4,
 };
 
-export function chooseSelectedPane(snapshot: Snapshot | null, currentPaneId: string | null) {
+export function chooseSelectedPane(
+  snapshot: Snapshot | null,
+  currentPaneId: string | null,
+  useSharedSelection = true,
+  preferSharedSelection = false,
+) {
   if (!snapshot || snapshot.panes.length === 0) {
     return null;
+  }
+  const sharedPaneId =
+    useSharedSelection &&
+    snapshot.selected_pane_id &&
+    snapshot.panes.some((pane) => pane.pane_id === snapshot.selected_pane_id)
+      ? snapshot.selected_pane_id
+      : null;
+  if (preferSharedSelection && sharedPaneId) {
+    return sharedPaneId;
   }
   if (currentPaneId && snapshot.panes.some((pane) => pane.pane_id === currentPaneId)) {
     return currentPaneId;
   }
-  if (
-    snapshot.selected_pane_id &&
-    snapshot.panes.some((pane) => pane.pane_id === snapshot.selected_pane_id)
-  ) {
-    return snapshot.selected_pane_id;
+  if (sharedPaneId) {
+    return sharedPaneId;
   }
   return snapshot.panes.find((pane) => pane.focused)?.pane_id ?? snapshot.panes[0].pane_id;
 }
@@ -28,20 +47,131 @@ export function chooseSelectedPaneForActiveWorkspace(
   snapshot: Snapshot | null,
   currentPaneId: string | null,
   activeWorkspaceId: string | null,
+  useSharedSelection = true,
+  preferSharedSelection = false,
 ) {
+  if (
+    preferSharedSelection &&
+    snapshot?.selected_pane_id &&
+    snapshot.panes.some((pane) => pane.pane_id === snapshot.selected_pane_id)
+  ) {
+    return snapshot.selected_pane_id;
+  }
   if (!snapshot || !activeWorkspaceId) {
-    return chooseSelectedPane(snapshot, currentPaneId);
+    return chooseSelectedPane(
+      snapshot,
+      currentPaneId,
+      useSharedSelection,
+      preferSharedSelection,
+    );
   }
   if (!snapshot.workspaces.some((workspace) => workspace.workspace_id === activeWorkspaceId)) {
-    return chooseSelectedPane(snapshot, currentPaneId);
+    return chooseSelectedPane(
+      snapshot,
+      currentPaneId,
+      useSharedSelection,
+      preferSharedSelection,
+    );
   }
   const currentPane = currentPaneId
     ? snapshot.panes.find((pane) => pane.pane_id === currentPaneId)
     : null;
   if (currentPane?.workspace_id === activeWorkspaceId) {
-    return chooseSelectedPane(snapshot, currentPaneId);
+    return chooseSelectedPane(
+      snapshot,
+      currentPaneId,
+      useSharedSelection,
+      preferSharedSelection,
+    );
   }
   return choosePaneForWorkspace(snapshot, activeWorkspaceId);
+}
+
+export function chooseDirectionalPane(
+  snapshot: Snapshot,
+  currentPaneId: string,
+  direction: PaneFocusDirection,
+) {
+  const layout = snapshot.layouts.find((candidate) =>
+    candidate.panes.some((pane) => pane.pane_id === currentPaneId),
+  );
+  const current = layout?.panes.find((pane) => pane.pane_id === currentPaneId);
+  if (!layout || !current) {
+    return null;
+  }
+
+  const candidates = layout.panes
+    .filter((pane) => pane.pane_id !== currentPaneId)
+    .map((pane) => ({
+      pane,
+      score: directionalPaneScore(current.rect, pane.rect, direction),
+    }))
+    .filter(
+      (
+        candidate,
+      ): candidate is {
+        pane: (typeof layout.panes)[number];
+        score: [number, number, number];
+      } => candidate.score !== null,
+    )
+    .sort((left, right) => compareDirectionScores(left.score, right.score));
+
+  const paneId = candidates[0]?.pane.pane_id;
+  return paneId ? snapshot.panes.find((pane) => pane.pane_id === paneId) ?? null : null;
+}
+
+function directionalPaneScore(
+  current: LayoutRect,
+  candidate: LayoutRect,
+  direction: PaneFocusDirection,
+): [number, number, number] | null {
+  const currentRight = current.x + current.width;
+  const currentBottom = current.y + current.height;
+  const candidateRight = candidate.x + candidate.width;
+  const candidateBottom = candidate.y + candidate.height;
+  const horizontal = direction === "left" || direction === "right";
+  const primaryGap =
+    direction === "left"
+      ? current.x - candidateRight
+      : direction === "right"
+        ? candidate.x - currentRight
+        : direction === "up"
+          ? current.y - candidateBottom
+          : candidate.y - currentBottom;
+  if (primaryGap < -Number.EPSILON) {
+    return null;
+  }
+
+  const currentOrthogonalStart = horizontal ? current.y : current.x;
+  const currentOrthogonalEnd = horizontal ? currentBottom : currentRight;
+  const candidateOrthogonalStart = horizontal ? candidate.y : candidate.x;
+  const candidateOrthogonalEnd = horizontal ? candidateBottom : candidateRight;
+  const orthogonalGap = Math.max(
+    0,
+    currentOrthogonalStart - candidateOrthogonalEnd,
+    candidateOrthogonalStart - currentOrthogonalEnd,
+  );
+  const currentOrthogonalCenter = (currentOrthogonalStart + currentOrthogonalEnd) / 2;
+  const candidateOrthogonalCenter =
+    (candidateOrthogonalStart + candidateOrthogonalEnd) / 2;
+
+  return [
+    orthogonalGap > 0 ? 1 : 0,
+    Math.max(0, primaryGap),
+    Math.abs(candidateOrthogonalCenter - currentOrthogonalCenter),
+  ];
+}
+
+function compareDirectionScores(
+  left: [number, number, number],
+  right: [number, number, number],
+) {
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return left[index] - right[index];
+    }
+  }
+  return 0;
 }
 
 export function choosePaneForWorkspace(snapshot: Snapshot, workspaceId: string) {
@@ -111,10 +241,11 @@ function inferredWorkspaceDefaultLabel(workspace: WorkspaceInfo, panes: readonly
 }
 
 export function paneSubtitle(pane: PaneInfo, workspace?: WorkspaceInfo, tab?: TabInfo) {
+  const stateLabel = pane.state_labels?.[pane.agent_status];
   const parts = [
     workspace?.label,
     tab?.label,
-    pane.custom_status || pane.display_agent || pane.agent,
+    stateLabel || pane.display_agent || pane.agent,
     pane.foreground_cwd || pane.cwd,
   ].filter(Boolean);
   return parts.join(" / ");
@@ -138,10 +269,30 @@ export function paneMeta(pane: PaneInfo) {
   return parts.join(" · ");
 }
 
-export function spaceSubtitle(workspace: WorkspaceInfo) {
+export function paneListSubtitle(
+  pane: PaneInfo,
+  workspaceLabel?: string,
+  tabLabel?: string,
+  bridgeLabel?: string,
+) {
+  const title = paneTitle(pane);
+  const parts = [bridgeLabel, workspaceLabel, tabLabel, ...paneMeta(pane).split(" · ")];
+  return parts
+    .filter((part): part is string => Boolean(part) && part !== title)
+    .filter((part, index, items) => items.indexOf(part) === index)
+    .join(" · ");
+}
+
+export function spaceSubtitle(
+  workspace: WorkspaceInfo,
+  bridgeLabel?: string,
+  agentCount = 0,
+) {
   const tabs = `${workspace.tab_count} tab${workspace.tab_count === 1 ? "" : "s"}`;
   const panes = `${workspace.pane_count} pane${workspace.pane_count === 1 ? "" : "s"}`;
-  return `${tabs} · ${panes}`;
+  const agents =
+    agentCount > 0 ? `${agentCount} agent${agentCount === 1 ? "" : "s"}` : undefined;
+  return [bridgeLabel, tabs, panes, agents].filter(Boolean).join(" · ");
 }
 
 export function sortTabsForWorkspace(tabs: TabInfo[], workspaceId: string) {

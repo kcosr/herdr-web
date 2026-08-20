@@ -10,6 +10,13 @@ export type WorkspaceInfo = {
   active_tab_id: string;
   agent_status: AgentStatus;
   can_clear_name?: boolean;
+  worktree?: {
+    repo_key: string;
+    repo_name: string;
+    repo_root: string;
+    checkout_path: string;
+    is_linked_worktree: boolean;
+  };
 };
 
 export type TabInfo = {
@@ -34,9 +41,10 @@ export type PaneInfo = {
   label?: string;
   agent?: string;
   title?: string;
+  terminal_title?: string;
+  terminal_title_stripped?: string;
   display_agent?: string;
   agent_status: AgentStatus;
-  custom_status?: string;
   state_labels?: Record<string, string>;
   revision: number;
 };
@@ -92,7 +100,6 @@ export type PaneAgentStatusChangedMessage = {
   agent: string | null;
   title: string | null;
   display_agent: string | null;
-  custom_status: string | null;
   state_labels: Record<string, string>;
 };
 

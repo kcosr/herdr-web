@@ -1,5 +1,11 @@
 import type * as React from "react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import {
+  focusNextTo,
+  focusOverlayTrigger,
+  trapFocusWithin,
+  useFocusReturn,
+} from "./overlayFocus";
 
 export type MenuItem = { key: string; label: string; danger?: boolean };
 
@@ -7,7 +13,10 @@ export type MenuItem = { key: string; label: string; danger?: boolean };
  * Long-press (touch / mouse-hold) and right-click both open a context menu;
  * a plain tap/click runs the row's normal select action.
  */
-export function useLongPress(onLong: (x: number, y: number) => void, onTap?: () => void) {
+export function useLongPress(
+  onLong: (x: number, y: number) => void,
+  onTap?: (x: number, y: number) => void,
+) {
   const timer = useRef<number | undefined>(undefined);
   const longFired = useRef(false);
   const start = useRef<{ x: number; y: number } | null>(null);
@@ -20,7 +29,7 @@ export function useLongPress(onLong: (x: number, y: number) => void, onTap?: () 
   };
 
   return {
-    onPointerDown: (event: React.PointerEvent) => {
+    onPointerDown: (event: React.PointerEvent<HTMLElement>) => {
       if (event.button === 2) {
         return;
       }
@@ -28,8 +37,10 @@ export function useLongPress(onLong: (x: number, y: number) => void, onTap?: () 
       start.current = { x: event.clientX, y: event.clientY };
       clear();
       const { clientX, clientY } = event;
+      const trigger = event.currentTarget;
       timer.current = window.setTimeout(() => {
         longFired.current = true;
+        focusOverlayTrigger(trigger);
         onLong(clientX, clientY);
       }, 480);
     },
@@ -45,18 +56,44 @@ export function useLongPress(onLong: (x: number, y: number) => void, onTap?: () 
     onPointerUp: () => clear(),
     onPointerCancel: () => clear(),
     onPointerLeave: () => clear(),
-    onClick: (event: React.MouseEvent) => {
+    onClick: (event: React.MouseEvent<HTMLElement>) => {
       if (longFired.current) {
         event.preventDefault();
         event.stopPropagation();
         longFired.current = false;
         return;
       }
-      onTap?.();
+      if (onTap) {
+        focusOverlayTrigger(event.currentTarget);
+        const rect = event.currentTarget.getBoundingClientRect();
+        onTap(rect.left, rect.bottom);
+      }
     },
-    onContextMenu: (event: React.MouseEvent) => {
+    onContextMenu: (event: React.MouseEvent<HTMLElement>) => {
       event.preventDefault();
+      focusOverlayTrigger(event.currentTarget);
       onLong(event.clientX, event.clientY);
+    },
+    onKeyDown: (event: React.KeyboardEvent<HTMLElement>) => {
+      const directActivation =
+        Boolean(onTap) &&
+        event.currentTarget.tagName !== "BUTTON" &&
+        (event.key === "Enter" || event.key === " ");
+      if (
+        !directActivation &&
+        event.key !== "ContextMenu" &&
+        !(event.shiftKey && event.key === "F10")
+      ) {
+        return;
+      }
+      event.preventDefault();
+      focusOverlayTrigger(event.currentTarget);
+      const rect = event.currentTarget.getBoundingClientRect();
+      if (directActivation) {
+        onTap?.(rect.left, rect.bottom);
+      } else {
+        onLong(rect.left, rect.bottom);
+      }
     },
   };
 }
@@ -77,7 +114,11 @@ export function ActionMenu({
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
+  const overlayRef = useRef<HTMLDivElement | null>(null);
+  const { targetRef: returnFocusRef, skipFocusReturn } = useFocusReturn();
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const [focusedIndex, setFocusedIndex] = useState(0);
+  const titleId = useId();
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -97,9 +138,18 @@ export function ActionMenu({
     setPos({ left: Math.max(margin, left), top: Math.max(margin, top) });
   }, [x, y]);
 
+  useLayoutEffect(() => {
+    if (!pos) {
+      return;
+    }
+    const firstItem = ref.current?.querySelector<HTMLButtonElement>('[role="menuitem"]');
+    (firstItem ?? ref.current)?.focus();
+  }, [pos]);
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        event.preventDefault();
         onClose();
       }
     };
@@ -107,27 +157,95 @@ export function ActionMenu({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  const onMenuKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+      return;
+    }
+    if (event.key === "Tab") {
+      event.preventDefault();
+      event.stopPropagation();
+      const moved = focusNextTo(returnFocusRef.current, overlayRef.current, event.shiftKey);
+      if (moved) {
+        skipFocusReturn();
+      }
+      onClose();
+      return;
+    }
+    if (
+      event.key !== "ArrowDown" &&
+      event.key !== "ArrowUp" &&
+      event.key !== "Home" &&
+      event.key !== "End"
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    const menuItems = Array.from(
+      event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
+    );
+    if (menuItems.length === 0) {
+      return;
+    }
+    const activeIndex = menuItems.findIndex((item) => item === document.activeElement);
+    const lastIndex = menuItems.length - 1;
+    const nextIndex =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? lastIndex
+          : event.key === "ArrowDown"
+            ? activeIndex < 0 || activeIndex === lastIndex
+              ? 0
+              : activeIndex + 1
+            : activeIndex <= 0
+              ? lastIndex
+              : activeIndex - 1;
+    setFocusedIndex(nextIndex);
+    menuItems[nextIndex]?.focus();
+  };
+
   return (
-    <div className="overlay-root">
-      <button className="overlay-scrim" type="button" aria-label="Dismiss menu" onClick={onClose} />
+    <div ref={overlayRef} className="overlay-root">
+      <button
+        className="overlay-scrim"
+        type="button"
+        tabIndex={-1}
+        aria-label="Dismiss menu"
+        onClick={onClose}
+      />
       <div
         ref={ref}
         className="menu"
         role="menu"
+        aria-label={title ? undefined : "Actions"}
+        aria-labelledby={title ? titleId : undefined}
+        tabIndex={items.length === 0 ? -1 : undefined}
+        onKeyDown={onMenuKeyDown}
         style={{
           left: pos?.left ?? x,
           top: pos?.top ?? y,
           visibility: pos ? "visible" : "hidden",
         }}
       >
-        {title ? <div className="menu-title">{title}</div> : null}
-        {items.map((item) => (
+        {title ? (
+          <div id={titleId} className="menu-title">
+            {title}
+          </div>
+        ) : null}
+        {items.map((item, index) => (
           <button
             key={item.key}
             className="menu-item"
             type="button"
             role="menuitem"
+            tabIndex={index === focusedIndex ? 0 : -1}
             data-danger={item.danger || undefined}
+            onFocus={() => setFocusedIndex(index)}
             onClick={() => onPick(item.key)}
           >
             {item.label}
@@ -157,6 +275,8 @@ export function RenameDialog({
 }) {
   const [value, setValue] = useState(initial);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  useFocusReturn();
+  const titleId = useId();
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -173,17 +293,31 @@ export function RenameDialog({
 
   return (
     <div className="overlay-root">
-      <button className="overlay-scrim" type="button" aria-label="Cancel" onClick={onCancel} />
+      <button
+        className="overlay-scrim"
+        type="button"
+        tabIndex={-1}
+        aria-label="Cancel"
+        onClick={onCancel}
+      />
       <form
         className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         onSubmit={submit}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
+            event.preventDefault();
             onCancel();
+            return;
           }
+          trapFocusWithin(event);
         }}
       >
-        <div className="modal-title">{title}</div>
+        <div id={titleId} className="modal-title">
+          {title}
+        </div>
         <input
           ref={inputRef}
           className="field"
@@ -227,6 +361,9 @@ export function ConfirmDialog({
   onConfirm: () => void;
 }) {
   const dialogRef = useRef<HTMLDivElement | null>(null);
+  useFocusReturn();
+  const titleId = useId();
+  const messageId = useId();
 
   useEffect(() => {
     dialogRef.current?.focus();
@@ -234,12 +371,20 @@ export function ConfirmDialog({
 
   return (
     <div className="overlay-root">
-      <button className="overlay-scrim" type="button" aria-label="Cancel" onClick={onCancel} />
+      <button
+        className="overlay-scrim"
+        type="button"
+        tabIndex={-1}
+        aria-label="Cancel"
+        onClick={onCancel}
+      />
       <div
         ref={dialogRef}
         className="modal"
         role="dialog"
         aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={message ? messageId : undefined}
         tabIndex={-1}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
@@ -253,10 +398,17 @@ export function ConfirmDialog({
             event.preventDefault();
             onConfirm();
           }
+          trapFocusWithin(event);
         }}
       >
-        <div className="modal-title">{title}</div>
-        {message ? <div className="modal-message">{message}</div> : null}
+        <div id={titleId} className="modal-title">
+          {title}
+        </div>
+        {message ? (
+          <div id={messageId} className="modal-message">
+            {message}
+          </div>
+        ) : null}
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onCancel}>
             Cancel

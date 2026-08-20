@@ -71,10 +71,73 @@ describe("BridgeConnectionController sockets", () => {
     expect(FakeWebSocket.instances).toHaveLength(3);
     expect(FakeWebSocket.instances.filter((socket) => socket.closed)).toHaveLength(0);
   });
+
+  it("stops applying shared selection events without recreating event sockets", async () => {
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let sharedPaneId: string | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            ...emptySnapshot(),
+            selected_pane_id: sharedPaneId,
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+    const connectionRefs = { current: {} } as MutableRefObject<Record<string, BridgeConnectionRef>>;
+    const setConnectionStates = vi.fn() as unknown as Dispatch<
+      SetStateAction<Record<string, BridgeConnectionState>>
+    >;
+    const { render, onPaneSelection } = createConnectionHarness({
+      runtime: bridgeRuntime("bridge-a"),
+      connectionRefs,
+      setConnectionStates,
+    });
+
+    await render(vi.fn(), true);
+    const uiEvents = FakeWebSocket.instances.find(
+      (socket) => socket.url === "ws://bridge-a/ws/ui-events",
+    );
+    if (!uiEvents) {
+      throw new Error("missing UI events socket");
+    }
+    sharedPaneId = "pane-a";
+    await act(async () => {
+      uiEvents.dispatchEvent(
+        new MessageEvent("message", {
+          data: JSON.stringify({ type: "herdr_web.selection_changed", pane_id: "pane-a" }),
+        }),
+      );
+      await Promise.resolve();
+    });
+    expect(onPaneSelection).toHaveBeenCalledTimes(1);
+
+    await render(vi.fn(), false);
+    sharedPaneId = "pane-b";
+    await act(async () => {
+      uiEvents.dispatchEvent(
+        new MessageEvent("message", {
+          data: JSON.stringify({ type: "herdr_web.selection_changed", pane_id: "pane-b" }),
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(onPaneSelection).toHaveBeenCalledTimes(1);
+    expect(connectionRefs.current["bridge-a"]?.snapshot?.selected_pane_id).toBe("pane-b");
+    expect(FakeWebSocket.instances).toHaveLength(3);
+    expect(FakeWebSocket.instances.filter((socket) => socket.closed)).toHaveLength(0);
+  });
 });
 
 describe("QuickPaneNoteDialog", () => {
   it("selects the title and submits an optional body", async () => {
+    const opener = document.createElement("button");
+    document.body.appendChild(opener);
+    opener.focus();
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -96,6 +159,7 @@ describe("QuickPaneNoteDialog", () => {
       throw new Error("missing quick note title input");
     }
     expect(document.activeElement).toBe(titleInput);
+    expect(container.querySelector<HTMLButtonElement>(".overlay-scrim")?.tabIndex).toBe(-1);
     expect(titleInput.selectionStart).toBe(0);
     expect(titleInput.selectionEnd).toBe(titleInput.value.length);
     const createButton = buttonByText(container, "Create");
@@ -121,6 +185,9 @@ describe("QuickPaneNoteDialog", () => {
       buttonByText(container, "Create").click();
     });
     expect(onSubmit).toHaveBeenLastCalledWith("Untitled note", "Follow-up details");
+
+    await act(async () => root.render(null));
+    expect(document.activeElement).toBe(opener);
   });
 });
 
@@ -608,11 +675,15 @@ function createConnectionHarness({
   const onPaneSelection = vi.fn();
   roots.push(root);
 
-  const render = async (onNotesChanged: (bridgeId: string) => void) => {
+  const render = async (
+    onNotesChanged: (bridgeId: string) => void,
+    followSharedSelection = true,
+  ) => {
     await act(async () => {
       root.render(
         <BridgeConnectionController
           runtime={runtime}
+          followSharedSelection={followSharedSelection}
           connectionRefs={connectionRefs}
           setConnectionStates={setConnectionStates}
           onPaneSelection={onPaneSelection}
@@ -625,7 +696,7 @@ function createConnectionHarness({
     });
   };
 
-  return { render };
+  return { render, onPaneSelection };
 }
 
 function bridgeRuntime(bridgeId: string): BridgeRuntime {

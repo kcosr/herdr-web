@@ -5230,6 +5230,12 @@ function Switcher({
   ) => void;
 }) {
   const [optionsMenu, setOptionsMenu] = useState<{ x: number; y: number } | null>(null);
+  const [agentSearch, setAgentSearch] = useState("");
+  useEffect(() => {
+    if (sidebarView !== "agents") {
+      setAgentSearch("");
+    }
+  }, [sidebarView]);
   const selectedBridgeView = selectedBridgeId
     ? (bridgeViews.find((view) => view.runtime.id === selectedBridgeId) ?? null)
     : null;
@@ -5317,12 +5323,31 @@ function Switcher({
     scopedWorkspaces,
   ]);
 
+  const agentSearchTrimmed = agentSearch.trim().toLowerCase();
+  const filteredAgentPanes = useMemo<ScopedAgentPane[]>(() => {
+    if (!agentSearchTrimmed) {
+      return agentPanes;
+    }
+    return agentPanes.filter((entry) => {
+      const title = paneTitle(entry.pane).toLowerCase();
+      const meta = paneMeta(entry.pane).toLowerCase();
+      const workspace = (entry.workspace?.label ?? "").toLowerCase();
+      const tab = (entry.tabLabel ?? "").toLowerCase();
+      return (
+        title.includes(agentSearchTrimmed) ||
+        meta.includes(agentSearchTrimmed) ||
+        workspace.includes(agentSearchTrimmed) ||
+        tab.includes(agentSearchTrimmed)
+      );
+    });
+  }, [agentPanes, agentSearchTrimmed]);
+
   const agentGroups = useMemo(() => {
     if (agentGroup === "none") {
       return [];
     }
-    return buildScopedAgentGroups(agentPanes, agentGroup, hostScope);
-  }, [agentGroup, agentPanes, hostScope]);
+    return buildScopedAgentGroups(agentSearchTrimmed ? filteredAgentPanes : agentPanes, agentGroup, hostScope);
+  }, [agentGroup, agentPanes, filteredAgentPanes, agentSearchTrimmed, hostScope]);
 
   const spaceGroups = useMemo<ScopedTabWorkspace[]>(
     () =>
@@ -5898,25 +5923,59 @@ function Switcher({
               {notesViewActive ? (
                 renderNoteRows()
               ) : sidebarView === "agents" ? (
-                agentPanes.length === 0 && disconnectedBridgeViews.length === 0 ? (
-                  <div className="empty">
-                    <strong>
-                      {emptyAgentListTitle(effectiveAgentPinnedOnly, agentActiveOnly)}
-                    </strong>
-                    <span>
-                      {effectiveAgentPinnedOnly || agentActiveOnly
-                        ? ""
-                        : "Open the Tabs view for plain panes."}
-                    </span>
-                  </div>
-                ) : (
-                  <>
-                    {renderDisconnectedBridgeRows()}
-                    {agentGroup !== "none"
-                      ? renderAgentGroupRows()
-                      : agentPanes.map((entry, index) => renderAgentRow(entry, index))}
-                  </>
-                )
+                <>
+                  {agentPanes.length > 0 ? (
+                    <div className="agent-search-row">
+                      <input
+                        className="agent-search-input"
+                        type="search"
+                        placeholder="Filter agents…"
+                        value={agentSearch}
+                        aria-label="Filter agents"
+                        spellCheck={false}
+                        autoComplete="off"
+                        onChange={(event) => setAgentSearch(event.currentTarget.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Escape") {
+                            setAgentSearch("");
+                          }
+                        }}
+                      />
+                    </div>
+                  ) : null}
+                  {filteredAgentPanes.length === 0 && disconnectedBridgeViews.length === 0 ? (
+                    <div className="empty">
+                      <strong>
+                        {agentSearchTrimmed
+                          ? "No matches"
+                          : emptyAgentListTitle(effectiveAgentPinnedOnly, agentActiveOnly)}
+                      </strong>
+                      <span>
+                        {agentSearchTrimmed
+                          ? `No agents match "${agentSearch.trim()}".`
+                          : effectiveAgentPinnedOnly || agentActiveOnly
+                            ? ""
+                            : "Open the Tabs view for plain panes."}
+                      </span>
+                      {agentSearchTrimmed ? (
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={() => setAgentSearch("")}
+                        >
+                          Clear filter
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <>
+                      {renderDisconnectedBridgeRows()}
+                      {agentGroup !== "none"
+                        ? renderAgentGroupRows()
+                        : filteredAgentPanes.map((entry, index) => renderAgentRow(entry, index))}
+                    </>
+                  )}
+                </>
               ) : spaceGroups.every((group) => group.tabs.length === 0) ? (
                 disconnectedBridgeViews.length > 0 ? (
                   <>{renderDisconnectedBridgeRows()}</>

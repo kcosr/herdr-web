@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-08-17 — session feb0abf4
+
+Files: bridge/src/web_bridge.rs
+## 2026-08-17 — session feb0abf4
+
+Files: bridge/src/web_bridge.rs
 ## 2026-08-04 — session 573726b5
 
 Files: CHANGELOG.md, AGENTS.md, web/src/App.tsx, web/src/paneSearch.ts, bridge/src/web_bridge.rs
@@ -8,6 +14,12 @@ Files: CHANGELOG.md, AGENTS.md, web/src/App.tsx, web/src/paneSearch.ts, bridge/s
 ### Breaking Changes
 
 ### Added
+
+- Added real-time agent search/filter to the sidebar agents view: a compact text input appears
+  above the agent list when any agents are present. Typing filters by agent title, meta (agent
+  name + directory), workspace label, and tab label. Pressing Escape clears the filter; switching
+  away from the agents view also clears it. Shows a "No matches" state with a clear button when
+  the filter yields zero results.
 
 - Added trailing voice-submit phrase detection (`bravely`, `gravely`, `briefly`, `lap`) to the
   mobile command input, so a spoken magic word sends the buffered dictation after a 1s

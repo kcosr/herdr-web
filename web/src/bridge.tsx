@@ -12,6 +12,7 @@ import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
 import { fetchWithTimeout } from "./fetchWithTimeout";
 import { addNativeResumeHandler } from "./native";
+import { randomId } from "./randomId";
 
 export const SAME_ORIGIN_BRIDGE_ID = "same-origin";
 
@@ -1409,10 +1410,7 @@ function displayNameFromUrl(baseUrl: string) {
 function createBackendId() {
   let id: string;
   do {
-    const cryptoApi = globalThis.crypto;
-    id = cryptoApi?.randomUUID
-      ? cryptoApi.randomUUID()
-      : `backend-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    id = randomId();
   } while (id === SAME_ORIGIN_BRIDGE_ID);
   return id;
 }

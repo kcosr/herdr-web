@@ -24,6 +24,10 @@ This is a lightweight internal onboarding note for agents working in this repo.
 - Keep generated outputs out of commits: `web/dist/`, `bridge/target/`, and
   `vendor/herdr-compat/target/`, `dist-packages/`, and Android build outputs.
 - The bridge is local-first and currently has no full browser authentication. Treat LAN binding and upload behavior as security-sensitive.
+- Never call a secure-context-only browser API unguarded. herdr-web's whole mobile story is being
+  served over plain HTTP to a non-localhost origin (LAN IP, `.local`, Tailscale), which is *not* a
+  secure context — but `http://localhost` is, so local dev silently masks these. `crypto.randomUUID`
+  is the one that has already bitten; generate ids via `randomId()` in `web/src/randomId.ts`.
 - Persisted mobile display prefs in `web/src/App.tsx` (`DisplayPrefs`) need six touchpoints kept in
   sync: the type, `readDisplayPrefs()` default, `parseDisplayPrefsValue()`, a `useState`, the
   restore-on-load effect, and the save effect (object + dependency array). `isCompactLayout` (narrow

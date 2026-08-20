@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import type { KeyboardEvent } from "react";
 import type { ActionEnvelope, CommandContext } from "@parlay/client";
 import { autosizeMobileCommandTextarea } from "./mobileCommandTextarea";
+import { randomId } from "./randomId";
 
 // `@parlay/client` is an intentionally OPTIONAL, LOCAL-ONLY, NEVER-PUBLISHED dependency. It
 // resolves only via the gitignored symlink `web/local-deps/parlay-client` (see web/README.md);
@@ -67,8 +68,8 @@ export function ParlayInput({
   const idsRef = useRef<{ device: string; stream: string } | undefined>(undefined);
   if (!idsRef.current) {
     idsRef.current = {
-      device: `herdr-web-mobile-${crypto.randomUUID()}`,
-      stream: `herdr-web-mobile-command-${crypto.randomUUID()}`,
+      device: `herdr-web-mobile-${randomId()}`,
+      stream: `herdr-web-mobile-command-${randomId()}`,
     };
   }
   const { device: deviceId, stream: streamId } = idsRef.current;

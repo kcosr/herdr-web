@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   findFirstUrlInSelection,
+  normalizeMobileTerminalCopyText,
   normalizeSelectionForUrl,
   openableHttpUrl,
   selectedTextFromVisibleRows,
@@ -30,6 +31,54 @@ describe("terminal selection helpers", () => {
   it("does not trim balanced URL closing delimiters", () => {
     expect(findFirstUrlInSelection("https://example.com/a_(b)")).toBe(
       "https://example.com/a_(b)",
+    );
+  });
+
+  it("rejoins a copied URL split before a hyphen", () => {
+    expect(
+      normalizeMobileTerminalCopyText("https://example.com/herdr-hollow-centered\n-handle.apk"),
+    ).toBe("https://example.com/herdr-hollow-centered-handle.apk");
+  });
+
+  it("rejoins an indented URL continuation", () => {
+    expect(normalizeMobileTerminalCopyText("https://example.com/copy-fix-v3-9\n 1c39e1.apk")).toBe(
+      "https://example.com/copy-fix-v3-91c39e1.apk",
+    );
+  });
+
+  it("rejoins a URL that ends on a path delimiter", () => {
+    expect(normalizeMobileTerminalCopyText("https://example.com/release/\nNext")).toBe(
+      "https://example.com/release/Next",
+    );
+  });
+
+  it("preserves an unindented alphanumeric line break", () => {
+    expect(
+      normalizeMobileTerminalCopyText("https://example.com/rebased-v2-ab\n689b6-android-debug.apk"),
+    ).toBe("https://example.com/rebased-v2-ab\n689b6-android-debug.apk");
+  });
+
+  it("preserves an indented prose word after a URL", () => {
+    expect(normalizeMobileTerminalCopyText("https://example.com/release\n Next")).toBe(
+      "https://example.com/release\n Next",
+    );
+  });
+
+  it("preserves copied prose line boundaries and spaces", () => {
+    expect(normalizeMobileTerminalCopyText("first line\nsecond line with spaces")).toBe(
+      "first line\nsecond line with spaces",
+    );
+  });
+
+  it("preserves a hard line break after a complete URL", () => {
+    expect(normalizeMobileTerminalCopyText("https://example.com/release\nNext step")).toBe(
+      "https://example.com/release\nNext step",
+    );
+  });
+
+  it("preserves a hard line break before list prose", () => {
+    expect(normalizeMobileTerminalCopyText("https://example.com/release/\n- Next step")).toBe(
+      "https://example.com/release/\n- Next step",
     );
   });
 

@@ -80,6 +80,11 @@ Files: CHANGELOG.md, AGENTS.md, web/src/App.tsx, web/src/paneSearch.ts, bridge/s
   new upstream types they reference, and migrated the bridge's launcher agent-split to herdr
   `v0.8.0`'s redesigned `agent.start` (which now starts a managed agent in an existing pane instead
   of creating and placing the pane itself).
+- Compress terminal output with gzip when the client and bridge both support it.
+  [PR #59](https://github.com/kcosr/herdr-web/pull/59)
+- Stop blinking the terminal cursor on touch devices so idle terminals do not keep redrawing.
+  Desktop cursors still blink.
+  [PR #60](https://github.com/kcosr/herdr-web/pull/60)
 
 ### Fixed
 
@@ -113,6 +118,8 @@ Files: CHANGELOG.md, AGENTS.md, web/src/App.tsx, web/src/paneSearch.ts, bridge/s
   (machine hostname, Tailscale name, remote IP) should pass
   `--allow-origin http://HOSTNAME:PORT` when launching the bridge, or configure herdr
   itself with an `--allow-origin` flag for the serving hostname.
+- Join canvas-wrapped HTTP(S) URLs when copying from a mobile terminal.
+  [PR #61](https://github.com/kcosr/herdr-web/pull/61)
 
 ### Removed
 

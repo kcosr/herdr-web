@@ -24,6 +24,8 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{extract::Request as AxumRequest, Json, Router};
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use futures_util::{SinkExt, StreamExt};
 use herdr_compat::TryClone as _;
 use serde::{Deserialize, Serialize};
@@ -85,6 +87,11 @@ const DEFAULT_TERMINAL_OUTPUT_COALESCE_MS: u64 = 16;
 const MAX_TERMINAL_OUTPUT_COALESCE_MS: u64 = 256;
 const TERMINAL_OUTPUT_COALESCE_MAX_BYTES: usize = 32 * 1024;
 const TERMINAL_OUTPUT_COALESCE_MAX_CHUNKS: usize = 256;
+const TERMINAL_OUTPUT_FRAME_RAW: u8 = 0;
+const TERMINAL_OUTPUT_FRAME_GZIP: u8 = 1;
+const TERMINAL_OUTPUT_GZIP_MIN_BYTES: usize = 256;
+const TERMINAL_OUTPUT_GZIP_ACKNOWLEDGEMENT: &str =
+    r#"{"type":"terminal_output_encoding","encoding":"gzip"}"#;
 const DAEMON_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const ACTIVITY_WATCHER_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const ACTIVITY_WATCHER_MAX_BACKOFF: Duration = Duration::from_secs(30);
@@ -241,6 +248,7 @@ struct TerminalQuery {
     cols: Option<u16>,
     rows: Option<u16>,
     coalesce_ms: Option<u64>,
+    output_encoding: Option<TerminalOutputWireEncoding>,
     #[serde(default)]
     takeover: bool,
 }
@@ -281,6 +289,13 @@ fn default_scroll_lines() -> u16 {
 enum TerminalOutput {
     Bytes(Bytes),
     Close(String),
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TerminalOutputWireEncoding {
+    Identity,
+    Gzip,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -558,6 +573,38 @@ impl TerminalOutputCoalescer {
 
     #[cfg(not(test))]
     fn record_coalesced_send(&mut self, _chunks: usize, _bytes: usize, _latency: Duration) {}
+}
+
+fn gzip_fast(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(bytes).ok()?;
+    encoder.finish().ok()
+}
+
+fn encode_terminal_output_frame(bytes: Bytes, encoding: TerminalOutputWireEncoding) -> Bytes {
+    if encoding == TerminalOutputWireEncoding::Identity {
+        return bytes;
+    }
+
+    if bytes.len() >= TERMINAL_OUTPUT_GZIP_MIN_BYTES {
+        if let Some(compressed) = gzip_fast(&bytes) {
+            if compressed.len() < bytes.len() {
+                let mut frame = Vec::with_capacity(compressed.len() + 1);
+                frame.push(TERMINAL_OUTPUT_FRAME_GZIP);
+                frame.extend_from_slice(&compressed);
+                return Bytes::from(frame);
+            }
+        }
+    }
+
+    raw_terminal_output_frame(bytes)
+}
+
+fn raw_terminal_output_frame(bytes: Bytes) -> Bytes {
+    let mut frame = Vec::with_capacity(bytes.len() + 1);
+    frame.push(TERMINAL_OUTPUT_FRAME_RAW);
+    frame.extend_from_slice(&bytes);
+    Bytes::from(frame)
 }
 
 fn drain_terminal_output_pending(
@@ -3999,6 +4046,9 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
     let cols = query.cols.unwrap_or(DEFAULT_COLS);
     let rows = query.rows.unwrap_or(DEFAULT_ROWS);
     let coalesce_window = terminal_output_coalesce_window(query.coalesce_ms);
+    let output_encoding = query
+        .output_encoding
+        .unwrap_or(TerminalOutputWireEncoding::Identity);
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let session = match acquire_terminal_session(
         state.clone(),
@@ -4020,6 +4070,14 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
 
     let write_tx = session.write_tx.clone();
     let mut terminal_rx = session.output_tx.subscribe();
+    if output_encoding == TerminalOutputWireEncoding::Gzip {
+        let ack = Message::Text(TERMINAL_OUTPUT_GZIP_ACKNOWLEDGEMENT.into());
+        if ws_sender.send(ack).await.is_err() {
+            release_terminal_session(&state.terminal_sessions, &terminal_id, &session);
+            return;
+        }
+    }
+
     let mut output_coalescer = TerminalOutputCoalescer::new(coalesce_window);
     let _ = write_tx.send(ClientMessage::Resize {
         cols,
@@ -4036,6 +4094,7 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
                     if !handle_terminal_output_deadline(
                         &mut ws_sender,
                         &mut output_coalescer,
+                        output_encoding,
                     )
                     .await
                     {
@@ -4052,6 +4111,7 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
                         output,
                         &mut ws_sender,
                         &mut output_coalescer,
+                        output_encoding,
                     )
                     .await
                     {
@@ -4067,6 +4127,7 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
                         output,
                         &mut ws_sender,
                         &mut output_coalescer,
+                        output_encoding,
                     )
                     .await
                     {
@@ -4089,6 +4150,7 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
 async fn handle_terminal_output_deadline(
     ws_sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     output_coalescer: &mut TerminalOutputCoalescer,
+    output_encoding: TerminalOutputWireEncoding,
 ) -> bool {
     let Some(reason) = output_coalescer.handle_deadline() else {
         return true;
@@ -4096,23 +4158,35 @@ async fn handle_terminal_output_deadline(
     let Some(bytes) = output_coalescer.flush_pending(reason, Instant::now()) else {
         return true;
     };
-    if ws_sender.send(Message::Binary(bytes)).await.is_err() {
-        return false;
-    }
-    true
+    send_terminal_output_frame(ws_sender, bytes, output_encoding).await
+}
+
+async fn send_terminal_output_frame(
+    ws_sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    bytes: Bytes,
+    output_encoding: TerminalOutputWireEncoding,
+) -> bool {
+    ws_sender
+        .send(Message::Binary(encode_terminal_output_frame(
+            bytes,
+            output_encoding,
+        )))
+        .await
+        .is_ok()
 }
 
 async fn handle_terminal_output_message(
     output: Result<TerminalOutput, tokio::sync::broadcast::error::RecvError>,
     ws_sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     output_coalescer: &mut TerminalOutputCoalescer,
+    output_encoding: TerminalOutputWireEncoding,
 ) -> bool {
     match output {
         Ok(TerminalOutput::Bytes(bytes)) => {
             let decision = output_coalescer.push_bytes(bytes, Instant::now());
             match decision {
                 TerminalOutputCoalescingDecision::SendNow(bytes) => {
-                    if ws_sender.send(Message::Binary(bytes)).await.is_err() {
+                    if !send_terminal_output_frame(ws_sender, bytes, output_encoding).await {
                         return false;
                     }
                 }
@@ -4121,7 +4195,7 @@ async fn handle_terminal_output_message(
                     let Some(bytes) = output_coalescer.flush_pending(reason, Instant::now()) else {
                         return true;
                     };
-                    if ws_sender.send(Message::Binary(bytes)).await.is_err() {
+                    if !send_terminal_output_frame(ws_sender, bytes, output_encoding).await {
                         return false;
                     }
                 }
@@ -4132,7 +4206,7 @@ async fn handle_terminal_output_message(
             if let Some(bytes) =
                 output_coalescer.flush_pending(TerminalOutputFlushReason::Close, Instant::now())
             {
-                if ws_sender.send(Message::Binary(bytes)).await.is_err() {
+                if !send_terminal_output_frame(ws_sender, bytes, output_encoding).await {
                     return false;
                 }
             }
@@ -5105,6 +5179,43 @@ fn startup_daemon_error(err: BridgeError) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+
+    #[test]
+    fn gzip_terminal_output_frame_round_trips_and_reduces_repeated_output() {
+        let payload = Bytes::from(vec![b'x'; 4096]);
+
+        let frame = encode_terminal_output_frame(payload.clone(), TerminalOutputWireEncoding::Gzip);
+
+        assert_eq!(frame[0], TERMINAL_OUTPUT_FRAME_GZIP);
+        let mut decoded = Vec::new();
+        GzDecoder::new(&frame[1..])
+            .read_to_end(&mut decoded)
+            .expect("gzip terminal output should decode");
+        assert_eq!(decoded, payload);
+        assert!(frame.len() < payload.len() / 4);
+    }
+
+    #[test]
+    fn identity_terminal_output_encoding_preserves_legacy_frames() {
+        let payload = Bytes::from_static(b"legacy terminal bytes");
+
+        let frame =
+            encode_terminal_output_frame(payload.clone(), TerminalOutputWireEncoding::Identity);
+
+        assert_eq!(frame, payload);
+    }
+
+    #[test]
+    fn gzip_terminal_output_frame_keeps_small_output_raw() {
+        let payload = Bytes::from_static(b"ready> ");
+
+        let frame = encode_terminal_output_frame(payload.clone(), TerminalOutputWireEncoding::Gzip);
+
+        assert_eq!(frame[0], TERMINAL_OUTPUT_FRAME_RAW);
+        assert_eq!(&frame[1..], payload);
+    }
 
     #[test]
     fn static_cache_headers_revalidate_entrypoints_and_public_files() {

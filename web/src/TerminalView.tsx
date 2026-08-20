@@ -33,7 +33,11 @@ import {
   terminalConnectionOverlayDelayMs,
 } from "./terminalConnectionStatus";
 import type { TerminalConnectionState } from "./terminalConnectionStatus";
-import { findFirstUrlInSelection, openableHttpUrl } from "./terminalSelection";
+import {
+  findFirstUrlInSelection,
+  normalizeMobileTerminalCopyText,
+  openableHttpUrl,
+} from "./terminalSelection";
 import { GhosttyRenderer } from "./terminalRenderer";
 import type { MobileTerminalTouchEvent, TerminalRenderer, TerminalSize } from "./terminalRenderer";
 import {
@@ -44,6 +48,11 @@ import {
 } from "./terminalInputTransport";
 import type { TerminalInputTransport } from "./terminalInputTransport";
 import { DEFAULT_TERMINAL_OUTPUT_COALESCE_MS } from "./terminalOutputCoalescing";
+import {
+  createTerminalOutputFrameDecoder,
+  isTerminalOutputGzipAcknowledgement,
+  terminalOutputGzipSupported,
+} from "./terminalOutputEncoding";
 import { DEFAULT_TERMINAL_FONT_SIZE_PX } from "./terminalPrefs";
 import {
   TERMINAL_FOREGROUND_FAST_ATTEMPTS,
@@ -77,6 +86,8 @@ type Props = {
   scrollSensitivity?: number;
   /** Supplemental browser-native input controls for narrow touch screens. */
   mobileControls?: boolean;
+  /** Whether the terminal cursor blinks. Off on touch devices. */
+  cursorBlink?: boolean;
   /** Terminal renderer font size in CSS pixels. */
   terminalFontSizePx?: number;
   /** Percentage scale applied to mobile terminal controls. */
@@ -164,6 +175,7 @@ export function TerminalView({
   autoFocus = true,
   scrollSensitivity = 1,
   mobileControls = false,
+  cursorBlink = true,
   terminalFontSizePx = DEFAULT_TERMINAL_FONT_SIZE_PX,
   mobileControlsScalePercent = 100,
   mobileCompactControls = DEFAULT_MOBILE_COMPACT_CONTROLS,
@@ -227,6 +239,8 @@ export function TerminalView({
   scrollSensitivityRef.current = scrollSensitivity;
   const mobileControlsRef = useRef(mobileControls);
   mobileControlsRef.current = mobileControls;
+  const cursorBlinkRef = useRef(cursorBlink);
+  cursorBlinkRef.current = cursorBlink;
   const terminalFontSizePxRef = useRef(terminalFontSizePx);
   terminalFontSizePxRef.current = terminalFontSizePx;
   const mobileTapTargetRef = useRef(mobileTapTarget);
@@ -318,19 +332,19 @@ export function TerminalView({
         }
         return;
       }
-      const trimmed = event.text.trim();
+      const copiedText = normalizeMobileTerminalCopyText(event.text).trim();
       setMobileSelectionAction(null);
-      if (!trimmed) {
+      if (!copiedText) {
         rendererRef.current?.clearSelection();
         return;
       }
-      const url = findFirstUrlInSelection(trimmed);
+      const url = findFirstUrlInSelection(copiedText);
       if (url) {
-        setMobileSelectionAction({ text: trimmed, url });
+        setMobileSelectionAction({ text: copiedText, url });
         return;
       }
       rendererRef.current?.clearSelection();
-      void copyText(trimmed, "Copied selection");
+      void copyText(copiedText, "Copied selection");
     },
     [copyText],
   );
@@ -518,7 +532,10 @@ export function TerminalView({
     let resizeObserver: ResizeObserver | null = null;
     const generation = rendererGenerationRef.current + 1;
     rendererGenerationRef.current = generation;
-    const renderer: TerminalRenderer = new GhosttyRenderer(terminalFontSizePxRef.current);
+    const renderer: TerminalRenderer = new GhosttyRenderer(
+      terminalFontSizePxRef.current,
+      cursorBlinkRef.current,
+    );
     rendererRef.current = renderer;
     setConnectionState("connecting");
 
@@ -759,14 +776,31 @@ export function TerminalView({
         closeActiveSocket();
       }
       reconnectScheduledForSocket.clear();
+      const currentSocketGeneration = socketGeneration + 1;
+      socketGeneration = currentSocketGeneration;
       const nextSocket = new WebSocket(
-        terminalSocketUrl(wsUrl, terminalId, initialSize, terminalOutputCoalesceMs),
+        terminalSocketUrl(
+          wsUrl,
+          terminalId,
+          initialSize,
+          terminalOutputCoalesceMs,
+          terminalOutputGzipSupported(),
+        ),
+      );
+      let gzipOutputAcknowledged = false;
+      const outputDecoder = createTerminalOutputFrameDecoder(
+        (output) => writeTerminalData(currentSocketGeneration, output),
+        (error) => {
+          lastCloseReason = "terminal output decompression failed";
+          debugReconnect("output-decompression-failed", { error });
+          if (socket === nextSocket) {
+            nextSocket.close();
+          }
+        },
       );
       socket = nextSocket;
       socketRef.current = nextSocket;
       nextSocket.binaryType = "arraybuffer";
-      const currentSocketGeneration = socketGeneration + 1;
-      socketGeneration = currentSocketGeneration;
       socketStartedAt = performance.now();
       setConnectionState("connecting");
       debugReconnect("connect_start", { reason, socketGeneration, connectTimeoutMs });
@@ -805,6 +839,10 @@ export function TerminalView({
           return;
         }
         if (typeof event.data === "string") {
+          if (isTerminalOutputGzipAcknowledgement(event.data)) {
+            gzipOutputAcknowledged = true;
+            return;
+          }
           lastCloseReason = parseTerminalCloseReason(event.data) ?? lastCloseReason;
           return;
         }
@@ -812,17 +850,16 @@ export function TerminalView({
           // Terminal output only flows after a successful daemon attach, so
           // a transient attach-conflict streak is over.
           attachConflictRetries = 0;
-          writeTerminalData(currentSocketGeneration, new Uint8Array(event.data));
-          return;
-        }
-        if (event.data instanceof Blob) {
-          attachConflictRetries = 0;
-          void event.data.arrayBuffer().then((buffer) => {
-            writeTerminalData(currentSocketGeneration, new Uint8Array(buffer));
-          });
+          const output = new Uint8Array(event.data);
+          if (gzipOutputAcknowledged) {
+            void outputDecoder.enqueue(output);
+          } else {
+            writeTerminalData(currentSocketGeneration, output);
+          }
         }
       });
       nextSocket.addEventListener("close", () => {
+        outputDecoder.cancel();
         if (disposed || socket !== nextSocket || socketGeneration !== currentSocketGeneration) {
           return;
         }
@@ -1883,6 +1920,7 @@ function terminalSocketUrl(
   terminalId: string,
   size: TerminalSize,
   coalesceMs: number,
+  requestGzipOutput: boolean,
 ) {
   const params = new URLSearchParams({
     terminal_id: terminalId,
@@ -1891,6 +1929,9 @@ function terminalSocketUrl(
     takeover: "false",
     coalesce_ms: String(coalesceMs),
   });
+  if (requestGzipOutput) {
+    params.set("output_encoding", "gzip");
+  }
   return wsUrl("/ws/terminal", params);
 }
 

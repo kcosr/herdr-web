@@ -1,5 +1,6 @@
 const URL_PATTERN = /\bhttps?:\/\/[^\s"'<>`]+/iu;
 const URL_CONTINUATION_PATTERN = /^[^\s"'<>`]+/u;
+const TRAILING_URL_PATTERN = /\bhttps?:\/\/[^\s"'<>`]+$/iu;
 const TRAILING_URL_PUNCTUATION = /[.,;:!?]+$/u;
 const TRAILING_BALANCED_CLOSERS = /[)\]}]+$/u;
 
@@ -73,6 +74,32 @@ export function terminalUrlTapTarget(value: string | null, mouseTracking: boolea
   return openableHttpUrl(value);
 }
 
+export function normalizeMobileTerminalCopyText(selection: string) {
+  const lines = selection.replace(/\r\n?/gu, "\n").split("\n");
+  const logicalLines: string[] = [];
+  let currentLine = lines[0] ?? "";
+
+  for (const nextLine of lines.slice(1)) {
+    const url = currentLine.match(TRAILING_URL_PATTERN)?.[0] ?? "";
+    const trimmedNextLine = nextLine.trimStart();
+    const continuation = trimmedNextLine.match(URL_CONTINUATION_PATTERN)?.[0] ?? "";
+    if (
+      url &&
+      continuation === trimmedNextLine &&
+      (shouldJoinWrappedUrl(url, continuation) ||
+        shouldJoinIndentedUrlContinuation(nextLine, continuation))
+    ) {
+      currentLine += trimmedNextLine;
+    } else {
+      logicalLines.push(currentLine);
+      currentLine = nextLine;
+    }
+  }
+
+  logicalLines.push(currentLine);
+  return logicalLines.join("\n");
+}
+
 export function normalizeSelectionForUrl(selection: string) {
   return selection.replace(/\s*\n\s*/gu, "").replace(/[ \t\r\f\v]+/gu, " ").trim();
 }
@@ -98,6 +125,10 @@ function wrappedUrl(lines: string[], startIndex: number, match: RegExpMatchArray
 
 function shouldJoinWrappedUrl(url: string, continuation: string) {
   return /[/?#&=._~%+-]$/u.test(url) || /^[/?#&=._~%+-]/u.test(continuation);
+}
+
+function shouldJoinIndentedUrlContinuation(nextLine: string, continuation: string) {
+  return /^[ \t]+/u.test(nextLine) && /[0-9/?#&=._~%+-]/u.test(continuation);
 }
 
 export function trimUrlPunctuation(value: string) {

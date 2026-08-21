@@ -3489,3 +3489,41 @@ button {
 .terminal-stage:has(.terminal-mobile-controls) .terminal-selection-sheet {
   bottom: calc(var(--terminal-mobile-controls-height) + 8px * var(--mobile-controls-scale));
 }
+
+.terminal-connection-panel {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  max-width: 600px;
+  z-index: 10;
+  pointer-events: auto;
+}
+
+.terminal-connection-panel :is(.connection-card) {
+  font-size: 13px;
+  background: var(--surface1);
+  border-color: var(--surface2);
+}
+
+.terminal-connection-panel :is(.connection-card.conflict) {
+  border-left: 4px solid var(--red);
+  background: rgba(243, 139, 168, 0.08);
+  border-color: rgba(243, 139, 168, 0.3);
+}
+
+.terminal-connection-panel :is(.connection-item) {
+  border-left-color: var(--accent);
+  background: var(--surface0);
+}
+
+.terminal-connection-panel :is(.priority-btn) {
+  background: var(--surface1);
+  border-color: var(--surface2);
+  color: var(--text);
+}
+
+.terminal-connection-panel :is(.priority-btn:hover:not(:disabled)) {
+  background: var(--surface2);
+  border-color: var(--overlay0);
+}

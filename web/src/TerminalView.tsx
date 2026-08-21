@@ -10,6 +10,7 @@ import {
   TextCursorInput,
   X,
 } from "lucide-react";
+import ConnectionConflictCard from "./ConnectionConflictCard";
 import {
 
   useCallback,
@@ -1444,6 +1445,11 @@ export function TerminalView({
           {terminalConnectionCopy(connectionState, closeReason, hasAttachedForTerminal)}
         </div>
       ) : null}
+      {pane && (
+        <div className="terminal-connection-panel">
+          <ConnectionConflictCard terminalId={pane.terminal_id} httpUrl={httpUrl} />
+        </div>
+      )}
       {uploadStatus ? (
         <div className="terminal-upload-status" role="status" aria-live="polite">
           {uploadStatus}
@@ -1922,12 +1928,40 @@ function terminalSocketUrl(
   coalesceMs: number,
   requestGzipOutput: boolean,
 ) {
+  // Detect device/client type
+  const ua = navigator.userAgent.toLowerCase();
+  let deviceType = "browser";
+  let deviceName = "web";
+
+  if (ua.includes("ipad")) {
+    deviceType = "tablet";
+    deviceName = "ipad";
+  } else if (ua.includes("iphone")) {
+    deviceType = "mobile";
+    deviceName = "iphone";
+  } else if (ua.includes("android")) {
+    deviceType = ua.includes("tablet") ? "tablet" : "mobile";
+    deviceName = "android";
+  } else if (ua.includes("macintosh")) {
+    deviceType = "desktop";
+    deviceName = "mac";
+  } else if (ua.includes("windows")) {
+    deviceType = "desktop";
+    deviceName = "windows";
+  } else if (ua.includes("linux")) {
+    deviceType = "desktop";
+    deviceName = "linux";
+  }
+
   const params = new URLSearchParams({
     terminal_id: terminalId,
     cols: String(size.cols),
     rows: String(size.rows),
     takeover: "false",
     coalesce_ms: String(coalesceMs),
+    device_name: deviceName,
+    device_type: deviceType,
+    app_id: "herdr-web",
   });
   if (requestGzipOutput) {
     params.set("output_encoding", "gzip");

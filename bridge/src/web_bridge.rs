@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
+use uuid::Uuid;
 
 use axum::body::Bytes;
 use axum::extract::ws::{
@@ -55,6 +56,7 @@ use herdr_compat::protocol::{
 
 use crate::agent_activity::{AgentActivityListResponse, AgentActivityManager};
 use crate::agent_pins::{AgentPinsError, AgentPinsListResponse, AgentPinsManager};
+use crate::connection_manager::{ConnectionManager, TerminalConnection};
 use crate::launcher_presets::{
     layout_leaf_for_preset, split_layout_with_command_preset, CustomCommandPreset,
     LauncherPresetLaunch, LauncherPresetStore, ManagedAgentKind, ResolvedLauncherPreset,
@@ -135,6 +137,7 @@ struct BridgeState {
     selected_pane_id: Arc<Mutex<Option<String>>>,
     agent_activity: Arc<AgentActivityManager>,
     agent_pins: Arc<AgentPinsManager>,
+    connection_manager: Arc<ConnectionManager>,
     launcher_presets: Arc<LauncherPresetStore>,
     notes: Arc<NotesManager>,
     ui_event_tx: tokio::sync::broadcast::Sender<String>,
@@ -251,6 +254,12 @@ struct TerminalQuery {
     output_encoding: Option<TerminalOutputWireEncoding>,
     #[serde(default)]
     takeover: bool,
+    /// Device name/identifier (e.g., "macbook", "ipad", "web-chrome")
+    device_name: Option<String>,
+    /// Device type (e.g., "desktop", "tablet", "mobile", "browser")
+    device_type: Option<String>,
+    /// Client app identifier (e.g., "herdr-web-app", "claude-code")
+    app_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -1127,6 +1136,10 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
             .map_err(|message| io::Error::new(ErrorKind::InvalidInput, message))?,
     );
     let notes = Arc::new(NotesManager::new()?);
+    let preferences_path = default_store_dir("HERDR_WEB_DATA_DIR", "", "herdr-web-data")
+        .join("connection-priorities.json");
+    ensure_private_dir(&preferences_path.parent().unwrap_or(&PathBuf::from(".")))?;
+    let connection_manager = Arc::new(ConnectionManager::new(preferences_path));
     let request_policy = RequestPolicy {
         bind_host: options.host.clone(),
         bind_port: options.port,
@@ -1164,6 +1177,7 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
         selected_pane_id: Arc::new(Mutex::new(None)),
         agent_activity,
         agent_pins,
+        connection_manager,
         launcher_presets,
         notes,
         ui_event_tx: tokio::sync::broadcast::channel(256).0,
@@ -1237,12 +1251,30 @@ async fn run_server(options: BridgeOptions) -> io::Result<()> {
             .post(mobile_mode_toggle_handler)
             .options(preflight_handler),
     );
+    let connection_routes = Router::new()
+        .route(
+            "/api/terminal-connections",
+            get(terminal_connections_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/terminal-connections/{terminal_id}",
+            get(terminal_connection_detail_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/terminal-connections/{terminal_id}/priority",
+            post(set_connection_priority_handler).options(preflight_handler),
+        )
+        .route(
+            "/api/terminal-connections/{terminal_id}/nickname",
+            post(set_connection_nickname_handler).options(preflight_handler),
+        );
     let app = Router::new()
         .merge(agent_activity_routes)
         .merge(agent_pins_routes)
         .merge(notes_routes)
         .merge(launcher_preset_routes)
         .merge(mobile_mode_routes)
+        .merge(connection_routes)
         .route(
             "/api/snapshot",
             get(snapshot_handler).options(preflight_handler),
@@ -3026,6 +3058,76 @@ async fn upload_handler(
     Ok(Json(response))
 }
 
+#[derive(Debug, Serialize)]
+struct TerminalConnectionsResponse {
+    connections: std::collections::HashMap<String, Vec<TerminalConnection>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetPriorityRequest {
+    client_id: String,
+    priority: i32,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetNicknameRequest {
+    client_id: String,
+    nickname: String,
+}
+
+async fn terminal_connections_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+) -> Result<Json<TerminalConnectionsResponse>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let connections = state
+        .connection_manager
+        .get_all_connections()
+        .map_err(|e| BridgeError::Protocol(e))?;
+    Ok(Json(TerminalConnectionsResponse { connections }))
+}
+
+async fn terminal_connection_detail_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+    AxumPath(terminal_id): AxumPath<String>,
+) -> Result<Json<Vec<TerminalConnection>>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    let connections = state
+        .connection_manager
+        .get_connections(&terminal_id)
+        .map_err(|e| BridgeError::Protocol(e))?;
+    Ok(Json(connections))
+}
+
+async fn set_connection_priority_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+    AxumPath(terminal_id): AxumPath<String>,
+    Json(req): Json<SetPriorityRequest>,
+) -> Result<Json<serde_json::Value>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    state
+        .connection_manager
+        .set_priority(&terminal_id, &req.client_id, req.priority)
+        .map_err(|e| BridgeError::Protocol(e))?;
+    Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
+async fn set_connection_nickname_handler(
+    State(state): State<BridgeState>,
+    headers: HeaderMap,
+    AxumPath(terminal_id): AxumPath<String>,
+    Json(req): Json<SetNicknameRequest>,
+) -> Result<Json<serde_json::Value>, BridgeError> {
+    ensure_allowed_request(&headers, &state.request_policy)?;
+    state
+        .connection_manager
+        .set_nickname(&req.client_id, req.nickname)
+        .map_err(|e| BridgeError::Protocol(e))?;
+    Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
 async fn snapshot_handler(
     State(state): State<BridgeState>,
     headers: HeaderMap,
@@ -4050,6 +4152,20 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
         .output_encoding
         .unwrap_or(TerminalOutputWireEncoding::Identity);
     let (mut ws_sender, mut ws_receiver) = socket.split();
+
+    // Generate client ID and nickname from device metadata
+    let uuid_str = Uuid::new_v4().to_string();
+    let short_id = &uuid_str[..8];
+    let client_id = format!("{}_{}", query.app_id.as_deref().unwrap_or("client"), short_id);
+
+    let nickname = if let Some(device_name) = &query.device_name {
+        format!("{}-{}", device_name, query.device_type.as_deref().unwrap_or("device"))
+    } else if let Some(app_id) = &query.app_id {
+        format!("{}-{}", app_id, query.device_type.as_deref().unwrap_or("client"))
+    } else {
+        format!("web-client-{}", short_id)
+    };
+
     let session = match acquire_terminal_session(
         state.clone(),
         terminal_id.clone(),
@@ -4067,6 +4183,15 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
             return;
         }
     };
+
+    // Register this connection
+    if let Err(e) = state.connection_manager.register_connection(
+        &terminal_id,
+        &client_id,
+        nickname,
+    ) {
+        debug!("Failed to register connection: {}", e);
+    }
 
     let write_tx = session.write_tx.clone();
     let mut terminal_rx = session.output_tx.subscribe();
@@ -4142,6 +4267,11 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
                 else => break,
             }
         }
+    }
+
+    // Unregister this connection
+    if let Err(e) = state.connection_manager.unregister_connection(&terminal_id, &client_id) {
+        debug!("Failed to unregister connection: {}", e);
     }
 
     release_terminal_session(&state.terminal_sessions, &terminal_id, &session);

@@ -737,6 +737,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-width",
+ "uuid",
  "windows-sys",
 ]
 

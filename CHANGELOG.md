@@ -13,6 +13,11 @@ Files: CHANGELOG.md, AGENTS.md, web/src/App.tsx, web/src/paneSearch.ts, bridge/s
 
 ### Breaking Changes
 
+- Reconciled this fork's `main` with upstream `kcosr/herdr-web` `v0.5.0`. The bridge now requires
+  Herdr `v0.8.2` or newer reporting terminal protocol `20`; the fork's previous `v0.8.0`/protocol
+  `19` baseline (and its wider `16..=19` accept range) is gone, so Herdr `v0.8.0`/`v0.8.1` daemons
+  are rejected at startup. Upgrade Herdr before upgrading the bridge.
+
 ### Added
 
 - Added real-time agent search/filter to the sidebar agents view: a compact text input appears
@@ -122,6 +127,39 @@ Files: CHANGELOG.md, AGENTS.md, web/src/App.tsx, web/src/paneSearch.ts, bridge/s
   [PR #61](https://github.com/kcosr/herdr-web/pull/61)
 
 ### Removed
+
+## [0.5.0] - 2026-08-21
+
+### Breaking Changes
+
+- The bridge now requires Herdr `v0.8.2` or newer reporting terminal protocol `20`. Herdr
+  `v0.8.0` and `v0.8.1` daemons (protocol `19`) are rejected at startup.
+  [PR #69](https://github.com/kcosr/herdr-web/pull/69)
+
+### Changed
+
+- Refreshed the vendored Herdr compatibility sources to the `v0.8.2`/protocol `20` baseline.
+  The new protocol `20` server message variants (`TerminalBell`, `GraphicsFile`,
+  `GraphicsTransmissionRetired`) decode but are ignored by the bridge, adding no new behavior.
+  [PR #69](https://github.com/kcosr/herdr-web/pull/69)
+- Compress terminal output with gzip when the client and bridge both support it.
+  [PR #59](https://github.com/kcosr/herdr-web/pull/59), contributed by
+  [Will Hampson (@Whamp)](https://github.com/Whamp).
+- Changed the Attention agent sort to break ties within an attention band by the most recent agent
+  status change, matching Herdr's Priority agent panel, and kept the existing bridge, Space, and tab
+  order as the fallback for agents with no recorded transition.
+  [PR #68](https://github.com/kcosr/herdr-web/pull/68), contributed by
+  [Craig P. Motlin (@motlin)](https://github.com/motlin).
+- Stop blinking the terminal cursor on touch devices so idle terminals do not keep redrawing.
+  Desktop cursors still blink.
+  [PR #60](https://github.com/kcosr/herdr-web/pull/60), contributed by
+  [Will Hampson (@Whamp)](https://github.com/Whamp).
+
+### Fixed
+
+- Join canvas-wrapped HTTP(S) URLs when copying from a mobile terminal.
+  [PR #61](https://github.com/kcosr/herdr-web/pull/61), contributed by
+  [Will Hampson (@Whamp)](https://github.com/Whamp).
 
 ## [0.4.3] - 2026-08-17
 

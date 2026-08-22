@@ -2,8 +2,8 @@
 
 This bundle contains the `herdr-web` browser UI assets and the `herdr-web-bridge` executable.
 
-It does not include Herdr itself. Start or attach a Herdr `v0.8.0` or newer session that reports
-terminal protocol `19` separately before running this bundle.
+It does not include Herdr itself. Start or attach a Herdr `v0.8.2` or newer session that reports
+terminal protocol `20` separately before running this bundle.
 
 ## Run
 

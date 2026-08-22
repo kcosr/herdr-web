@@ -92,6 +92,8 @@ function SettingsHarness({ onChange }: { onChange: (enabled: boolean) => void })
 function settingsProps() {
   return {
     showMobileTerminalSettings: true,
+    mobileCompactControls: false,
+    onMobileCompactControlsChange: vi.fn(),
     notesEnabled: true,
     onNotesEnabled: vi.fn(),
     navigationSyncMode: "shared" as const,

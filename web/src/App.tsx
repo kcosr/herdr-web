@@ -178,7 +178,6 @@ import {
   chooseSelectedPaneForActiveWorkspace,
   countAttention,
   displayTabLabel,
-  isAttention,
   isLoud,
   paneMeta,
   paneListSubtitle,
@@ -2517,23 +2516,33 @@ export function App() {
   // `nextVisibleAgentPaneEntry` + `focusPane` path as the keyboard so mobile stays
   // in lockstep with desktop wrap behavior. Returns whether a pane was focused.
   const focusAdjacentAgentPane = (step: -1 | 1): boolean => {
-    const agentEntries = buildVisibleAgentPaneEntries(
-      buildVisibleScopedWorkspaces(
+    const combineWorkspaceGroupsForShortcut =
+      combineMatchingWorkspaceNames && hostScope === "all" && agentGroup === "workspace";
+    const agentEntries = filterCollapsedAgentPaneEntries(
+      buildVisibleAgentPaneEntries(
+        buildVisibleScopedWorkspaces(
+          bridgeViews,
+          selectedRuntime?.id ?? null,
+          hostScope,
+          scope,
+          activeSpace,
+          activeWorkspacesByBridgeId,
+          multiHostSpaceSelection,
+        ),
         bridgeViews,
-        selectedRuntime?.id ?? null,
         hostScope,
-        scope,
-        activeSpace,
-        activeWorkspacesByBridgeId,
+        agentGroup,
+        agentSort,
+        pinnedAgentKeys,
+        effectiveAgentPinnedOnly,
+        agentActivityTransitions,
+        agentActiveOnly,
+        combineWorkspaceGroupsForShortcut,
       ),
-      bridgeViews,
-      hostScope,
       agentGroup,
-      agentSort,
-      pinnedAgentKeys,
-      effectiveAgentPinnedOnly,
-      agentActivityTransitions,
-      agentActiveOnly,
+      hostScope,
+      combineWorkspaceGroupsForShortcut,
+      collapsedSidebarGroupKeys,
     );
     if (agentEntries.length === 0) {
       return false;
@@ -3133,39 +3142,6 @@ export function App() {
       }
 
       if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-        const combineWorkspaceGroupsForShortcut =
-          combineMatchingWorkspaceNames && hostScope === "all" && agentGroup === "workspace";
-        const agentEntries = filterCollapsedAgentPaneEntries(
-          buildVisibleAgentPaneEntries(
-            buildVisibleScopedWorkspaces(
-              bridgeViews,
-              selectedRuntime?.id ?? null,
-              hostScope,
-              scope,
-              activeSpace,
-              activeWorkspacesByBridgeId,
-              multiHostSpaceSelection,
-            ),
-            bridgeViews,
-            hostScope,
-            agentGroup,
-            agentSort,
-            pinnedAgentKeys,
-            effectiveAgentPinnedOnly,
-            agentActivityTransitions,
-            agentActiveOnly,
-            combineWorkspaceGroupsForShortcut,
-          ),
-          agentGroup,
-          hostScope,
-          combineWorkspaceGroupsForShortcut,
-          collapsedSidebarGroupKeys,
-        );
-        if (agentEntries.length === 0) {
-          return;
-        }
-        event.preventDefault();
-        event.stopPropagation();
         const step = event.key === "ArrowDown" ? 1 : -1;
         if (focusAdjacentAgentPane(step)) {
           event.preventDefault();
@@ -9340,10 +9316,6 @@ function sortAgentPanes(panes: PaneInfo[], sort: AgentSort, snapshot: Snapshot) 
 
   return [...panes].sort((a, b) => {
     if (sort === "attention") {
-      const attention = Number(isAttention(b.agent_status)) - Number(isAttention(a.agent_status));
-      if (attention !== 0) {
-        return attention;
-      }
       const status = AGENT_ATTENTION_ORDER[a.agent_status] - AGENT_ATTENTION_ORDER[b.agent_status];
       if (status !== 0) {
         return status;
@@ -9374,15 +9346,14 @@ function sortAgentPanes(panes: PaneInfo[], sort: AgentSort, snapshot: Snapshot) 
 export function sortScopedAgentPanes(entries: ScopedAgentPane[], sort: AgentSort) {
   return [...entries].sort((a, b) => {
     if (sort === "attention") {
-      const attention =
-        Number(isAttention(b.pane.agent_status)) - Number(isAttention(a.pane.agent_status));
-      if (attention !== 0) {
-        return attention;
-      }
       const status =
         AGENT_ATTENTION_ORDER[a.pane.agent_status] - AGENT_ATTENTION_ORDER[b.pane.agent_status];
       if (status !== 0) {
         return status;
+      }
+      const activity = compareLastStatusTransition(a, b);
+      if (activity !== 0) {
+        return activity;
       }
     } else if (sort === "status") {
       const status =

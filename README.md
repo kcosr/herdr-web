@@ -73,7 +73,7 @@ The top-level scripts hide that detail.
 
 For release tarball users:
 
-- A running Herdr `v0.8.0` or newer daemon/session that reports terminal protocol `19`
+- A running Herdr `v0.8.2` or newer daemon/session that reports terminal protocol `20`
 - A supported host for the downloaded bridge tarball. Current planned desktop release artifacts are
   Linux x86_64, macOS ARM64, and macOS x86_64.
 
@@ -82,7 +82,7 @@ For source development:
 - Node.js 22 or newer
 - npm
 - Rust stable
-- A running Herdr `v0.8.0` or newer daemon/session that reports terminal protocol `19`
+- A running Herdr `v0.8.2` or newer daemon/session that reports terminal protocol `20`
 
 Android development also needs a JDK and Android SDK. See [docs/android.md](docs/android.md).
 
@@ -104,7 +104,7 @@ http://127.0.0.1:8787
 ```
 
 The desktop tarball includes the web assets and `herdr-web-bridge`; it does not include Herdr.
-Start or attach Herdr `v0.8.0` or newer with terminal protocol `19` separately before running the
+Start or attach Herdr `v0.8.2` or newer with terminal protocol `20` separately before running the
 bridge.
 
 For Android, install the APK from the same release and add the bridge URL in the Bridge area of
@@ -278,7 +278,7 @@ an agent command. This preserves wrappers, SSH commands, containers, and other e
 
 ## Run Locally
 
-Start or attach a normal Herdr `v0.8.0` or newer session with terminal protocol `19` first:
+Start or attach a normal Herdr `v0.8.2` or newer session with terminal protocol `20` first:
 
 ```bash
 herdr
@@ -457,7 +457,7 @@ local `vendor/herdr-compat` crate for copied Herdr protocol/schema/client/socket
 bridge HTTP/WebSocket behavior in `bridge/src/web_bridge.rs`. A separate upstream Herdr checkout can
 be used for refreshes and drift audits, but a full `vendor/herdr` snapshot is not part of this repo.
 The cost is that `vendor/herdr-compat` must be kept compatible with Herdr protocol changes.
-The current compatibility baseline is Herdr `v0.8.0` and terminal protocol `19`; the bridge requires
+The current compatibility baseline is Herdr `v0.8.2` and terminal protocol `20`; the bridge requires
 that exact protocol rather than attempting to decode older or newer private wire formats.
 
 See [docs/vendoring.md](docs/vendoring.md) for the refresh process.

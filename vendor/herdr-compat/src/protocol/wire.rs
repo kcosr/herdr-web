@@ -57,6 +57,8 @@ pub enum ClientKeybindings {
 pub enum ClientLaunchMode {
     /// Full app client.
     App,
+    /// Full app client eligible for audited local direct graphics.
+    AppDirectGraphics,
     /// Direct terminal attach client.
     TerminalAttach,
 }
@@ -115,7 +117,11 @@ pub enum ClientInputEvent {
         code: ClientKeyCode,
         modifiers: u8,
         kind: ClientKeyKind,
+        repeat_count: u16,
+        generated_text: Option<String>,
+        source: ClientKeySource,
     },
+    TextCommit(String),
     Mouse {
         kind: ClientMouseKind,
         column: u16,
@@ -127,6 +133,17 @@ pub enum ClientInputEvent {
     },
     FocusGained,
     FocusLost,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClientKeySource {
+    Synthesized,
+    Vt {
+        bytes: Vec<u8>,
+    },
+    WindowsConsole {
+        record: crate::input::WindowsKeyRecord,
+    },
 }
 
 impl ClientKeyKind {
@@ -251,13 +268,16 @@ impl ClientMouseKind {
 }
 
 impl ClientInputEvent {
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     pub(crate) fn from_crossterm(event: crossterm::event::Event) -> Option<Self> {
         match event {
             crossterm::event::Event::Key(key) => Some(Self::Key {
                 code: ClientKeyCode::from_crossterm(key.code)?,
                 modifiers: key.modifiers.bits(),
                 kind: ClientKeyKind::from_crossterm(key.kind),
+                repeat_count: 1,
+                generated_text: None,
+                source: ClientKeySource::Synthesized,
             }),
             crossterm::event::Event::Mouse(mouse) => Some(Self::Mouse {
                 kind: ClientMouseKind::from_crossterm(mouse.kind)?,
@@ -278,13 +298,28 @@ impl ClientInputEvent {
                 code,
                 modifiers,
                 kind,
-            } => crate::raw_input::RawInputEvent::Key(
-                crate::input::TerminalKey::new(
+                repeat_count,
+                generated_text,
+                source,
+            } => {
+                let mut key = crate::input::TerminalKey::new(
                     code.to_crossterm(),
                     crossterm::event::KeyModifiers::from_bits_truncate(*modifiers),
                 )
-                .with_kind(kind.to_crossterm()),
-            ),
+                .with_generated_text(generated_text.clone());
+                key = match source {
+                    ClientKeySource::Synthesized => key,
+                    ClientKeySource::Vt { bytes } => key.with_vt_bytes(bytes.clone()),
+                    ClientKeySource::WindowsConsole { record } => key.with_windows_record(*record),
+                };
+                key = key
+                    .with_repeat_count(*repeat_count)
+                    .with_kind(kind.to_crossterm());
+                crate::raw_input::RawInputEvent::Key(key)
+            }
+            Self::TextCommit(text) => {
+                crate::raw_input::RawInputEvent::Text(crate::input::TextCommit::new(text.clone()))
+            }
             Self::Mouse {
                 kind,
                 column,
@@ -395,6 +430,25 @@ pub enum ClientMessage {
         /// Replace an existing writable controller for this terminal.
         takeover: bool,
     },
+
+    /// Result of the one armed Herdr-owned direct Kitty transmission.
+    GraphicsTransmissionResult {
+        transfer_id: u64,
+        image_id: u32,
+        success: bool,
+    },
+
+    /// One confirmed SGR 1016 mouse report with read-time host geometry.
+    InputPixels {
+        data: Vec<u8>,
+        cols: u16,
+        rows: u16,
+        width_px: u32,
+        height_px: u32,
+    },
+
+    /// The direct command was written and flushed; terminal response timing starts now.
+    GraphicsTransmissionStarted { transfer_id: u64, image_id: u32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -432,6 +486,19 @@ pub struct CellData {
     pub skip: bool,
     /// Index into `FrameData::hyperlinks` for this cell's OSC 8 target, if any.
     pub hyperlink: Option<u32>,
+}
+
+impl CellData {
+    pub(crate) fn from_ratatui_cell(cell: &ratatui::buffer::Cell) -> Self {
+        Self {
+            symbol: cell.symbol().to_owned(),
+            fg: color_to_u32(cell.fg),
+            bg: color_to_u32(cell.bg),
+            modifier: modifier_to_u16(cell.modifier),
+            skip: cell.skip,
+            hyperlink: None,
+        }
+    }
 }
 
 /// Cursor shape encoded as a DECSCUSR parameter.
@@ -517,14 +584,9 @@ impl FrameData {
                             index
                         }))
                     });
-                cells.push(CellData {
-                    symbol: cell.symbol().to_owned(),
-                    fg: color_to_u32(cell.fg),
-                    bg: color_to_u32(cell.bg),
-                    modifier: modifier_to_u16(cell.modifier),
-                    skip: cell.skip,
-                    hyperlink,
-                });
+                let mut cell = CellData::from_ratatui_cell(cell);
+                cell.hyperlink = hyperlink;
+                cells.push(cell);
             }
         }
 
@@ -655,6 +717,14 @@ pub enum ServerMessage {
     MouseCapture {
         /// True when Herdr mouse UI is enabled or the focused pane app requests mouse reporting.
         enabled: bool,
+        /// True only while the focused pane requests DEC SGR pixel mode 1016.
+        sgr_pixels: bool,
+    },
+
+    /// Whether the focused terminal requests Kitty report-all keyboard input.
+    KittyKeyboardReportAll {
+        /// True only while the focused pane requests `REPORT_ALL_KEYS_AS_ESCAPE_CODES`.
+        enabled: bool,
     },
 
     /// Apply the prefix-mode ASCII input-source change on the foreground client.
@@ -664,6 +734,25 @@ pub enum ServerMessage {
         /// Whether the ASCII input source should be active.
         active: bool,
     },
+
+    /// Ring the foreground client's outer terminal for pane-originated BEL characters.
+    TerminalBell {
+        /// Number of BEL characters parsed from one PTY read.
+        count: u16,
+    },
+
+    /// One validated Herdr-owned Kitty regular-file RGBA transmission.
+    GraphicsFile {
+        path: String,
+        expected_len: u64,
+        image_id: u32,
+        transfer_id: u64,
+        leading: Vec<u8>,
+        control: String,
+    },
+
+    /// Suppress a direct command that expired before terminal delivery.
+    GraphicsTransmissionRetired { transfer_id: u64, image_id: u32 },
 }
 
 // ---------------------------------------------------------------------------
@@ -1053,12 +1142,39 @@ mod tests {
                     code: ClientKeyCode::Char('N'),
                     modifiers: crossterm::event::KeyModifiers::SHIFT.bits(),
                     kind: ClientKeyKind::Press,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 },
                 ClientInputEvent::Key {
                     code: ClientKeyCode::Backspace,
                     modifiers: 0,
                     kind: ClientKeyKind::Press,
+                    repeat_count: 3,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Vt {
+                        bytes: b"\x1b[127;1u".to_vec(),
+                    },
                 },
+                ClientInputEvent::Key {
+                    code: ClientKeyCode::Esc,
+                    modifiers: 0,
+                    kind: ClientKeyKind::Release,
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::WindowsConsole {
+                        record: crate::input::WindowsKeyRecord {
+                            key_down: false,
+                            repeat_count: 1,
+                            virtual_key_code: 27,
+                            virtual_scan_code: 1,
+                            unicode: 27,
+                            control_key_state: 0,
+                        },
+                    },
+                },
+                ClientInputEvent::TextCommit("你🙂".to_owned()),
                 ClientInputEvent::Mouse {
                     kind: ClientMouseKind::Down(ClientMouseButton::Left),
                     column: 3,
@@ -1068,17 +1184,58 @@ mod tests {
             ],
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        // Freeze the protocol 20 input envelope before it is published.
+        assert_eq!(
+            encoded,
+            vec![
+                7, 5, 0, 15, 78, 1, 0, 1, 0, 0, 0, 0, 0, 0, 3, 0, 1, 8, 27, 91, 49, 50, 55, 59, 49,
+                117, 0, 14, 0, 2, 1, 0, 2, 0, 1, 27, 1, 27, 0, 1, 7, 228, 189, 160, 240, 159, 153,
+                130, 2, 0, 0, 3, 4, 0,
+            ]
+        );
         let (decoded, _): (ClientMessage, _) =
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
         assert_eq!(msg, decoded);
     }
 
     #[test]
+    fn wire_release_cannot_restore_a_grouped_repeat_count() {
+        let event = ClientInputEvent::Key {
+            code: ClientKeyCode::Esc,
+            modifiers: 0,
+            kind: ClientKeyKind::Release,
+            repeat_count: 3,
+            generated_text: Some("ignored".to_owned()),
+            source: ClientKeySource::Synthesized,
+        };
+
+        match event.to_raw_input_event() {
+            crate::raw_input::RawInputEvent::Key(key) => {
+                assert_eq!(key.kind, crossterm::event::KeyEventKind::Release);
+                assert_eq!(key.repeat_count, 1);
+                assert_eq!(key.generated_text, None);
+            }
+            other => panic!("expected key event, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn client_input_events_convert_to_raw_keys() {
+        let record = crate::input::WindowsKeyRecord {
+            key_down: false,
+            repeat_count: 1,
+            virtual_key_code: 78,
+            virtual_scan_code: 49,
+            unicode: 78,
+            control_key_state: 16,
+        };
         let shifted = ClientInputEvent::Key {
             code: ClientKeyCode::Char('N'),
             modifiers: crossterm::event::KeyModifiers::SHIFT.bits(),
             kind: ClientKeyKind::Press,
+            repeat_count: 1,
+            generated_text: None,
+            source: ClientKeySource::WindowsConsole { record },
         }
         .to_raw_input_event();
         match shifted {
@@ -1086,6 +1243,10 @@ mod tests {
                 assert_eq!(key.code, crossterm::event::KeyCode::Char('N'));
                 assert_eq!(key.modifiers, crossterm::event::KeyModifiers::SHIFT);
                 assert_eq!(key.kind, crossterm::event::KeyEventKind::Press);
+                assert_eq!(
+                    key.windows_record().map(|record| record.key_down),
+                    Some(false)
+                );
             }
             other => panic!("expected shifted key event, got {other:?}"),
         }
@@ -1094,6 +1255,10 @@ mod tests {
             code: ClientKeyCode::Backspace,
             modifiers: 0,
             kind: ClientKeyKind::Press,
+
+            repeat_count: 1,
+            generated_text: None,
+            source: crate::protocol::ClientKeySource::Synthesized,
         }
         .to_raw_input_event();
         match backspace {
@@ -1405,11 +1570,61 @@ mod tests {
 
     #[test]
     fn server_mouse_capture_roundtrip() {
-        let msg = ServerMessage::MouseCapture { enabled: true };
+        let msg = ServerMessage::MouseCapture {
+            enabled: true,
+            sgr_pixels: true,
+        };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ServerMessage, _) =
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn server_kitty_keyboard_report_all_roundtrip() {
+        let msg = ServerMessage::KittyKeyboardReportAll { enabled: true };
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn direct_graphics_messages_roundtrip() {
+        let client = ClientMessage::GraphicsTransmissionResult {
+            transfer_id: 7,
+            image_id: 42,
+            success: false,
+        };
+        let encoded = bincode::serde::encode_to_vec(&client, bincode::config::standard()).unwrap();
+        let (decoded, _): (ClientMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(client, decoded);
+
+        let server = ServerMessage::GraphicsFile {
+            path: "/run/user/1000/herdr/source/frame".into(),
+            expected_len: 4,
+            image_id: 42,
+            transfer_id: 7,
+            leading: b"\x1b[2;3H".to_vec(),
+            control: "a=T,f=32,i=42,q=0".into(),
+        };
+        let encoded = bincode::serde::encode_to_vec(&server, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(server, decoded);
+
+        let pixels = ClientMessage::InputPixels {
+            data: b"\x1b[<35;321;241M".to_vec(),
+            cols: 80,
+            rows: 24,
+            width_px: 800,
+            height_px: 480,
+        };
+        let encoded = bincode::serde::encode_to_vec(&pixels, bincode::config::standard()).unwrap();
+        let (decoded, _): (ClientMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(pixels, decoded);
     }
 
     #[test]
@@ -1421,6 +1636,15 @@ mod tests {
                 bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
             assert_eq!(msg, decoded);
         }
+    }
+
+    #[test]
+    fn server_terminal_bell_roundtrip() {
+        let msg = ServerMessage::TerminalBell { count: 3 };
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
     }
 
     // ---- Framing ----

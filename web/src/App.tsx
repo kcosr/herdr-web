@@ -29,6 +29,7 @@ import {
   Fragment,
   Suspense,
   lazy,
+  startTransition,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -4655,14 +4656,19 @@ export function BridgeConnectionController({
         }
         const patched = applySnapshotOverlays(next, currentRef, refreshGeneration);
         currentRef.snapshot = patched;
-        setConnectionStates((current) => ({
-          ...current,
-          [runtime.id]: {
-            connectionKey: requestConnectionKey,
-            snapshot: patched,
-            loadState: "ready",
-          },
-        }));
+        // Snapshot reconciliation touches the whole (un-memoized) pane/sidebar
+        // tree. Mark it a low-priority transition so it stays interruptible and
+        // never blocks keystroke handling on the main thread.
+        startTransition(() => {
+          setConnectionStates((current) => ({
+            ...current,
+            [runtime.id]: {
+              connectionKey: requestConnectionKey,
+              snapshot: patched,
+              loadState: "ready",
+            },
+          }));
+        });
       },
     });
     const refresh = () => refreshController.request();
@@ -4719,14 +4725,19 @@ export function BridgeConnectionController({
             { generation: currentRef.activityGeneration, message: parsed.message },
           ].slice(-100);
           currentRef.snapshot = result.snapshot;
-          setConnectionStates((current) => ({
-            ...current,
-            [runtime.id]: {
-              connectionKey: requestConnectionKey,
-              snapshot: result.snapshot,
-              loadState: "ready",
-            },
-          }));
+          // Agent-status activity bursts (idle→running→idle) are the most
+          // frequent snapshot updates while an agent is working. Defer their
+          // reconciliation so a chatty agent doesn't hitch typing.
+          startTransition(() => {
+            setConnectionStates((current) => ({
+              ...current,
+              [runtime.id]: {
+                connectionKey: requestConnectionKey,
+                snapshot: result.snapshot,
+                loadState: "ready",
+              },
+            }));
+          });
         } else if (result.status === "resync") {
           requestActivityResync();
         }
@@ -4761,14 +4772,16 @@ export function BridgeConnectionController({
               selected_pane_id: paneId,
             };
             currentRef.snapshot = patched;
-            setConnectionStates((current) => ({
-              ...current,
-              [runtime.id]: {
-                connectionKey: requestConnectionKey,
-                snapshot: patched,
-                loadState: "ready",
-              },
-            }));
+            startTransition(() => {
+              setConnectionStates((current) => ({
+                ...current,
+                [runtime.id]: {
+                  connectionKey: requestConnectionKey,
+                  snapshot: patched,
+                  loadState: "ready",
+                },
+              }));
+            });
           }
           const pane = currentSnapshot?.panes.find(
             (item) => item.pane_id === paneId,

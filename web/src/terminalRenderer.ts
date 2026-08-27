@@ -43,15 +43,38 @@ import {
 } from "./terminalImeInput";
 import type { TerminalImeState } from "./terminalImeInput";
 import { installTerminalImeFocusRedirect } from "./terminalImeFocus";
-import { applyTerminalTheme } from "./terminalThemeApply";
-import type { TerminalThemeColors } from "./terminalThemeApply";
 import type { Theme } from "./theme";
 
 const TERMINAL_FONT_FAMILY =
   'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "DejaVu Sans Mono", monospace';
 
-// Mirrors the app's CSS theme system (styles.css) so terminal content colors
-// follow the light/dark toggle instead of staying fixed to Catppuccin Mocha.
+interface TerminalThemeColors {
+  background: string;
+  foreground: string;
+  cursor: string;
+  selectionBackground: string;
+  black: string;
+  red: string;
+  green: string;
+  yellow: string;
+  blue: string;
+  magenta: string;
+  cyan: string;
+  white: string;
+  brightBlack: string;
+  brightRed: string;
+  brightGreen: string;
+  brightYellow: string;
+  brightBlue: string;
+  brightMagenta: string;
+  brightCyan: string;
+  brightWhite: string;
+}
+
+// Mirrors the app's CSS theme system (styles.css) so a terminal picks up the light/dark choice
+// instead of staying fixed to Catppuccin Mocha. ghostty-web bakes glyph colors into the WASM
+// terminal at construction and exposes no palette-update API, so the palette is only applied here,
+// when a terminal is created.
 const TERMINAL_THEME_COLORS: Record<Theme, TerminalThemeColors> = {
   dark: {
     background: "#11111b",
@@ -191,7 +214,6 @@ export type TerminalRenderer = {
   fit(): TerminalSize;
   refreshMetrics(): TerminalSize;
   setFontSize(fontSizePx: number): TerminalSize | null;
-  setTheme(theme: Theme): void;
   focus(): void;
   focusTextInput(): void;
   clearSelection(): void;
@@ -362,18 +384,6 @@ export class GhosttyRenderer implements TerminalRenderer {
       return null;
     }
     return this.refreshMetrics();
-  }
-
-  setTheme(theme: Theme) {
-    this.#theme = theme;
-    const colors = TERMINAL_THEME_COLORS[theme];
-    if (!this.#terminal) {
-      return;
-    }
-    if (!applyTerminalTheme(this.#terminal, colors)) {
-      this.#terminal.options.theme = colors;
-      this.#terminal.renderer?.getCanvas().style.setProperty("background-color", colors.background);
-    }
   }
 
   focus() {

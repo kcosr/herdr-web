@@ -13,8 +13,10 @@
 
 - Added a light/dark theme toggle (Sun/Moon button in the switcher header, next to
   Settings/Refresh). Light mode uses the Catppuccin Latte palette; the choice persists with the
-  other display preferences and is applied on load. The terminal recolors live with the rest of the
-  UI, so switching themes no longer leaves a dark terminal on a light page.
+  other display preferences and is applied on load. The app UI switches immediately; a terminal
+  pane keeps the palette it was created with and adopts the new theme the next time it is created
+  (new tab, reconnect, or reload), because the terminal's colors are fixed when it starts. Live
+  terminal color-sync is tracked as a follow-up.
 
 - Added real-time agent search/filter to the sidebar agents view: a compact text input appears
   above the agent list when any agents are present. Typing filters by agent title, meta (agent

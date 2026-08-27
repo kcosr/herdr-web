@@ -90,7 +90,7 @@ type Props = {
   mobileControls?: boolean;
   /** Whether the terminal cursor blinks. Off on touch devices. */
   cursorBlink?: boolean;
-  /** App light/dark theme; recolors terminal content to match the rest of the UI. */
+  /** App light/dark theme; the terminal palette is baked in when the pane is (re)created. */
   theme?: Theme;
   /** Terminal renderer font size in CSS pixels. */
   terminalFontSizePx?: number;
@@ -1173,10 +1173,6 @@ export function TerminalView({
       sendResizeRef.current(size);
     }
   }, [terminalFontSizePx]);
-
-  useEffect(() => {
-    rendererRef.current?.setTheme(theme);
-  }, [theme]);
 
   useEffect(() => {
     setMobileSelectionAction(null);

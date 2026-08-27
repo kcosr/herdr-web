@@ -4,6 +4,18 @@
    scoped sections (spaces -> panes), terminal on the side / in front.
    ======================================================================== */
 
+@font-face {
+  font-family: "JetBrainsMono Nerd Font Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+2500-27BF, U+E000-F8FF, U+F0000-10FFFF;
+  src:
+    local("JetBrainsMono NFM Regular"),
+    local("JetBrainsMonoNFM-Regular"),
+    url("/fonts/JetBrainsMonoNerdFontMono-Regular.woff2") format("woff2");
+}
+
 :root {
   color-scheme: dark;
 
@@ -49,6 +61,19 @@
   --st-idle: var(--green);
   --st-unknown: var(--overlay0);
 
+  /* Red-tinted foreground for surfaces built from `--red` over `--base`. Derived from the
+     theme's own `--text`/`--red`, so it stays legible in both light and dark. */
+  --on-red-soft: color-mix(in srgb, var(--red) 30%, var(--text));
+
+  /* Foreground for a label sitting on a saturated `--accent`/`--peach` fill. Both palettes keep
+     those fills mid-to-light, so this stays dark in light mode too — it is deliberately not
+     `--crust`, which flips light and drops these labels to ~2.3:1 in Latte. */
+  --on-accent: #11111b;
+
+  /* Foreground for a label on a solid `--red` fill. Mocha's red is light and Latte's is dark, so
+     unlike `--on-accent` this one has to flip with the theme. */
+  --on-red: #11111b;
+
   --r-sm: 6px;
   --r-md: 9px;
   --r-lg: 13px;
@@ -64,7 +89,7 @@
     sans-serif;
   --mono:
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
-    "DejaVu Sans Mono", monospace;
+    "DejaVu Sans Mono", "JetBrainsMono Nerd Font Mono", monospace;
 
   font-family: var(--ui);
   background: var(--app-bg);
@@ -73,6 +98,43 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  /* Catppuccin Latte */
+  --crust: #dce0e8;
+  --mantle: #e6e9ef;
+  --base: #eff1f5;
+  --surface0: #ccd0da;
+  --surface1: #bcc0cc;
+  --surface2: #acb0be;
+  --overlay0: #9ca0b0;
+  --overlay1: #8c8fa1;
+  --subtext0: #6c6f85;
+  --subtext1: #5c5f77;
+  --text: #4c4f69;
+
+  --blue: #1e66f5;
+  --lavender: #7287fd;
+  --sapphire: #209fb5;
+  --teal: #179299;
+  --green: #40a02b;
+  --yellow: #df8e1d;
+  --peach: #fe640b;
+  --red: #d20f39;
+  --mauve: #8839ef;
+
+  --sidebar-bg: #d3d8e2;
+  --row-hover: #e7eaf0;
+  --row-active: #dde1ea;
+  --line: #ccd0da;
+  --line-soft: #d8dce4;
+  --accent-soft: rgba(114, 135, 253, 0.14);
+  --terminal-touch-marker: #5865c9;
+
+  --on-red: #eff1f5;
 }
 
 * {
@@ -381,7 +443,7 @@ button {
 }
 
 .sidebar-scope button[data-on="true"] {
-  color: var(--crust);
+  color: var(--on-accent);
   background: var(--accent);
 }
 
@@ -503,7 +565,7 @@ button {
 }
 
 .scope button[data-on="true"] {
-  color: var(--crust);
+  color: var(--on-accent);
   background: var(--accent);
 }
 
@@ -681,7 +743,7 @@ button {
   font-family: var(--mono);
   font-size: 11px;
   font-weight: 600;
-  color: var(--crust);
+  color: var(--on-accent);
   background: var(--peach);
 }
 
@@ -3124,7 +3186,7 @@ button {
 
 .btn-primary {
   border-color: transparent;
-  color: var(--crust);
+  color: var(--on-accent);
   background: var(--accent);
 }
 
@@ -3139,7 +3201,7 @@ button {
 }
 
 .btn-danger:hover:not(:disabled) {
-  color: var(--crust);
+  color: var(--on-red);
   background: var(--red);
 }
 
@@ -3153,7 +3215,7 @@ button {
   border: 1px solid color-mix(in srgb, var(--red) 45%, var(--surface0));
   border-radius: 999px;
   background: color-mix(in srgb, var(--red) 18%, var(--base));
-  color: #ffd9e1;
+  color: var(--on-red-soft);
   font-size: 13px;
   transform: translateX(-50%);
   box-shadow: 0 12px 40px rgb(0 0 0 / 0.45);
@@ -3192,6 +3254,11 @@ button {
 .agent-search-input::-webkit-search-cancel-button {
   opacity: 0.5;
   cursor: pointer;
+}
+
+/* Chrome/Safari draw this clear glyph dark, which only reads on a light field. Invert it for the
+   dark palette; Latte's `--crust` field keeps the browser default. */
+:root:not([data-theme="light"]) .agent-search-input::-webkit-search-cancel-button {
   filter: invert(1);
 }
 

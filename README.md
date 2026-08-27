@@ -21,9 +21,11 @@ navigation, multi-client viewing, mobile input controls, and synchronized pane s
 ## Highlights
 
 - Shared browser terminal viewing with synchronized pane selection across desktop and mobile.
-- Mobile-friendly text input with stage/send actions, configurable tap focus, extended terminal
-  key controls with a compact-controls toggle, and trailing voice-submit phrase detection for
-  hands-free dictation.
+- A single terminal command composer at every viewport, with stage/send actions, configurable tap
+  focus, extended terminal key controls with a compact-controls toggle, and trailing voice-submit
+  phrase detection for hands-free dictation.
+- A light/dark theme toggle in the switcher header. The app switches immediately; an open terminal
+  pane keeps the palette it was created with until it is recreated.
 - Single-pane mode for split panes on touch devices, with a toggle to see the full split grid.
 - A mobile-mode toggle button that flips a presence flag in herdr-web's own data dir, for an
   external statusline script to check.

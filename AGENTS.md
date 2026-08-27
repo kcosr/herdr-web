@@ -47,10 +47,14 @@ This is a lightweight internal onboarding note for agents working in this repo.
   `web/package-lock.json` so `npm ci` never fetches it from a registry, and it resolves only via the
   gitignored symlink `web/local-deps/parlay-client` (setup in `web/README.md`). Do not add it as a
   registry dependency or commit the symlink. Two mechanisms keep it optional and must stay in sync:
-  the `parlayClientResolver` in `web/vite.config.ts` (resolves the local package for `vite dev`/tests
-  when the symlink is present) with `build.rolldownOptions.external` (externalizes it in production),
-  and the guarded `try { await import("@parlay/client") }` in `ParlayInput.tsx` that falls back
-  to a plain input at runtime when the module is absent. The type side is the single ambient shim
+  the `parlayClientResolver` in `web/vite.config.ts` (resolves the local package's entry from its
+  own `package.json` `exports`/`module`/`main` when the symlink is present, for `vite dev`, tests,
+  and production alike) with `build.rolldownOptions.external`, which externalizes it **only when the
+  symlink is absent** — with the symlink present the real package is bundled into `web/dist` so
+  parlay voice-submit works in the built app, which also means production output is
+  build-host-dependent; and the guarded `try { await import("@parlay/client") }` in
+  `ParlayInput.tsx` that falls back to a plain input at runtime when the module is absent (the
+  externalized specifier never resolves). The type side is the single ambient shim
   `web/types/parlay-client.d.ts` — do not reintroduce a duplicate under `web/src/`.
 
 ## Testing

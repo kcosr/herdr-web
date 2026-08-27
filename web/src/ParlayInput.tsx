@@ -7,10 +7,11 @@ import { randomId } from "./randomId";
 // `@parlay/client` is an intentionally OPTIONAL, LOCAL-ONLY, NEVER-PUBLISHED dependency. It
 // resolves only via the gitignored symlink `web/local-deps/parlay-client` (see web/README.md);
 // it is deliberately absent from package.json/package-lock.json so `npm ci` never fetches it.
-// This guarded dynamic import must stay in a try/catch: in production builds the specifier is
-// externalized (vite.config.ts `build.rolldownOptions.external`), so it rejects at runtime when
-// the package is absent and the component degrades to a plain input. Do NOT convert this to a
-// static top-level `import` or add a registry version.
+// This guarded dynamic import must stay in a try/catch: externalization is CONDITIONAL on the
+// symlink (vite.config.ts `build.rolldownOptions.external`). With the symlink present the real
+// package is bundled and this import resolves in dev, test, and production; with it absent the
+// specifier is externalized, so the import rejects at runtime and the component degrades to a
+// plain input. Do NOT convert this to a static top-level `import` or add a registry version.
 let parlay: typeof import("@parlay/client") | null = null;
 
 try {

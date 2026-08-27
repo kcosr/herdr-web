@@ -12,8 +12,9 @@ They do not publish npm packages, and the package versions are not release versi
 - GitHub CLI authenticated as a user that can create releases.
 - A local Herdr `v0.8.2` or newer session reporting terminal protocol `20` for browser and packaged
   bridge smoke testing.
-- The local `web/local-deps/parlay-client` symlink from [web/README.md](../web/README.md), needed
-  before any `npm ci --prefix web` below can resolve `@parlay/client`.
+- The local `web/local-deps/parlay-client` symlink from [web/README.md](../web/README.md). It
+  decides whether the built artifacts ship a working parlay voice-submit; see
+  [docs/packaging.md](packaging.md).
 
 ## Prepare
 
@@ -122,6 +123,8 @@ Open `http://127.0.0.1:8787` and verify:
   mobile-mode toggle flips `~/.local/share/herdr-web/mobile-mode`.
 - On a touch device with a split pane, the single-pane toggle switches between the selected pane
   and the full split grid.
+- The switcher header's light/dark toggle switches the app theme, both themes keep readable
+  control contrast, and a terminal pane opened after the switch uses the new palette.
 - New tabs can launch Shell and every enabled managed built-in agent.
 - Split right/down can launch Shell and every enabled managed built-in agent.
 - A custom preset launches its exact configured `argv`, including a wrapper or SSH-shaped command,

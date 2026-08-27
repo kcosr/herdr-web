@@ -998,7 +998,10 @@ fn parse_options(args: &[String]) -> Result<Option<BridgeOptions>, String> {
     // users to either (a) pass --allow-origin with their serving hostname, or
     // (b) start herdr with an --allow-origin flag for their hostname.
     // This ensures localhost-to-localhost communication always works.
-    if !allowed_origins.iter().any(|o| o.starts_with("http://localhost")) {
+    if !allowed_origins
+        .iter()
+        .any(|o| o.starts_with("http://localhost"))
+    {
         allowed_origins.push("http://localhost".to_string());
     }
 
@@ -1042,8 +1045,16 @@ fn normalize_remote_bridge_url(value: &str) -> Result<String, String> {
     let Some(authority) = normalized.strip_prefix("http://") else {
         return Err("remote bridge URL must use http:// (https is not supported)".into());
     };
-    if authority.is_empty() || authority.contains('/') || authority.contains('@') || authority.contains('?') || authority.contains('#') {
-        return Err("remote bridge URL must include a host and no credentials, query string, or fragments".into());
+    if authority.is_empty()
+        || authority.contains('/')
+        || authority.contains('@')
+        || authority.contains('?')
+        || authority.contains('#')
+    {
+        return Err(
+            "remote bridge URL must include a host and no credentials, query string, or fragments"
+                .into(),
+        );
     }
     Ok(normalized)
 }
@@ -1684,10 +1695,7 @@ fn posthog_enabled() -> bool {
 }
 
 fn content_security_policy(policy: &RequestPolicy, posthog_enabled: bool) -> HeaderValue {
-    let mut connect_src = vec![
-        "'self'".to_string(),
-        "data:".to_string(),
-    ];
+    let mut connect_src = vec!["'self'".to_string(), "data:".to_string()];
     // Only allow PostHog hosts if explicitly enabled
     if posthog_enabled {
         connect_src.push("https://us.i.posthog.com".to_string());
@@ -3739,7 +3747,13 @@ fn is_proxy_path_allowed(rest: &str) -> bool {
         return true;
     }
     // Exact match or prefix match for paths that have sub-path variants:
-    const ALLOWED: &[&str] = &["snapshot", "capabilities", "agent-activity", "agent-pins", "notes"];
+    const ALLOWED: &[&str] = &[
+        "snapshot",
+        "capabilities",
+        "agent-activity",
+        "agent-pins",
+        "notes",
+    ];
     for &prefix in ALLOWED {
         if path == prefix || path.starts_with(&format!("{prefix}/")) {
             return true;
@@ -3783,8 +3797,16 @@ fn encode_url_path_segment(segment: &str) -> String {
             out.push(b as char);
         } else {
             out.push('%');
-            out.push(char::from_digit((b >> 4) as u32, 16).unwrap().to_ascii_uppercase());
-            out.push(char::from_digit((b & 0xf) as u32, 16).unwrap().to_ascii_uppercase());
+            out.push(
+                char::from_digit((b >> 4) as u32, 16)
+                    .unwrap()
+                    .to_ascii_uppercase(),
+            );
+            out.push(
+                char::from_digit((b & 0xf) as u32, 16)
+                    .unwrap()
+                    .to_ascii_uppercase(),
+            );
         }
     }
     out
@@ -3795,7 +3817,10 @@ fn encode_url_path_segment(segment: &str) -> String {
 /// Splits on `/` and re-encodes each segment with [`encode_url_path_segment`], then rejoins.
 /// Slash separators are preserved; only within-segment bytes are escaped.
 fn encode_rest_for_url(rest: &str) -> String {
-    rest.split('/').map(encode_url_path_segment).collect::<Vec<_>>().join("/")
+    rest.split('/')
+        .map(encode_url_path_segment)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Proxies `/api/remote/<bridge_id>/<rest>` requests through to `<remote-url>/api/<rest>` on
@@ -4156,12 +4181,24 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
     // Generate client ID and nickname from device metadata
     let uuid_str = Uuid::new_v4().to_string();
     let short_id = &uuid_str[..8];
-    let client_id = format!("{}_{}", query.app_id.as_deref().unwrap_or("client"), short_id);
+    let client_id = format!(
+        "{}_{}",
+        query.app_id.as_deref().unwrap_or("client"),
+        short_id
+    );
 
     let nickname = if let Some(device_name) = &query.device_name {
-        format!("{}-{}", device_name, query.device_type.as_deref().unwrap_or("device"))
+        format!(
+            "{}-{}",
+            device_name,
+            query.device_type.as_deref().unwrap_or("device")
+        )
     } else if let Some(app_id) = &query.app_id {
-        format!("{}-{}", app_id, query.device_type.as_deref().unwrap_or("client"))
+        format!(
+            "{}-{}",
+            app_id,
+            query.device_type.as_deref().unwrap_or("client")
+        )
     } else {
         format!("web-client-{}", short_id)
     };
@@ -4185,11 +4222,10 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
     };
 
     // Register this connection
-    if let Err(e) = state.connection_manager.register_connection(
-        &terminal_id,
-        &client_id,
-        nickname,
-    ) {
+    if let Err(e) = state
+        .connection_manager
+        .register_connection(&terminal_id, &client_id, nickname)
+    {
         debug!("Failed to register connection: {}", e);
     }
 
@@ -4270,7 +4306,10 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
     }
 
     // Unregister this connection
-    if let Err(e) = state.connection_manager.unregister_connection(&terminal_id, &client_id) {
+    if let Err(e) = state
+        .connection_manager
+        .unregister_connection(&terminal_id, &client_id)
+    {
         debug!("Failed to unregister connection: {}", e);
     }
 
@@ -6696,7 +6735,10 @@ mod tests {
     #[test]
     fn encode_rest_for_url_preserves_safe_chars() {
         assert_eq!(encode_rest_for_url("snapshot"), "snapshot");
-        assert_eq!(encode_rest_for_url("agent-pins/pane-1/pin"), "agent-pins/pane-1/pin");
+        assert_eq!(
+            encode_rest_for_url("agent-pins/pane-1/pin"),
+            "agent-pins/pane-1/pin"
+        );
         assert_eq!(encode_rest_for_url("notes/abc_123"), "notes/abc_123");
     }
 
@@ -6704,9 +6746,15 @@ mod tests {
     fn encode_rest_for_url_encodes_query_injection_chars() {
         // A decoded '?' in a path segment must not become a query delimiter in the forwarded URL.
         // '=' is an RFC 3986 sub-delimiter and is preserved in path segments.
-        assert_eq!(encode_rest_for_url("snapshot?inject=bad"), "snapshot%3Finject=bad");
+        assert_eq!(
+            encode_rest_for_url("snapshot?inject=bad"),
+            "snapshot%3Finject=bad"
+        );
         assert_eq!(encode_rest_for_url("notes#fragment"), "notes%23fragment");
-        assert_eq!(encode_rest_for_url("notes/hello world"), "notes/hello%20world");
+        assert_eq!(
+            encode_rest_for_url("notes/hello world"),
+            "notes/hello%20world"
+        );
     }
 
     #[test]

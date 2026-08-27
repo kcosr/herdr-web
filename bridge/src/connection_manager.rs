@@ -21,7 +21,7 @@ pub struct TerminalConnections {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionPreferences {
     pub priorities: HashMap<String, HashMap<String, i32>>, // terminal_id -> client_id -> priority
-    pub nicknames: HashMap<String, String>, // client_id -> nickname
+    pub nicknames: HashMap<String, String>,                // client_id -> nickname
 }
 
 pub struct ConnectionManager {
@@ -52,11 +52,16 @@ impl ConnectionManager {
             .as_secs();
 
         let mut connections = self.active_connections.lock().map_err(|e| e.to_string())?;
-        let terminal_conns = connections.entry(terminal_id.to_string()).or_insert_with(Vec::new);
+        let terminal_conns = connections
+            .entry(terminal_id.to_string())
+            .or_insert_with(Vec::new);
 
         // Check if client already connected
         if terminal_conns.iter().any(|c| c.client_id == client_id) {
-            return Err(format!("Client {} already connected to {}", client_id, terminal_id));
+            return Err(format!(
+                "Client {} already connected to {}",
+                client_id, terminal_id
+            ));
         }
 
         // Get priority from preferences or default
@@ -109,7 +114,11 @@ impl ConnectionManager {
     }
 
     pub fn get_all_connections(&self) -> Result<HashMap<String, Vec<TerminalConnection>>, String> {
-        Ok(self.active_connections.lock().map_err(|e| e.to_string())?.clone())
+        Ok(self
+            .active_connections
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clone())
     }
 
     pub fn get_highest_priority_client(&self, terminal_id: &str) -> Result<Option<String>, String> {

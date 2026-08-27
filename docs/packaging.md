@@ -47,8 +47,13 @@ Install dependencies first:
 - npm
 - Rust stable
 - a platform C toolchain usable by Cargo
-- the local `web/local-deps/parlay-client` symlink from [web/README.md](../web/README.md), needed
-  before `npm ci --prefix web` can resolve `@parlay/client`
+- the local `web/local-deps/parlay-client` symlink from [web/README.md](../web/README.md)
+
+`@parlay/client` is never installed by `npm ci`; it resolves only through that symlink at build
+time. The symlink therefore decides what ships: build with it and the real parlay client is bundled
+into `web/dist`, so voice-submit works in the artifact; build without it and the specifier is
+externalized, so the artifact permanently falls back to a plain text input. Build release tarballs
+and APKs on a host that has the symlink.
 
 ```bash
 npm ci

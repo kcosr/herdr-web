@@ -168,7 +168,7 @@ import {
   DEFAULT_TERMINAL_FONT_SIZE_PX,
   parseTerminalFontSizePx,
 } from "./terminalPrefs";
-import { DEFAULT_THEME, nextTheme, parseTheme } from "./theme";
+import { applyTheme, DEFAULT_THEME, nextTheme, parseTheme } from "./theme";
 import type { Theme } from "./theme";
 import {
   aggregateStatus,
@@ -1846,7 +1846,7 @@ export function App() {
   ]);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
+    applyTheme(document, theme);
   }, [theme]);
 
   useEffect(() => {

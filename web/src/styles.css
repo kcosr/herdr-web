@@ -53,6 +53,15 @@
      theme's own `--text`/`--red`, so it stays legible in both light and dark. */
   --on-red-soft: color-mix(in srgb, var(--red) 30%, var(--text));
 
+  /* Foreground for a label sitting on a saturated `--accent`/`--peach` fill. Both palettes keep
+     those fills mid-to-light, so this stays dark in light mode too — it is deliberately not
+     `--crust`, which flips light and drops these labels to ~2.3:1 in Latte. */
+  --on-accent: #11111b;
+
+  /* Foreground for a label on a solid `--red` fill. Mocha's red is light and Latte's is dark, so
+     unlike `--on-accent` this one has to flip with the theme. */
+  --on-red: #11111b;
+
   --r-sm: 6px;
   --r-md: 9px;
   --r-lg: 13px;
@@ -112,6 +121,8 @@
   --line-soft: #d8dce4;
   --accent-soft: rgba(114, 135, 253, 0.14);
   --terminal-touch-marker: #5865c9;
+
+  --on-red: #eff1f5;
 }
 
 * {
@@ -420,7 +431,7 @@ button {
 }
 
 .sidebar-scope button[data-on="true"] {
-  color: var(--crust);
+  color: var(--on-accent);
   background: var(--accent);
 }
 
@@ -542,7 +553,7 @@ button {
 }
 
 .scope button[data-on="true"] {
-  color: var(--crust);
+  color: var(--on-accent);
   background: var(--accent);
 }
 
@@ -720,7 +731,7 @@ button {
   font-family: var(--mono);
   font-size: 11px;
   font-weight: 600;
-  color: var(--crust);
+  color: var(--on-accent);
   background: var(--peach);
 }
 
@@ -3163,7 +3174,7 @@ button {
 
 .btn-primary {
   border-color: transparent;
-  color: var(--crust);
+  color: var(--on-accent);
   background: var(--accent);
 }
 
@@ -3178,7 +3189,7 @@ button {
 }
 
 .btn-danger:hover:not(:disabled) {
-  color: var(--crust);
+  color: var(--on-red);
   background: var(--red);
 }
 

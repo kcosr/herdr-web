@@ -4,6 +4,18 @@
    scoped sections (spaces -> panes), terminal on the side / in front.
    ======================================================================== */
 
+@font-face {
+  font-family: "JetBrainsMono Nerd Font Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+2500-27BF, U+E000-F8FF, U+F0000-10FFFF;
+  src:
+    local("JetBrainsMono NFM Regular"),
+    local("JetBrainsMonoNFM-Regular"),
+    url("/fonts/JetBrainsMonoNerdFontMono-Regular.woff2") format("woff2");
+}
+
 :root {
   color-scheme: dark;
 
@@ -77,7 +89,7 @@
     sans-serif;
   --mono:
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
-    "DejaVu Sans Mono", monospace;
+    "DejaVu Sans Mono", "JetBrainsMono Nerd Font Mono", monospace;
 
   font-family: var(--ui);
   background: var(--app-bg);

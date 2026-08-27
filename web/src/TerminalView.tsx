@@ -618,6 +618,15 @@ export function TerminalView({
             }
           });
         }
+        // Preload the lazy Nerd Font face; fonts.ready resolves before it loads.
+        void document.fonts
+          ?.load('13px "JetBrainsMono Nerd Font Mono"', "\uE0B0")
+          .then(() => {
+            if (!disposed) {
+              publishReady("refresh");
+            }
+          })
+          .catch(() => undefined);
 
         publishReady();
       })

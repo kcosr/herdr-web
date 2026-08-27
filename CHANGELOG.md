@@ -48,6 +48,10 @@
   forwarded. [PR #11](https://github.com/trillium/herdr-web/pull/11)
 - The mobile command input is now backed by a locally running parlay server for phrase-triggered
   voice submit, replacing the previous native text input.
+- Added a bundled JetBrainsMono Nerd Font Mono fallback for special terminal and LLM output glyphs
+  on devices without an accessible Nerd Font.
+  [PR #74](https://github.com/kcosr/herdr-web/pull/74), contributed by
+  [Craig P. Motlin (@motlin)](https://github.com/motlin).
 
 ### Changed
 

@@ -4766,13 +4766,18 @@ export function BridgeConnectionController({
             expiresAtMs: Date.now() + SHARED_SELECTION_SETTLE_TIMEOUT_MS,
           };
           const currentSnapshot = currentRef.snapshot;
-          if (currentSnapshot) {
-            const patched = {
-              ...currentSnapshot,
-              selected_pane_id: paneId,
-            };
+          const patched = currentSnapshot
+            ? { ...currentSnapshot, selected_pane_id: paneId }
+            : null;
+          if (patched) {
             currentRef.snapshot = patched;
-            startTransition(() => {
+          }
+          const pane = currentSnapshot?.panes.find(
+            (item) => item.pane_id === paneId,
+          );
+          const shouldFollowSelection = followSharedSelectionRef.current;
+          startTransition(() => {
+            if (patched) {
               setConnectionStates((current) => ({
                 ...current,
                 [runtime.id]: {
@@ -4781,14 +4786,11 @@ export function BridgeConnectionController({
                   loadState: "ready",
                 },
               }));
-            });
-          }
-          const pane = currentSnapshot?.panes.find(
-            (item) => item.pane_id === paneId,
-          );
-          if (followSharedSelectionRef.current) {
-            onPaneSelection(runtime.id, paneId, pane?.workspace_id);
-          }
+            }
+            if (shouldFollowSelection) {
+              onPaneSelection(runtime.id, paneId, pane?.workspace_id);
+            }
+          });
           refresh();
           return;
         }

@@ -96,6 +96,12 @@
 
 ### Fixed
 
+- Fixed a typing hitch on desktop while an agent was actively producing output. Snapshot updates
+  (the 10s poll, agent-status activity bursts, and shared selection events) reconciled the whole
+  app tree synchronously and blocked terminal keystroke handling on the main thread. Those updates
+  are now applied as low-priority React transitions, so keystrokes stay responsive and panel
+  updates remain interruptible.
+
 - Fixed parlay voice-submit never working in built apps. Production builds externalized
   `@parlay/client` unconditionally, emitting a stub the browser could never load, so every
   deployed build silently fell back to the plain input and trailing phrases such as "bravely" did

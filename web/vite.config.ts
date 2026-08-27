@@ -59,6 +59,18 @@ function collectExportTargets(node: unknown, out: string[]): void {
   }
 }
 
+// `main`/`module` are ordinary package-relative paths, not `exports` targets: the `./` prefix that
+// `exports` requires is optional here, and `"main": "dist/index.mjs"` is the common form. Only
+// absolute paths and parent-directory escapes are rejected.
+function collectLegacyEntry(value: unknown, out: string[]): void {
+  if (typeof value !== "string") return;
+  const trimmed = value.trim();
+  if (trimmed === "" || trimmed.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(trimmed)) return;
+  const normalized = trimmed.startsWith("./") ? trimmed.slice(2) : trimmed;
+  if (normalized === "" || normalized.startsWith("../")) return;
+  out.push(normalized);
+}
+
 /**
  * Ordered list of entry subpaths to try for a local `@parlay/client` checkout, most specific
  * first, always ending in the legacy `dist/index.js` fallback. Pure so it can be unit tested.
@@ -74,8 +86,8 @@ export function parlayEntryCandidates(pkg: unknown): string[] {
       const rootExport = (exportsField as Record<string, unknown>)["."];
       collectExportTargets(rootExport === undefined ? exportsField : rootExport, candidates);
     }
-    collectExportTargets(record.module, candidates);
-    collectExportTargets(record.main, candidates);
+    collectLegacyEntry(record.module, candidates);
+    collectLegacyEntry(record.main, candidates);
   }
   candidates.push(PARLAY_FALLBACK_ENTRY);
   return candidates.filter((entry, index) => entry.length > 0 && candidates.indexOf(entry) === index);

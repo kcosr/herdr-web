@@ -43,6 +43,8 @@ import {
 } from "./terminalImeInput";
 import type { TerminalImeState } from "./terminalImeInput";
 import { installTerminalImeFocusRedirect } from "./terminalImeFocus";
+import { applyTerminalTheme } from "./terminalThemeApply";
+import type { TerminalThemeColors } from "./terminalThemeApply";
 import type { Theme } from "./theme";
 
 const TERMINAL_FONT_FAMILY =
@@ -50,31 +52,7 @@ const TERMINAL_FONT_FAMILY =
 
 // Mirrors the app's CSS theme system (styles.css) so terminal content colors
 // follow the light/dark toggle instead of staying fixed to Catppuccin Mocha.
-const TERMINAL_THEME_COLORS: Record<
-  Theme,
-  {
-    background: string;
-    foreground: string;
-    cursor: string;
-    selectionBackground: string;
-    black: string;
-    red: string;
-    green: string;
-    yellow: string;
-    blue: string;
-    magenta: string;
-    cyan: string;
-    white: string;
-    brightBlack: string;
-    brightRed: string;
-    brightGreen: string;
-    brightYellow: string;
-    brightBlue: string;
-    brightMagenta: string;
-    brightCyan: string;
-    brightWhite: string;
-  }
-> = {
+const TERMINAL_THEME_COLORS: Record<Theme, TerminalThemeColors> = {
   dark: {
     background: "#11111b",
     foreground: "#cdd6f4",
@@ -392,8 +370,10 @@ export class GhosttyRenderer implements TerminalRenderer {
     if (!this.#terminal) {
       return;
     }
-    this.#terminal.options.theme = colors;
-    this.#terminal.renderer?.getCanvas().style.setProperty("background-color", colors.background);
+    if (!applyTerminalTheme(this.#terminal, colors)) {
+      this.#terminal.options.theme = colors;
+      this.#terminal.renderer?.getCanvas().style.setProperty("background-color", colors.background);
+    }
   }
 
   focus() {

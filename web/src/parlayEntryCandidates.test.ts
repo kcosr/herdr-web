@@ -54,12 +54,43 @@ describe("parlayEntryCandidates", () => {
     ).toEqual(["dist/index.mjs", "dist/index.esm.js", "dist/index.cjs", "dist/index.js"]);
   });
 
-  it("does not duplicate a declared entry that matches the fallback", () => {
-    expect(parlayEntryCandidates({ main: "./dist/index.js" })).toEqual(["dist/index.js"]);
+  it("accepts a bare main path, the common package.json form", () => {
+    expect(parlayEntryCandidates({ main: "dist/index.mjs" })).toEqual([
+      "dist/index.mjs",
+      "dist/index.js",
+    ]);
   });
 
-  it("ignores non-relative and non-string entry values", () => {
-    expect(parlayEntryCandidates({ main: "dist/index.js", module: 42 })).toEqual(["dist/index.js"]);
+  it("accepts a bare module path", () => {
+    expect(parlayEntryCandidates({ module: "dist/esm/client.js" })).toEqual([
+      "dist/esm/client.js",
+      "dist/index.js",
+    ]);
+  });
+
+  it("accepts a top-level bare main", () => {
+    expect(parlayEntryCandidates({ main: "index.js" })).toEqual(["index.js", "dist/index.js"]);
+  });
+
+  it("does not duplicate a declared entry that matches the fallback", () => {
+    expect(parlayEntryCandidates({ main: "./dist/index.js" })).toEqual(["dist/index.js"]);
+    expect(parlayEntryCandidates({ main: "dist/index.js" })).toEqual(["dist/index.js"]);
+  });
+
+  it("rejects absolute and escaping main paths", () => {
+    expect(parlayEntryCandidates({ main: "/abs/dist/index.mjs" })).toEqual(["dist/index.js"]);
+    expect(parlayEntryCandidates({ main: "C:\\abs\\index.js" })).toEqual(["dist/index.js"]);
+    expect(parlayEntryCandidates({ main: "../outside/index.js" })).toEqual(["dist/index.js"]);
+  });
+
+  it("ignores non-string entry values", () => {
+    expect(parlayEntryCandidates({ module: 42 })).toEqual(["dist/index.js"]);
     expect(parlayEntryCandidates({ exports: ["./dist/index.mjs"] })).toEqual(["dist/index.js"]);
+  });
+
+  it("still requires the './' prefix for exports targets", () => {
+    expect(parlayEntryCandidates({ exports: { ".": "dist/index.mjs" } })).toEqual([
+      "dist/index.js",
+    ]);
   });
 });

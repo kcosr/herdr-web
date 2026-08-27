@@ -25,14 +25,20 @@ const allowedHosts = parseAllowedHosts(process.env.HERDR_WEB_ALLOWED_HOSTS);
 // then falls back to a plain input when the module cannot be resolved at runtime. This resolver
 // only serves the symlink-present dev/test path — do not add a registry version.
 function parlayClientResolver(): Plugin {
-  const parlayPath = resolve(__dirname, "local-deps/parlay-client");
-  const hasLocalParlay = existsSync(parlayPath);
+  // Resolve to the package's built entry, not the bare directory. Vite's dev/build
+  // resolver would infer the entry from package.json, but Vitest's module runner
+  // does not resolve a directory id, so returning the directory left `@parlay/client`
+  // unresolvable under test — ParlayInput then silently took its plain-input fallback
+  // and the parlay voice-submit path went untested. Pointing at the entry file fixes
+  // both. Production is unaffected: `vite build` externalizes @parlay/client below.
+  const parlayEntry = resolve(__dirname, "local-deps/parlay-client/dist/index.js");
+  const hasLocalParlay = existsSync(parlayEntry);
 
   return {
     name: "parlay-client-resolver",
     resolveId(id) {
       if (id === "@parlay/client" && hasLocalParlay) {
-        return parlayPath;
+        return parlayEntry;
       }
     },
   };

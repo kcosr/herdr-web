@@ -3242,6 +3242,11 @@ button {
 .agent-search-input::-webkit-search-cancel-button {
   opacity: 0.5;
   cursor: pointer;
+}
+
+/* Chrome/Safari draw this clear glyph dark, which only reads on a light field. Invert it for the
+   dark palette; Latte's `--crust` field keeps the browser default. */
+:root:not([data-theme="light"]) .agent-search-input::-webkit-search-cancel-button {
   filter: invert(1);
 }
 

@@ -17,23 +17,32 @@ const allowedHosts = parseAllowedHosts(process.env.HERDR_WEB_ALLOWED_HOSTS);
 
 // `@parlay/client` is an intentionally OPTIONAL, LOCAL-ONLY, NEVER-PUBLISHED dependency.
 // It resolves only when the gitignored symlink `web/local-deps/parlay-client` is present,
-// which enables the parlay voice-submit path in `vite dev`/tests. It is deliberately absent
-// from package.json/package-lock.json so `npm ci` never fetches it from a registry.
+// which enables the parlay voice-submit path. It is deliberately absent from
+// package.json/package-lock.json so `npm ci` never fetches it from a registry.
 //
-// In production (`vite build`) the specifier is externalized (see build.rolldownOptions.external
-// below), so parlay is never bundled; ParlayInput's guarded `try { await import(...) }`
-// then falls back to a plain input when the module cannot be resolved at runtime. This resolver
-// only serves the symlink-present dev/test path — do not add a registry version.
-function parlayClientResolver(): Plugin {
-  // Resolve to the package's built entry, not the bare directory. Vite's dev/build
-  // resolver would infer the entry from package.json, but Vitest's module runner
-  // does not resolve a directory id, so returning the directory left `@parlay/client`
-  // unresolvable under test — ParlayInput then silently took its plain-input fallback
-  // and the parlay voice-submit path went untested. Pointing at the entry file fixes
-  // both. Production is unaffected: `vite build` externalizes @parlay/client below.
-  const parlayEntry = resolve(__dirname, "local-deps/parlay-client/dist/index.js");
-  const hasLocalParlay = existsSync(parlayEntry);
+// Externalization is CONDITIONAL on the symlink (see build.rolldownOptions.external below):
+//   - symlink present  → bundle the real @parlay/client → the parlay voice-submit path
+//     ("bravely"/"gravely"/… trailing dictation submit) works in the built app, matching
+//     dev/test.
+//   - symlink absent   → externalize @parlay/client so `vite build` still succeeds without
+//     the dep; ParlayInput's guarded `try { await import(...) }` then falls back to a plain
+//     input at runtime.
+//
+// Externalizing UNCONDITIONALLY was the bug behind "bravely no longer submits": a production
+// build emitted a 0-byte `__vite-browser-external` stub for @parlay/client with nothing serving
+// it at runtime (the bridge serves a static dir, no module server), so the runtime import always
+// failed and every deployed build silently shipped the plain input — voice-submit could never
+// work in prod even when built with the symlink present. Do not add a registry version.
 
+// Resolve to the package's built entry, not the bare directory. Vite's dev/build resolver would
+// infer the entry from package.json, but Vitest's module runner does not resolve a directory id,
+// so returning the directory left `@parlay/client` unresolvable under test — ParlayInput then
+// silently took its plain-input fallback and the parlay voice-submit path went untested.
+// Pointing at the entry file fixes dev, test, and (when bundled) production alike.
+const parlayEntry = resolve(__dirname, "local-deps/parlay-client/dist/index.js");
+const hasLocalParlay = existsSync(parlayEntry);
+
+function parlayClientResolver(): Plugin {
   return {
     name: "parlay-client-resolver",
     resolveId(id) {
@@ -63,7 +72,11 @@ export default defineConfig({
   },
   build: {
     rolldownOptions: {
-      external: ["@parlay/client"],
+      // Only externalize when the local symlink is absent. With the symlink present the
+      // resolver above points @parlay/client at its built entry and rolldown bundles it,
+      // so the parlay voice-submit path ships in the built app. Without it, externalize so
+      // the build still succeeds and ParlayInput falls back to the plain input at runtime.
+      external: hasLocalParlay ? [] : ["@parlay/client"],
       onwarn(warning: { message?: string }) {
         // Suppress warning for unresolved @parlay/client — it's optional.
         if (warning.message?.includes("@parlay/client")) {

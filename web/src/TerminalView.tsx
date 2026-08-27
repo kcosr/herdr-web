@@ -40,6 +40,7 @@ import {
   openableHttpUrl,
 } from "./terminalSelection";
 import { GhosttyRenderer } from "./terminalRenderer";
+import type { Theme } from "./theme";
 import type { MobileTerminalTouchEvent, TerminalRenderer, TerminalSize } from "./terminalRenderer";
 import {
   appendTerminalInputBatch,
@@ -89,6 +90,8 @@ type Props = {
   mobileControls?: boolean;
   /** Whether the terminal cursor blinks. Off on touch devices. */
   cursorBlink?: boolean;
+  /** App light/dark theme; recolors terminal content to match the rest of the UI. */
+  theme?: Theme;
   /** Terminal renderer font size in CSS pixels. */
   terminalFontSizePx?: number;
   /** Percentage scale applied to mobile terminal controls. */
@@ -177,6 +180,7 @@ export function TerminalView({
   scrollSensitivity = 1,
   mobileControls = false,
   cursorBlink = true,
+  theme = "dark",
   terminalFontSizePx = DEFAULT_TERMINAL_FONT_SIZE_PX,
   mobileControlsScalePercent = 100,
   mobileCompactControls = DEFAULT_MOBILE_COMPACT_CONTROLS,
@@ -242,6 +246,8 @@ export function TerminalView({
   mobileControlsRef.current = mobileControls;
   const cursorBlinkRef = useRef(cursorBlink);
   cursorBlinkRef.current = cursorBlink;
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
   const terminalFontSizePxRef = useRef(terminalFontSizePx);
   terminalFontSizePxRef.current = terminalFontSizePx;
   const mobileTapTargetRef = useRef(mobileTapTarget);
@@ -536,6 +542,7 @@ export function TerminalView({
     const renderer: TerminalRenderer = new GhosttyRenderer(
       terminalFontSizePxRef.current,
       cursorBlinkRef.current,
+      themeRef.current,
     );
     rendererRef.current = renderer;
     setConnectionState("connecting");
@@ -1166,6 +1173,10 @@ export function TerminalView({
       sendResizeRef.current(size);
     }
   }, [terminalFontSizePx]);
+
+  useEffect(() => {
+    rendererRef.current?.setTheme(theme);
+  }, [theme]);
 
   useEffect(() => {
     setMobileSelectionAction(null);

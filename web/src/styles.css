@@ -75,6 +75,41 @@
   -webkit-tap-highlight-color: transparent;
 }
 
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  /* Catppuccin Latte */
+  --crust: #dce0e8;
+  --mantle: #e6e9ef;
+  --base: #eff1f5;
+  --surface0: #ccd0da;
+  --surface1: #bcc0cc;
+  --surface2: #acb0be;
+  --overlay0: #9ca0b0;
+  --overlay1: #8c8fa1;
+  --subtext0: #6c6f85;
+  --subtext1: #5c5f77;
+  --text: #4c4f69;
+
+  --blue: #1e66f5;
+  --lavender: #7287fd;
+  --sapphire: #209fb5;
+  --teal: #179299;
+  --green: #40a02b;
+  --yellow: #df8e1d;
+  --peach: #fe640b;
+  --red: #d20f39;
+  --mauve: #8839ef;
+
+  --sidebar-bg: #d3d8e2;
+  --row-hover: #e7eaf0;
+  --row-active: #dde1ea;
+  --line: #ccd0da;
+  --line-soft: #d8dce4;
+  --accent-soft: rgba(114, 135, 253, 0.14);
+  --terminal-touch-marker: #5865c9;
+}
+
 * {
   box-sizing: border-box;
 }

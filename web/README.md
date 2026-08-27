@@ -38,7 +38,7 @@ npm run dev:web
 the debug `herdr-dev` socket. Override `HERDR_SOCKET_PATH` when targeting a named or development
 session.
 
-## Optional: Enable Parlay-backed Mobile Voice Input
+## Optional: Enable Parlay-backed Voice Input
 
 The `ParlayInput` component (`src/ParlayInput.tsx`) is optional and degrades gracefully
 to a plain text input when parlay is unavailable. To enable parlay voice-submit phrase detection,
@@ -66,8 +66,10 @@ cd /path/to/parlay/packages/server && bun run start  # :4242
 
 Voice-submit phrases are configured in parlay (defaults: "bravely", "gravely", "briefly", "lap").
 
-If the symlink is missing or stale, the app will still build and run with the plain-text mobile
-input — no special action needed. `web/local-deps/` is gitignored.
+If the symlink is missing or stale, the app will still build and run with a plain text input —
+no special action needed. `web/local-deps/` is gitignored. Note that the symlink's presence is
+baked into `web/dist`: a production build made without it externalizes `@parlay/client`, so the
+built app always falls back to the plain input. See [docs/packaging.md](../docs/packaging.md).
 
 ## Vite dev server environment variables:
 

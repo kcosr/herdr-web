@@ -49,6 +49,10 @@
   --st-idle: var(--green);
   --st-unknown: var(--overlay0);
 
+  /* Red-tinted foreground for surfaces built from `--red` over `--base`. Derived from the
+     theme's own `--text`/`--red`, so it stays legible in both light and dark. */
+  --on-red-soft: color-mix(in srgb, var(--red) 30%, var(--text));
+
   --r-sm: 6px;
   --r-md: 9px;
   --r-lg: 13px;
@@ -3188,7 +3192,7 @@ button {
   border: 1px solid color-mix(in srgb, var(--red) 45%, var(--surface0));
   border-radius: 999px;
   background: color-mix(in srgb, var(--red) 18%, var(--base));
-  color: #ffd9e1;
+  color: var(--on-red-soft);
   font-size: 13px;
   transform: translateX(-50%);
   box-shadow: 0 12px 40px rgb(0 0 0 / 0.45);

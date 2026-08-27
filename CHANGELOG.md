@@ -1,14 +1,5 @@
 # Changelog
 
-## 2026-08-17 — session feb0abf4
-
-Files: bridge/src/web_bridge.rs
-## 2026-08-17 — session feb0abf4
-
-Files: bridge/src/web_bridge.rs
-## 2026-08-04 — session 573726b5
-
-Files: CHANGELOG.md, AGENTS.md, web/src/App.tsx, web/src/paneSearch.ts, bridge/src/web_bridge.rs
 ## [Unreleased]
 
 ### Breaking Changes
@@ -19,6 +10,11 @@ Files: CHANGELOG.md, AGENTS.md, web/src/App.tsx, web/src/paneSearch.ts, bridge/s
   are rejected at startup. Upgrade Herdr before upgrading the bridge.
 
 ### Added
+
+- Added a light/dark theme toggle (Sun/Moon button in the switcher header, next to
+  Settings/Refresh). Light mode uses the Catppuccin Latte palette; the choice persists with the
+  other display preferences and is applied on load. The terminal recolors live with the rest of the
+  UI, so switching themes no longer leaves a dark terminal on a light page.
 
 - Added real-time agent search/filter to the sidebar agents view: a compact text input appears
   above the agent list when any agents are present. Typing filters by agent title, meta (agent
@@ -73,9 +69,10 @@ Files: CHANGELOG.md, AGENTS.md, web/src/App.tsx, web/src/paneSearch.ts, bridge/s
 - Made `@parlay/client` a permanently optional, local-only, never-published dependency so fresh
   worktrees and CI build cleanly when the local `web/local-deps/parlay-client` symlink is absent.
   It is no longer referenced in `web/package.json`/`web/package-lock.json` (so `npm ci` never
-  resolves it from a registry); the Vite resolver picks up the symlink for `vite dev`/tests when
-  present, production builds externalize it, and `ParlayInput`'s guarded dynamic import falls
-  back to a plain text input at runtime when the module is absent. Removed the dead `vite.config.ts`
+  resolves it from a registry); the Vite resolver picks up the symlink for `vite dev`, tests, and
+  production builds when present, builds without the symlink externalize it, and `ParlayInput`'s
+  guarded dynamic import falls back to a plain text input at runtime when the module is absent.
+  Removed the dead `vite.config.ts`
   stub module and the duplicate `web/src/@parlay-client.d.ts` type shim (the canonical ambient
   declaration is `web/types/parlay-client.d.ts`).
   [PR #18](https://github.com/trillium/herdr-web/pull/18)
@@ -92,6 +89,15 @@ Files: CHANGELOG.md, AGENTS.md, web/src/App.tsx, web/src/paneSearch.ts, bridge/s
   [PR #60](https://github.com/kcosr/herdr-web/pull/60)
 
 ### Fixed
+
+- Fixed parlay voice-submit never working in built apps. Production builds externalized
+  `@parlay/client` unconditionally, emitting a stub the browser could never load, so every
+  deployed build silently fell back to the plain input and trailing phrases such as "bravely" did
+  not send. Builds made on a machine with the local `web/local-deps/parlay-client` symlink now
+  bundle the real client, and the entry is resolved from that package's own `exports`/`main`
+  instead of a hardcoded `dist/index.js`. Builds without the symlink are unchanged: the specifier
+  is still externalized and the input degrades to a plain text field. Note that this makes
+  `web/dist` (and therefore release tarballs) depend on whether the build host had the symlink.
 
 - Fixed the mobile "next agent" / "previous agent" command doing nothing: the parlay command
   context's `tabs.next`/`tabs.prev` hooks were no-op stubs, so typing or speaking "next agent"

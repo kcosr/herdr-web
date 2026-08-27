@@ -1,7 +1,7 @@
 import react from "@vitejs/plugin-react";
 import { configDefaults, defineConfig } from "vitest/config";
 import type { Plugin } from "vite";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { resolve } from "path";
 
 const bridgeTarget = process.env.HERDR_WEB_BRIDGE ?? "http://127.0.0.1:8787";
@@ -39,14 +39,80 @@ const allowedHosts = parseAllowedHosts(process.env.HERDR_WEB_ALLOWED_HOSTS);
 // so returning the directory left `@parlay/client` unresolvable under test — ParlayInput then
 // silently took its plain-input fallback and the parlay voice-submit path went untested.
 // Pointing at the entry file fixes dev, test, and (when bundled) production alike.
-const parlayEntry = resolve(__dirname, "local-deps/parlay-client/dist/index.js");
-const hasLocalParlay = existsSync(parlayEntry);
+//
+// The entry is derived from the symlinked package's own `exports`/`module`/`main` rather than a
+// hardcoded path, so a parlay-client release that moves or renames its build output (e.g.
+// `dist/index.mjs`) does not silently drop us back to the plain input. `dist/index.js` stays as
+// the last-resort candidate for a package.json that declares no usable entry.
+const PARLAY_FALLBACK_ENTRY = "dist/index.js";
+const PARLAY_EXPORT_CONDITIONS = ["browser", "import", "module", "default", "require"];
+
+function collectExportTargets(node: unknown, out: string[]): void {
+  if (typeof node === "string") {
+    if (node.startsWith("./")) out.push(node.slice(2));
+    return;
+  }
+  if (!node || typeof node !== "object" || Array.isArray(node)) return;
+  const record = node as Record<string, unknown>;
+  for (const condition of PARLAY_EXPORT_CONDITIONS) {
+    if (condition in record) collectExportTargets(record[condition], out);
+  }
+}
+
+/**
+ * Ordered list of entry subpaths to try for a local `@parlay/client` checkout, most specific
+ * first, always ending in the legacy `dist/index.js` fallback. Pure so it can be unit tested.
+ */
+export function parlayEntryCandidates(pkg: unknown): string[] {
+  const candidates: string[] = [];
+  if (pkg && typeof pkg === "object" && !Array.isArray(pkg)) {
+    const record = pkg as Record<string, unknown>;
+    const exportsField = record.exports;
+    if (typeof exportsField === "string") {
+      collectExportTargets(exportsField, candidates);
+    } else if (exportsField && typeof exportsField === "object" && !Array.isArray(exportsField)) {
+      const rootExport = (exportsField as Record<string, unknown>)["."];
+      collectExportTargets(rootExport === undefined ? exportsField : rootExport, candidates);
+    }
+    collectExportTargets(record.module, candidates);
+    collectExportTargets(record.main, candidates);
+  }
+  candidates.push(PARLAY_FALLBACK_ENTRY);
+  return candidates.filter((entry, index) => entry.length > 0 && candidates.indexOf(entry) === index);
+}
+
+function readPackageJson(dir: string): unknown {
+  try {
+    return JSON.parse(readFileSync(resolve(dir, "package.json"), "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveParlayEntry(): string | undefined {
+  const packageDir = resolve(__dirname, "local-deps/parlay-client");
+  if (!existsSync(packageDir)) return undefined;
+  const candidates = parlayEntryCandidates(readPackageJson(packageDir));
+  for (const candidate of candidates) {
+    const entry = resolve(packageDir, candidate);
+    if (existsSync(entry)) return entry;
+  }
+  console.warn(
+    `[parlay-client-resolver] ${packageDir} exists but no built entry was found ` +
+      `(tried: ${candidates.join(", ")}). Build the parlay client checkout, or parlay ` +
+      `voice-submit will fall back to a plain input.`,
+  );
+  return undefined;
+}
+
+const parlayEntry = resolveParlayEntry();
+const hasLocalParlay = parlayEntry !== undefined;
 
 function parlayClientResolver(): Plugin {
   return {
     name: "parlay-client-resolver",
     resolveId(id) {
-      if (id === "@parlay/client" && hasLocalParlay) {
+      if (id === "@parlay/client" && parlayEntry) {
         return parlayEntry;
       }
     },

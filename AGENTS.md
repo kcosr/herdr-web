@@ -57,6 +57,17 @@ This is a lightweight internal onboarding note for agents working in this repo.
   externalized specifier never resolves). The type side is the single ambient shim
   `web/types/parlay-client.d.ts` — do not reintroduce a duplicate under `web/src/`.
 
+## Merging
+
+- After any merge that touches `web/package-lock.json`, regenerate it (`npm install --prefix web`)
+  and verify with a clean `npm ci`. Git resolves lockfiles line-by-line and reports no conflict,
+  but the result is routinely an inconsistent tree that fails `npm ci` outright.
+- A merge that brings in a `vendor/herdr-compat` refresh can silently drop a `match` arm the
+  refresh added, since neither side conflicts. `cargo build` catches it as `E0004`; run it before
+  assuming a clean merge is correct.
+- Treat `vendor/herdr-compat/` as one atomic snapshot: take a whole side rather than blending
+  fixtures and type definitions from both.
+
 ## Testing
 
 - Run `npm install --prefix web` if dependencies are missing. This requires the local

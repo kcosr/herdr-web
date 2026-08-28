@@ -23,6 +23,8 @@ import {
   Sun,
   Trash2,
   Unlink,
+  Volume2,
+  VolumeX,
   X,
 } from "lucide-react";
 import {
@@ -90,6 +92,7 @@ import { LaunchDialog } from "./LaunchDialog";
 import { resolveLaunchSpec } from "./launch";
 import type { LaunchTarget } from "./launch";
 import { PaneSearchDialog } from "./PaneSearchDialog";
+import { useTalkBack } from "./useTalkBack";
 import type { PaneSearchEntry } from "./paneSearch";
 import { fetchLauncherPresets, supportsLauncherPresets } from "./launcherPresets";
 import type { LauncherPresetsResponse } from "./launcherPresets";
@@ -2146,6 +2149,7 @@ export function App() {
     () => snapshot?.panes.find((pane) => pane.pane_id === resolvedPaneId) ?? null,
     [snapshot, resolvedPaneId],
   );
+  const talkBack = useTalkBack(selectedPane ? resolvedPaneId : null);
   const selectedAgentPinsState =
     selectedRuntime &&
     agentPinsStates[selectedRuntime.id]?.connectionKey === selectedRuntime.connectionKey
@@ -4086,6 +4090,23 @@ export function App() {
           >
             <Search size={18} />
           </button>
+          <button
+            className="icon-btn"
+            type="button"
+            aria-label={talkBack.enabled ? "Mute talk back" : "Enable talk back"}
+            title={
+              talkBack.state === "unprimed"
+                ? "Talk back armed — tap once more anywhere to unlock speech"
+                : talkBack.state === "unsupported"
+                  ? "Talk back unavailable: this browser has no speech synthesis"
+                  : talkBack.enabled
+                    ? "Mute agent speech (talk back)"
+                    : "Speak agent responses aloud (talk back)"
+            }
+            onClick={talkBack.toggle}
+          >
+            {talkBack.enabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
+          </button>
           {splitSupported && selectedPane && !isCompactLayout ? (
             <>
               <button
@@ -4238,6 +4259,7 @@ export function App() {
             focusToken={terminalFocusToken}
             onNextAgentPane={() => focusAdjacentAgentPane(1)}
             onPrevAgentPane={() => focusAdjacentAgentPane(-1)}
+            onAccessibleTextChange={talkBack.handleAccessibleText}
             accessibilityLabel={
               selectedPane ? `Selected pane terminal: ${paneTitle(selectedPane)}` : "Terminal"
             }

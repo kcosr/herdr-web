@@ -36,13 +36,20 @@ export function sameOriginDisplay(params: {
   tailnetName?: string | null;
   origin?: string | null;
   port?: string | null;
+  /** Bridge-reported version; appended to the subtitle when present (project-xyq). */
+  bridgeVersion?: string | null;
 }): SameOriginDisplay {
   const subtitle = sameOriginServedUrl(params.origin);
+  const bridgeVersion = params.bridgeVersion?.trim();
+  const subtitleWithVersion =
+    bridgeVersion && subtitle !== "same-origin"
+      ? `${subtitle} · bridge ${bridgeVersion}`
+      : subtitle;
   const tailnetName = params.tailnetName?.trim();
   if (!tailnetName) {
-    return { title: "Same origin", subtitle };
+    return { title: "Same origin", subtitle: subtitleWithVersion };
   }
   const port = params.port?.trim();
   const title = port ? `${tailnetName}:${port}` : tailnetName;
-  return { title, subtitle };
+  return { title, subtitle: subtitleWithVersion };
 }

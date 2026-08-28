@@ -60,3 +60,39 @@ describe("sameOriginDisplay", () => {
     });
   });
 });
+
+describe("sameOriginDisplay bridge version", () => {
+  it("appends the bridge version to the subtitle when present", () => {
+    expect(
+      sameOriginDisplay({
+        tailnetName: "macbook.ts.net",
+        origin: "http://macbook.ts.net:8787",
+        port: "8787",
+        bridgeVersion: "0.4.2",
+      }),
+    ).toEqual({
+      title: "macbook.ts.net:8787",
+      subtitle: "http://macbook.ts.net:8787 · bridge 0.4.2",
+    });
+  });
+
+  it("omits the version suffix when absent or blank", () => {
+    const base = {
+      tailnetName: "mini.ts.net",
+      origin: "http://mini.ts.net",
+      port: "",
+    };
+    expect(sameOriginDisplay({ ...base, bridgeVersion: undefined }).subtitle).toBe(
+      "http://mini.ts.net",
+    );
+    expect(sameOriginDisplay({ ...base, bridgeVersion: "   " }).subtitle).toBe(
+      "http://mini.ts.net",
+    );
+  });
+
+  it("does not decorate the literal same-origin fallback", () => {
+    expect(
+      sameOriginDisplay({ origin: null, port: null, bridgeVersion: "0.4.2" }).subtitle,
+    ).toBe("same-origin");
+  });
+});

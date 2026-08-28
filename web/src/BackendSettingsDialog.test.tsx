@@ -130,6 +130,8 @@ function settingsProps() {
     onMobileCommandExpandingInput: vi.fn(),
     mobileCommandEnterNewline: false,
     onMobileCommandEnterNewline: vi.fn(),
+    mobileCompactControls: false,
+    onMobileCompactControlsChange: vi.fn(),
     showMobileKeyboardHideRefit: true,
     mobileKeyboardHideRefit: true,
     onMobileKeyboardHideRefit: vi.fn(),

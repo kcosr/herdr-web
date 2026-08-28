@@ -11,6 +11,20 @@
 
 ### Added
 
+- Added Talk Back v1: gesture-primed `speechSynthesis` narration of the focused pane. Output is
+  ANSI-stripped and settle-debounced so it speaks finished lines rather than every redraw, with a
+  mute toggle in the header and device-local persisted preferences.
+
+- Added `scripts/tailnet-bridge-check.sh`, a tailnet-wide bridge reachability and version
+  compatibility matrix runnable from any host, plus `scripts/doctor.sh` for local environment
+  checks.
+
+- Added Playwright-based visual-space geometry harness (`npm run test:vspace` in `web/`) that
+  asserts layout contracts for the mobile input panel at iPhone Pro Max (430×932) viewport:
+  panel height ≤ 50% of viewport, terminal area ≥ 200 px under keyboard inset, textarea width
+  dominates the input row, send button always inside viewport, special-keys strip absent when
+  compact, and expanding textarea bounded by CSS max-height — no screenshots or vision models.
+
 - Added a light/dark theme toggle (Sun/Moon button in the switcher header, next to
   Settings/Refresh). Light mode uses the Catppuccin Latte palette; the choice persists with the
   other display preferences and is applied on load. The app UI switches immediately; a terminal

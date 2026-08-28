@@ -7,6 +7,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
     "test": "vitest run",
+    "test:vspace": "playwright test",
     "lint": "eslint . --max-warnings=0",
     "check": "npm run lint && npm run test && npm run build"
   },
@@ -29,6 +30,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",
+    "@playwright/test": "^1.62.1",
     "@types/jsdom": "^28.0.3",
     "@types/node": "^25.0.1",
     "@types/react": "^19.2.7",

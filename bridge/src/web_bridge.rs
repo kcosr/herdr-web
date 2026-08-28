@@ -195,6 +195,11 @@ struct SnapshotTabInfo {
 
 #[derive(Debug, Serialize)]
 struct Capabilities {
+    /// Bridge crate version — surfaced in the web UI's backend entry (project-xyq).
+    bridge_version: &'static str,
+    /// Web-app compatibility floor of THIS bridge. The client (web/src/bridge.tsx
+    /// APP_MIN_WEB_COMPAT) refuses bridges reporting a lower value.
+    web_compat: u32,
     commands: &'static [&'static str],
     agent_activity: AgentActivityCapability,
     agent_pins: AgentPinsCapability,
@@ -3247,6 +3252,8 @@ async fn capabilities_handler(
 ) -> Result<Json<Capabilities>, BridgeError> {
     ensure_allowed_request(&headers, &state.request_policy)?;
     Ok(Json(Capabilities {
+        bridge_version: env!("CARGO_PKG_VERSION"),
+        web_compat: 1,
         commands: ALLOWED_COMMANDS,
         agent_activity: AgentActivityCapability { version: 1 },
         agent_pins: AgentPinsCapability { version: 1 },
@@ -3285,15 +3292,48 @@ async fn tailnet_name_cached() -> Option<String> {
 /// not something the captain asked to connect to by name). Tailscale being absent, stopped, or
 /// this machine not being on a tailnet are all normal states that yield `None`, never an error.
 fn resolve_tailnet_name() -> Option<String> {
-    let output = std::process::Command::new("tailscale")
-        .args(["status", "--json"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    // Explicit override wins: lets a supervisor pin the label when the
+    // Tailscale CLI belongs to a different local user than this bridge
+    // (e.g. launchd agents on shared Mac minis).
+    if let Ok(name) = std::env::var("TAILNET_NAME") {
+        let name = name.trim().to_string();
+        if !name.is_empty() {
+            return Some(name);
+        }
     }
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    parse_tailnet_name_from_status(&stdout)
+    // Absolute candidates first: under launchd the GUI-app CLI and the
+    // Homebrew wrapper are frequently invisible despite PATH fixes.
+    let candidates = [
+        "/usr/local/bin/tailscale",
+        "/opt/homebrew/bin/tailscale",
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        "tailscale",
+    ];
+    for candidate in candidates {
+        let Ok(output) = std::process::Command::new(candidate)
+            .args(["status", "--json"])
+            .output()
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        if let Ok(stdout) = String::from_utf8(output.stdout) {
+            if let Some(name) = parse_tailnet_name_from_status(&stdout) {
+                // Captain preference (project-4ba): the SHORT host label
+                // ("macbook", "mini1") — DNSName arrives as an FQDN with a
+                // trailing root dot; keep just the first label.
+                let short = name
+                    .trim_end_matches('.')
+                    .split('.')
+                    .next()
+                    .unwrap_or(&name);
+                return Some(short.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Parses the tailnet DNS name out of `tailscale status --json` output.

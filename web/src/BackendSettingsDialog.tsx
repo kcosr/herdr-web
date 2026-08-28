@@ -296,6 +296,7 @@ export function BackendSettingsDialog({
     tailnetName: bridge.getRuntime(SAME_ORIGIN_BRIDGE_ID)?.capabilities?.tailnet_name,
     origin: globalThis.location?.origin,
     port: globalThis.location?.port,
+    bridgeVersion: bridge.getRuntime(SAME_ORIGIN_BRIDGE_ID)?.capabilities?.bridge_version,
   });
   const showSameOrigin = bridge.sameOriginAvailable;
   const areas: { id: SettingsArea; label: string; icon: typeof Server }[] = [

@@ -24,6 +24,36 @@ class FakeEventSource {
 
 const realCrypto = globalThis.crypto;
 
+/** jsdom has no matchMedia; @parlay/client reads it at module scope. */
+function stubMatchMedia() {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    addListener: () => {},
+    removeListener: () => {},
+    dispatchEvent: () => false,
+  }));
+}
+
+/**
+ * `@parlay/client` is an intentionally OPTIONAL, LOCAL-ONLY dependency: it only
+ * resolves when the gitignored `web/local-deps/parlay-client` symlink is present
+ * (see web/README.md), so the standard `npm ci` environment has no such module.
+ * Mirror ParlayInput's own guarded import to decide whether the parlay path is
+ * exercisable here, and skip these session-id tests when it is not. matchMedia
+ * must be stubbed before the import since the package reads it at module scope.
+ */
+stubMatchMedia();
+let parlayAvailable = true;
+try {
+  await import("@parlay/client");
+} catch {
+  parlayAvailable = false;
+}
+
 /** Plain HTTP on a non-localhost origin: no randomUUID, getRandomValues intact. */
 function stubInsecureContextCrypto() {
   vi.stubGlobal("crypto", {
@@ -50,17 +80,7 @@ beforeEach(() => {
     true;
   FakeEventSource.instances = [];
   vi.stubGlobal("EventSource", FakeEventSource);
-  // jsdom has no matchMedia; @parlay/client reads it at module scope.
-  vi.stubGlobal("matchMedia", (query: string) => ({
-    matches: false,
-    media: query,
-    onchange: null,
-    addEventListener: () => {},
-    removeEventListener: () => {},
-    addListener: () => {},
-    removeListener: () => {},
-    dispatchEvent: () => false,
-  }));
+  stubMatchMedia();
 });
 
 afterEach(async () => {
@@ -97,7 +117,7 @@ async function mountInput() {
   return host;
 }
 
-describe("ParlayMobileInput session ids", () => {
+describe.skipIf(!parlayAvailable)("ParlayMobileInput session ids", () => {
   it("mounts without crypto.randomUUID (insecure-context origins)", async () => {
     // Reproduces the mobile-mode crash: herdr-web served over plain HTTP to a
     // LAN / .local / Tailscale origin has no `crypto.randomUUID` (it is

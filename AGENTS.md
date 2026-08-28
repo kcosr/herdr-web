@@ -84,6 +84,11 @@ This is a lightweight internal onboarding note for agents working in this repo.
   stamps the changelog and creates the release. Inspect tarball/APK contents before upload.
 - Desktop tarballs include only `herdr-web-bridge`, bundled `web/dist` assets, a wrapper script, and
   docs. They do not include Herdr itself.
+- The locally running bridge serves static assets from `~/.local/share/herdr-web/dist`, which is a
+  *copy* of `web/dist`, not a symlink — a rebuild alone changes nothing for a live phone/browser
+  client. To redeploy: `npm run build:web`, then `rsync -a --delete web/dist/ ~/.local/share/herdr-web/dist/`.
+  No bridge restart is needed; it reads from disk per request. `--delete` is correct here: every file
+  in that directory is build output, and stale content-hashed chunks left behind are dead weight.
 
 ## Changelog
 

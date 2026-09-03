@@ -1532,6 +1532,46 @@ fn finalize_upload_file_name(name: String) -> Option<String> {
     }
 }
 
+/// How many `name-N.ext` variants to try before giving up on de-duplicating an
+/// upload. Deep enough for real usage, bounded so a pathological upload
+/// directory cannot spin the handler forever.
+const MAX_UPLOAD_NAME_ATTEMPTS: u32 = 1000;
+
+/// Split a sanitized upload name into stem and extension. `sanitize_upload_file_name`
+/// strips leading and trailing dots, so a dotfile (`.bashrc`) never reaches
+/// here with an empty stem.
+fn split_upload_name_extension(name: &str) -> Option<(&str, &str)> {
+    let (stem, extension) = name.rsplit_once('.')?;
+    if stem.is_empty() || extension.is_empty() {
+        return None;
+    }
+    Some((stem, extension))
+}
+
+/// The `attempt`-th candidate for `name`: attempt 0 is the original filename,
+/// later attempts suffix the stem (`notes.txt` -> `notes-1.txt`). The suffix
+/// never introduces a path separator, so a candidate stays a direct child of
+/// the upload directory whenever `name` was.
+fn upload_name_candidate(name: &str, attempt: u32) -> String {
+    if attempt == 0 {
+        return name.to_string();
+    }
+    match split_upload_name_extension(name) {
+        Some((stem, extension)) => format!("{stem}-{attempt}.{extension}"),
+        None => format!("{name}-{attempt}"),
+    }
+}
+
+/// Preserve the uploader's original filename while never clobbering an earlier
+/// upload: return `name` when it is free, otherwise the first `name-N.ext`
+/// variant `is_taken` reports as free. Returns `None` when every candidate is
+/// taken.
+fn unique_upload_file_name(name: &str, mut is_taken: impl FnMut(&str) -> bool) -> Option<String> {
+    (0..MAX_UPLOAD_NAME_ATTEMPTS)
+        .map(|attempt| upload_name_candidate(name, attempt))
+        .find(|candidate| !is_taken(candidate))
+}
+
 fn generated_upload_name(mime: Option<&str>) -> String {
     let extension = upload_extension_for_mime(mime).unwrap_or("bin");
     let millis = std::time::SystemTime::now()
@@ -2992,9 +3032,30 @@ async fn upload_handler(
         overwrite = query.overwrite,
         "herdr-web-bridge upload request"
     );
-    let name = match query.name.as_deref().and_then(sanitize_upload_file_name) {
+    let requested_name = match query.name.as_deref().and_then(sanitize_upload_file_name) {
         Some(name) => name,
         None => generated_upload_name(mime.as_deref()),
+    };
+    // Keep the uploader's original filename. When it is already taken, save
+    // alongside the earlier file under a de-duplicated name
+    // (`notes.txt` -> `notes-1.txt`) rather than reporting a conflict;
+    // `overwrite=true` stays the only way to replace an existing upload.
+    let name = if query.overwrite {
+        requested_name
+    } else {
+        let upload_dir = &state.upload_dir;
+        let unique = unique_upload_file_name(&requested_name, |candidate| {
+            upload_dir.join(candidate).symlink_metadata().is_ok()
+        });
+        match unique {
+            Some(name) => name,
+            None => {
+                return Err(UploadError::Conflict {
+                    path: upload_dir.join(&requested_name).display().to_string(),
+                    name: requested_name,
+                })
+            }
+        }
     };
     let destination = state.upload_dir.join(&name);
     if !is_direct_child(&state.upload_dir, &destination) {
@@ -3004,6 +3065,8 @@ async fn upload_handler(
     tokio::fs::create_dir_all(&state.upload_dir).await?;
     let existing = tokio::fs::symlink_metadata(&destination).await.ok();
     if let Some(existing) = existing {
+        // Only reachable when another upload claimed the de-duplicated name
+        // between selection and this check; the client can retry.
         if !query.overwrite {
             info!(
                 name = %name,
@@ -7762,6 +7825,145 @@ mod tests {
             upload_extension_for_mime(Some("application/octet-stream")),
             None
         );
+    }
+
+    #[test]
+    fn unique_upload_file_name_keeps_original_when_free() {
+        assert_eq!(
+            unique_upload_file_name("screen shot.png", |_| false).as_deref(),
+            Some("screen shot.png")
+        );
+    }
+
+    #[test]
+    fn unique_upload_file_name_suffixes_taken_names() {
+        let taken: HashSet<&str> = ["image.png", "image-1.png"].into_iter().collect();
+        assert_eq!(
+            unique_upload_file_name("image.png", |candidate| taken.contains(candidate)).as_deref(),
+            Some("image-2.png")
+        );
+    }
+
+    #[test]
+    fn unique_upload_file_name_suffixes_names_without_extension() {
+        let taken: HashSet<&str> = ["notes"].into_iter().collect();
+        assert_eq!(
+            unique_upload_file_name("notes", |candidate| taken.contains(candidate)).as_deref(),
+            Some("notes-1")
+        );
+    }
+
+    #[test]
+    fn unique_upload_file_name_suffixes_before_the_last_extension() {
+        let taken: HashSet<&str> = ["archive.tar.gz"].into_iter().collect();
+        assert_eq!(
+            unique_upload_file_name("archive.tar.gz", |candidate| taken.contains(candidate))
+                .as_deref(),
+            Some("archive.tar-1.gz")
+        );
+    }
+
+    #[test]
+    fn unique_upload_file_name_gives_up_when_every_candidate_is_taken() {
+        assert_eq!(unique_upload_file_name("image.png", |_| true), None);
+    }
+
+    #[test]
+    fn unique_upload_file_name_repeats_produce_distinct_names() {
+        let mut taken: HashSet<String> = HashSet::new();
+        let mut names = Vec::new();
+        for _ in 0..3 {
+            let name = unique_upload_file_name("image.png", |candidate| taken.contains(candidate))
+                .expect("name available");
+            taken.insert(name.clone());
+            names.push(name);
+        }
+        assert_eq!(names, vec!["image.png", "image-1.png", "image-2.png"]);
+    }
+
+    #[test]
+    fn upload_file_name_sanitization_rejects_traversal_segments() {
+        for hostile in [
+            "../secret.txt",
+            "../../../etc/passwd",
+            r"..\..\windows\system.ini",
+            "uploads/../../secret.txt",
+            "/etc/passwd",
+            r"C:\Windows\win.ini",
+            "nested/dir/report.pdf",
+            "trailing/dots/../evil.txt.",
+        ] {
+            let sanitized =
+                sanitize_upload_file_name(hostile).unwrap_or_else(|| panic!("{hostile} sanitized"));
+            assert!(
+                !sanitized.contains('/') && !sanitized.contains('\\'),
+                "{hostile} -> {sanitized} kept a separator"
+            );
+            assert_ne!(sanitized, "..", "{hostile} stayed a traversal segment");
+        }
+    }
+
+    #[test]
+    fn upload_file_name_sanitization_rejects_pure_traversal_names() {
+        for hostile in ["..", "../", "../..", r"..\", "...", "/", "", "   "] {
+            assert_eq!(
+                sanitize_upload_file_name(hostile),
+                None,
+                "{hostile} should have no usable file name"
+            );
+        }
+    }
+
+    #[test]
+    fn unique_upload_file_name_keeps_traversal_attempts_inside_upload_dir() {
+        let upload_dir = PathBuf::from("/tmp/herdr-web/uploads");
+        for hostile in [
+            "../secret.txt",
+            "../../../etc/passwd",
+            r"..\..\windows\system.ini",
+            "uploads/../../secret.txt",
+            "/etc/passwd",
+        ] {
+            let sanitized =
+                sanitize_upload_file_name(hostile).unwrap_or_else(|| panic!("{hostile} sanitized"));
+            // Force the de-duplication path too: the suffix must not reopen an escape.
+            let taken: HashSet<String> = [sanitized.clone()].into_iter().collect();
+            let unique = unique_upload_file_name(&sanitized, |candidate| taken.contains(candidate))
+                .expect("name available");
+            assert_ne!(
+                unique, sanitized,
+                "{hostile} should have been de-duplicated"
+            );
+            let destination = upload_dir.join(&unique);
+            assert!(
+                is_direct_child(&upload_dir, &destination),
+                "{hostile} -> {} escaped the upload directory",
+                destination.display()
+            );
+        }
+    }
+
+    #[test]
+    fn unique_upload_file_name_does_not_reuse_a_name_already_on_disk() {
+        let dir =
+            std::env::temp_dir().join(format!("herdr-web-upload-name-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // The predicate the upload handler uses, against a real directory.
+        let taken = |candidate: &str| dir.join(candidate).symlink_metadata().is_ok();
+
+        let first = unique_upload_file_name("image.png", taken).unwrap();
+        assert_eq!(first, "image.png");
+        std::fs::write(dir.join(&first), b"first").unwrap();
+
+        let second = unique_upload_file_name("image.png", taken).unwrap();
+        assert_eq!(second, "image-1.png");
+        std::fs::write(dir.join(&second), b"second").unwrap();
+
+        assert_eq!(std::fs::read(dir.join("image.png")).unwrap(), b"first");
+        assert_eq!(std::fs::read(dir.join("image-1.png")).unwrap(), b"second");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

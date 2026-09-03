@@ -73,6 +73,12 @@
 
 ### Changed
 
+- Uploads now keep the original filename instead of failing on a name collision. Uploading
+  `image.png` a second time saves it as `image-1.png` (then `image-2.png`, ...) alongside the first
+  file rather than returning `409 file exists`; `?overwrite=true` remains the only way to replace
+  an existing upload. Supplied filenames are still reduced to a basename, so path separators and
+  `..` segments cannot escape the upload directory.
+
 - Made the parlay-backed command composer the single terminal input experience at every viewport
   width and pointer type. Previously the composer (key strip, expanding/voice input, stage/send
   buttons) rendered only on touch devices (`(hover: none) and (pointer: coarse)`); wide desktop

@@ -79,6 +79,11 @@
   an existing upload. Supplied filenames are still reduced to a basename, so path separators and
   `..` segments cannot escape the upload directory.
 
+- Agent rows in the sidebar now use the workspace or tab label as their title instead of the
+  agent binary name, which was identical across every row. The promoted label is dropped from
+  the row subtitle so it is not shown twice. Rows without a workspace or tab label keep their
+  previous title.
+
 - Made the parlay-backed command composer the single terminal input experience at every viewport
   width and pointer type. Previously the composer (key strip, expanding/voice input, stage/send
   buttons) rendered only on touch devices (`(hover: none) and (pointer: coarse)`); wide desktop

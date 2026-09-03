@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   areAllVisibleSidebarGroupsCollapsed,
   agentSubtitle,
+  agentTitle,
   applySnapshotOverlays,
   buildCombinedTabWorkspaceGroups,
   buildScopedAgentGroups,
@@ -137,7 +138,7 @@ describe("App multi-bridge helpers", () => {
         "tab-a",
         "host-a",
       ),
-    ).toBe("host-a · workspace-a · tab-a · project · Reviewing");
+    ).toBe("host-a · tab-a · project · Reviewing");
     expect(
       agentSubtitle({
         ...pane("agent", "workspace-a", "tab-a", "working"),
@@ -151,6 +152,77 @@ describe("App multi-bridge helpers", () => {
         state_labels: { unknown: "Connecting" },
       }),
     ).toBe("Connecting");
+  });
+
+  it("prefers the workspace label as the agent row title", () => {
+    expect(
+      agentTitle(
+        { ...pane("agent", "workspace-a", "tab-a", "working"), display_agent: "claude" },
+        workspace("workspace-a", 1),
+        "tab-a",
+      ),
+    ).toBe("workspace-a");
+  });
+
+  it("falls back to the tab label when no workspace label is available", () => {
+    expect(
+      agentTitle(
+        { ...pane("agent", "workspace-a", "tab-a", "working"), display_agent: "claude" },
+        undefined,
+        "tab-a",
+      ),
+    ).toBe("tab-a");
+    expect(
+      agentTitle(
+        { ...pane("agent", "workspace-a", "tab-a", "working"), display_agent: "claude" },
+        { ...workspace("workspace-a", 1), label: "   " },
+        "tab-a",
+      ),
+    ).toBe("tab-a");
+  });
+
+  it("falls back to the pane title when no workspace or tab label is available", () => {
+    expect(
+      agentTitle({
+        ...pane("agent", "workspace-a", "tab-a", "working"),
+        display_agent: "claude",
+      }),
+    ).toBe("claude");
+    expect(
+      agentTitle(
+        { ...pane("agent", "workspace-a", "tab-a", "working"), display_agent: "claude" },
+        undefined,
+        "   ",
+      ),
+    ).toBe("claude");
+    expect(agentTitle(pane("agent", "workspace-a", "tab-a", "working"))).toBe("Terminal");
+  });
+
+  it("drops the promoted label from the agent subtitle", () => {
+    expect(
+      agentSubtitle(
+        {
+          ...pane("agent", "workspace-a", "tab-a", "working"),
+          state_labels: { working: "Reviewing" },
+          cwd: "/work/project",
+        },
+        undefined,
+        "tab-a",
+        "host-a",
+      ),
+    ).toBe("host-a · project · Reviewing");
+    expect(
+      agentSubtitle(
+        {
+          ...pane("agent", "workspace-a", "tab-a", "working"),
+          state_labels: { working: "Reviewing" },
+          cwd: "/work/project",
+        },
+        undefined,
+        undefined,
+        "host-a",
+      ),
+    ).toBe("host-a · Reviewing");
   });
 
   it("uses display preference selection before store fallback", () => {

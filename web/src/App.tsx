@@ -9283,7 +9283,7 @@ function AgentRow({
           {pinned ? (
             <Pin className="agent-pin-indicator" size={10} aria-label="Pinned" />
           ) : null}
-          <span className="pane-title-text">{agentTitle(pane)}</span>
+          <span className="pane-title-text">{agentTitle(pane, workspace, tabLabel)}</span>
         </span>
         <span className="pane-meta mono">{agentSubtitle(pane, workspace, tabLabel, bridgeLabel)}</span>
       </span>
@@ -9647,8 +9647,19 @@ function compareLastStatusTransition(a: ScopedAgentPane, b: ScopedAgentPane) {
   return 0;
 }
 
-function agentTitle(pane: PaneInfo) {
-  return pane.display_agent || pane.label || pane.agent || pane.title || paneTitle(pane);
+export function agentTitle(pane: PaneInfo, workspace?: WorkspaceInfo, tabLabel?: string) {
+  // The workspace/tab name distinguishes agent windows from one another; the
+  // agent binary name (e.g. "claude") is the same across every row and isn't
+  // useful as the primary label — it still shows up via the agent icon.
+  return (
+    workspace?.label?.trim() ||
+    tabLabel?.trim() ||
+    pane.display_agent ||
+    pane.label ||
+    pane.agent ||
+    pane.title ||
+    paneTitle(pane)
+  );
 }
 
 export function agentSubtitle(
@@ -9659,9 +9670,21 @@ export function agentSubtitle(
 ) {
   const dir = basename(pane.foreground_cwd || pane.cwd);
   const stateText = pane.state_labels?.[pane.agent_status];
-  return [bridgeLabel, workspace?.label, tabLabel, dir, stateText]
-    .filter(Boolean)
-    .join(" · ");
+  // Drop whichever context part was promoted to the title so the row does not
+  // repeat itself.
+  const title = agentTitle(pane, workspace, tabLabel);
+  const parts = [bridgeLabel];
+  if (workspace?.label && workspace.label !== title) {
+    parts.push(workspace.label);
+  }
+  if (tabLabel && tabLabel !== title) {
+    parts.push(tabLabel);
+  }
+  if (dir && dir !== title) {
+    parts.push(dir);
+  }
+  parts.push(stateText);
+  return parts.filter(Boolean).join(" · ");
 }
 
 function SplitGlyph() {

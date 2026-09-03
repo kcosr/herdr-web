@@ -13,6 +13,10 @@
 
 ### Changed
 
+- Uploads now keep their original filename and de-duplicate on a collision: re-uploading
+  `image.png` into a directory that already has one lands as `image-1.png` instead of failing
+  with a conflict. `?overwrite=true` remains the only way to replace an existing file.
+
 ### Fixed
 
 ### Removed

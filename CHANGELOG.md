@@ -141,6 +141,14 @@
 
 ### Fixed
 
+- Fixed `--allow-host` rejecting an explicitly allow-listed hostname whenever the `Host` header's
+  port differed from `--port` (or was absent). This broke reverse-proxy setups such as
+  `tailscale serve --https=8443 http://127.0.0.1:8787`, where static assets loaded but every
+  `/api/*` call returned 403. An explicit `--allow-host` match is the operator's opt-in and now
+  wins regardless of the `Host` port; the port check remains in force as DNS-rebinding protection
+  for every host that is not allow-listed, including the unspecified-bind bare-IP and `bind_host`
+  fallbacks.
+
 - Fixed a typing hitch on desktop while an agent was actively producing output. Snapshot updates
   (the 10s poll, agent-status activity bursts, and shared selection events) reconciled the whole
   app tree synchronously and blocked terminal keystroke handling on the main thread. Those updates

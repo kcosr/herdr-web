@@ -1661,16 +1661,20 @@ fn host_authority_allowed(authority: &str, policy: &RequestPolicy) -> bool {
         return true;
     }
 
-    if !authority_port_matches(authority, policy.bind_port) {
-        return false;
-    }
-
+    // An explicit --allow-host entry is the operator's opt-in for this exact hostname, so it wins
+    // regardless of the Host header's port. Reverse proxies (e.g. `tailscale serve --https=8443`)
+    // forward a Host authority whose port differs from --port, or omit the port entirely.
     if policy
         .allowed_hosts
         .iter()
         .any(|allowed| host.eq_ignore_ascii_case(allowed))
     {
         return true;
+    }
+
+    // Everything below is DNS-rebinding protection for hosts the operator did not name.
+    if !authority_port_matches(authority, policy.bind_port) {
+        return false;
     }
 
     if is_unspecified_bind_host(&policy.bind_host) {
@@ -6630,7 +6634,7 @@ mod tests {
     }
 
     #[test]
-    fn host_gate_accepts_configured_hostname_only_on_bridge_port() {
+    fn host_gate_accepts_configured_hostname_on_any_port() {
         let policy = RequestPolicy {
             bind_host: "0.0.0.0".to_string(),
             bind_port: 4000,
@@ -6638,10 +6642,52 @@ mod tests {
             allowed_origins: Vec::new(),
             allowed_connect_sources: Vec::new(),
         };
+        // Same port as the bridge bind: the plain direct-connect case.
         assert!(host_authority_allowed("herdr-host.local:4000", &policy));
         assert!(host_authority_allowed("HERDR-HOST.LOCAL:4000", &policy));
-        assert!(!host_authority_allowed("herdr-host.local:8787", &policy));
+        // Behind a reverse proxy terminating TLS on another port
+        // (e.g. `tailscale serve --https=8443 http://127.0.0.1:4000`).
+        assert!(host_authority_allowed("herdr-host.local:8443", &policy));
+        assert!(host_authority_allowed("HERDR-HOST.LOCAL:8443", &policy));
+        // Proxy forwarding the default port omits it from the Host header entirely.
+        assert!(host_authority_allowed("herdr-host.local", &policy));
+        assert!(host_authority_allowed("HERDR-HOST.LOCAL", &policy));
+    }
+
+    #[test]
+    fn host_gate_keeps_port_check_for_hosts_outside_the_allow_list() {
+        let policy = RequestPolicy {
+            bind_host: "0.0.0.0".to_string(),
+            bind_port: 4000,
+            allowed_hosts: vec!["herdr-host.local".to_string()],
+            allowed_origins: Vec::new(),
+            allowed_connect_sources: Vec::new(),
+        };
+        // Not allow-listed: rejected on the bridge port and on any other port.
         assert!(!host_authority_allowed("evil.example:4000", &policy));
+        assert!(!host_authority_allowed("evil.example:8443", &policy));
+        assert!(!host_authority_allowed("evil.example", &policy));
+        // A suffix of an allow-listed name is not an allow-list match.
+        assert!(!host_authority_allowed(
+            "evil-herdr-host.local:8443",
+            &policy
+        ));
+
+        // The unspecified-bind bare-IP fallback still requires the bind port.
+        assert!(host_authority_allowed("192.168.1.10:4000", &policy));
+        assert!(!host_authority_allowed("192.168.1.10:8443", &policy));
+        assert!(!host_authority_allowed("192.168.1.10", &policy));
+
+        // The bind_host fallback match still requires the bind port.
+        let bound = RequestPolicy {
+            bind_host: "192.168.1.10".to_string(),
+            bind_port: 4000,
+            allowed_hosts: Vec::new(),
+            allowed_origins: Vec::new(),
+            allowed_connect_sources: Vec::new(),
+        };
+        assert!(host_authority_allowed("192.168.1.10:4000", &bound));
+        assert!(!host_authority_allowed("192.168.1.10:8443", &bound));
     }
 
     #[test]

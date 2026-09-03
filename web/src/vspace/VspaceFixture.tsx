@@ -67,6 +67,10 @@ export function VspaceFixture() {
         onSubmitCommand={noop}
         onNextAgentPane={noop}
         onPrevAgentPane={noop}
+        pinned={false}
+        onPaneCycle={noop}
+        onPaneCycleModeToggle={noop}
+        paneCycleMode="pin"
       />
     </div>
   );

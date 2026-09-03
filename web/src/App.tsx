@@ -2535,7 +2535,7 @@ export function App() {
   // "previous agent" command (parlay text/voice trigger). Reuses the same tested
   // `nextVisibleAgentPaneEntry` + `focusPane` path as the keyboard so mobile stays
   // in lockstep with desktop wrap behavior. Returns whether a pane was focused.
-  const focusAdjacentAgentPane = (step: -1 | 1): boolean => {
+  const focusAdjacentAgentPane = (step: -1 | 1, pinnedOnlyOverride?: boolean): boolean => {
     const combineWorkspaceGroupsForShortcut =
       combineMatchingWorkspaceNames && hostScope === "all" && agentGroup === "workspace";
     const agentEntries = filterCollapsedAgentPaneEntries(
@@ -2554,7 +2554,7 @@ export function App() {
         agentGroup,
         agentSort,
         pinnedAgentKeys,
-        effectiveAgentPinnedOnly,
+        pinnedOnlyOverride ?? effectiveAgentPinnedOnly,
         agentActivityTransitions,
         agentActiveOnly,
         combineWorkspaceGroupsForShortcut,
@@ -2579,6 +2579,24 @@ export function App() {
     const next = nextVisibleAgentPaneEntry(agentEntries, currentIndex, step);
     focusPane(next.bridgeId, next.pane);
     return true;
+  };
+
+  // The mobile pin-cycle button hops between agents without opening the
+  // sidebar. Tap cycles; long-press switches which pool it walks.
+  const [paneCycleMode, setPaneCycleMode] = useState<"pin" | "all">("pin");
+
+  const cycleAgentPane = (direction: "next" | "prev") => {
+    const step = direction === "next" ? 1 : -1;
+    // Pin mode falls back to every pane when nothing is pinned, so the button
+    // never becomes a dead control.
+    if (paneCycleMode === "pin" && focusAdjacentAgentPane(step, true)) {
+      return;
+    }
+    focusAdjacentAgentPane(step, false);
+  };
+
+  const togglePaneCycleMode = () => {
+    setPaneCycleMode((mode) => (mode === "pin" ? "all" : "pin"));
   };
 
   const selectNote = (bridgeId: BridgeId, noteId: string) => {
@@ -4227,6 +4245,10 @@ export function App() {
             wsUrl={selectedWsUrl}
             onNextAgentPane={() => focusAdjacentAgentPane(1)}
             onPrevAgentPane={() => focusAdjacentAgentPane(-1)}
+            pinned={selectedPanePinned}
+            onPaneCycle={cycleAgentPane}
+            onPaneCycleModeToggle={togglePaneCycleMode}
+            paneCycleMode={paneCycleMode}
           />
         ) : renderTerminal ? (
           <TerminalView
@@ -4259,6 +4281,10 @@ export function App() {
             focusToken={terminalFocusToken}
             onNextAgentPane={() => focusAdjacentAgentPane(1)}
             onPrevAgentPane={() => focusAdjacentAgentPane(-1)}
+            pinned={selectedPanePinned}
+            onPaneCycle={cycleAgentPane}
+            onPaneCycleModeToggle={togglePaneCycleMode}
+            paneCycleMode={paneCycleMode}
             onAccessibleTextChange={talkBack.handleAccessibleText}
             accessibilityLabel={
               selectedPane ? `Selected pane terminal: ${paneTitle(selectedPane)}` : "Terminal"
@@ -6004,6 +6030,10 @@ function SplitGrid({
   wsUrl,
   onNextAgentPane,
   onPrevAgentPane,
+  pinned,
+  onPaneCycle,
+  onPaneCycleModeToggle,
+  paneCycleMode,
 }: {
   cells: { pane: PaneInfo; style: CSSProperties }[];
   selectedPaneId: string | null;
@@ -6031,6 +6061,10 @@ function SplitGrid({
   wsUrl: (path: string, query?: URLSearchParams) => string;
   onNextAgentPane: () => void;
   onPrevAgentPane: () => void;
+  pinned: boolean;
+  onPaneCycle: (direction: "next" | "prev") => void;
+  onPaneCycleModeToggle: () => void;
+  paneCycleMode: "pin" | "all";
 }) {
   // On touch devices, showing every split pane at once (e.g. a small tmux
   // status pane stacked under the main agent pane) leaves too little room for
@@ -6100,6 +6134,10 @@ function SplitGrid({
               focusToken={selected ? focusToken : 0}
               onNextAgentPane={onNextAgentPane}
               onPrevAgentPane={onPrevAgentPane}
+              pinned={pinned}
+              onPaneCycle={onPaneCycle}
+              onPaneCycleModeToggle={onPaneCycleModeToggle}
+              paneCycleMode={paneCycleMode}
               accessibilityLabel={accessibilityLabel}
               selected={selected}
             />

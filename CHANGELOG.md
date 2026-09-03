@@ -11,6 +11,10 @@
 
 ### Added
 
+- Added a pane-cycle button to the mobile terminal control row. Tap advances to the next agent
+  pane; long-press toggles whether it walks only pinned panes or all of them, falling back to all
+  panes when nothing is pinned. The control row tints muted green while the active pane is pinned.
+
 - Added Talk Back v1: gesture-primed `speechSynthesis` narration of the focused pane. Output is
   ANSI-stripped and settle-debounced so it speaks finished lines rather than every redraw, with a
   mute toggle in the header and device-local persisted preferences.

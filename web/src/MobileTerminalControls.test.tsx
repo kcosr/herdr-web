@@ -114,6 +114,10 @@ async function renderControls(expandingInput: boolean) {
         onToggleMobileMode={vi.fn()}
         onNextAgentPane={vi.fn()}
         onPrevAgentPane={vi.fn()}
+        pinned={false}
+        onPaneCycle={vi.fn()}
+        onPaneCycleModeToggle={vi.fn()}
+        paneCycleMode="pin"
         onControlsHeightChange={vi.fn()}
         onInput={vi.fn()}
         onTerminalFocus={vi.fn()}

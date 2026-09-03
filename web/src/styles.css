@@ -3594,3 +3594,32 @@ button {
   background: var(--surface2);
   border-color: var(--overlay0);
 }
+
+/* Mobile pin-cycle: the control row picks up a muted green wash while the
+   active pane is pinned, so the pin state is legible without the sidebar. */
+.terminal-mobile-controls[data-pinned="true"] {
+  border-top-color: color-mix(in srgb, var(--green) 55%, var(--line));
+  background: color-mix(in srgb, var(--green) 10%, color-mix(in srgb, var(--mantle) 94%, black));
+}
+
+.terminal-mobile-controls[data-pinned="true"] .term-key,
+.terminal-mobile-controls[data-pinned="true"] .term-send {
+  border-color: color-mix(in srgb, var(--green) 45%, var(--line));
+  background: color-mix(in srgb, var(--green) 18%, var(--surface0));
+  color: color-mix(in srgb, var(--green) 70%, var(--text));
+}
+
+/* The next-pane button's color is its own mode signal (pin vs. all), not the
+   row's ambient pinned-pane tint above — it opts out of that rule and always
+   reflects paneCycleMode instead. */
+.terminal-mobile-controls .term-key-icon.term-pin-cycle[data-cycle-mode="pin"] {
+  border-color: color-mix(in srgb, var(--green) 45%, var(--line));
+  background: color-mix(in srgb, var(--green) 18%, var(--surface0));
+  color: color-mix(in srgb, var(--green) 70%, var(--text));
+}
+
+.terminal-mobile-controls .term-key-icon.term-pin-cycle[data-cycle-mode="all"] {
+  border-color: var(--line);
+  background: var(--surface0);
+  color: var(--text);
+}

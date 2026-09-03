@@ -6,11 +6,13 @@ import {
   Paperclip,
   Send,
   Smartphone,
+  SkipForward,
   SquareTerminal,
   TextCursorInput,
   X,
 } from "lucide-react";
 import ConnectionConflictCard from "./ConnectionConflictCard";
+import { useLongPress } from "./overlays";
 import {
 
 
@@ -123,6 +125,13 @@ type Props = {
   focusToken?: number;
   /** Advance to the next agent pane (mobile "next agent"/"next tab" command). */
   onNextAgentPane?: () => void;
+  /** True when the active pane is pinned; tints the mobile control row. */
+  pinned?: boolean;
+  /** Cycles the pane-cycle button through whichever pool paneCycleMode selects. */
+  onPaneCycle?: (direction: "next" | "prev") => void;
+  /** Long-press on the pane-cycle button toggles between pinned-only and all panes. */
+  onPaneCycleModeToggle?: () => void;
+  paneCycleMode?: "pin" | "all";
   /** Return to the previous agent pane (mobile "previous agent" command). */
   onPrevAgentPane?: () => void;
   /** Whether to maintain a hidden plain-text mirror of the visible terminal viewport. */
@@ -199,6 +208,10 @@ export function TerminalView({
   refitToken = 0,
   focusToken = 0,
   onNextAgentPane = () => {},
+  pinned = false,
+  onPaneCycle = () => {},
+  onPaneCycleModeToggle = () => {},
+  paneCycleMode = "pin",
   onPrevAgentPane = () => {},
   terminalScreenReaderText = false,
   onAccessibleTextChange,
@@ -1510,6 +1523,10 @@ export function TerminalView({
           onStageCommand={(command) => enqueueTerminalInput([command])}
           onSubmitCommand={(command) => enqueueTerminalInput([command, "\r"])}
           onNextAgentPane={onNextAgentPane}
+          pinned={pinned}
+          onPaneCycle={onPaneCycle}
+          onPaneCycleModeToggle={onPaneCycleModeToggle}
+          paneCycleMode={paneCycleMode}
           onPrevAgentPane={onPrevAgentPane}
         />
       ) : null}
@@ -1608,6 +1625,10 @@ export function MobileTerminalControls({
   onSubmitCommand,
   onNextAgentPane,
   onPrevAgentPane,
+  pinned,
+  onPaneCycle,
+  onPaneCycleModeToggle,
+  paneCycleMode,
 }: {
   commandInputRef: RefObject<HTMLInputElement | HTMLTextAreaElement | null>;
   disabled: boolean;
@@ -1627,6 +1648,10 @@ export function MobileTerminalControls({
   onSubmitCommand: (command: string) => void;
   onNextAgentPane: () => void;
   onPrevAgentPane: () => void;
+  pinned: boolean;
+  onPaneCycle: (direction: "next" | "prev") => void;
+  onPaneCycleModeToggle: () => void;
+  paneCycleMode: "pin" | "all";
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [value, setValue] = useState("");
@@ -1645,6 +1670,8 @@ export function MobileTerminalControls({
     }
     setFieldKey((key) => key + 1);
   };
+  // Tap cycles panes; hold toggles which pool it cycles through.
+  const paneCyclePress = useLongPress(onPaneCycleModeToggle, () => onPaneCycle("next"));
   const submit = () => {
     const command = value;
     clearCommandInput();
@@ -1723,7 +1750,12 @@ export function MobileTerminalControls({
   };
 
   return (
-    <div ref={rootRef} className="terminal-mobile-controls" data-expanded={expanded ? "true" : "false"}>
+    <div
+      ref={rootRef}
+      className="terminal-mobile-controls"
+      data-expanded={expanded ? "true" : "false"}
+      data-pinned={pinned ? "true" : "false"}
+    >
       {!compactControls ? (
         <>
           <div className="term-key-strip" aria-label="Common terminal keys">
@@ -1855,6 +1887,20 @@ export function MobileTerminalControls({
           onClick={onToggleMobileMode}
         >
           <Smartphone size={15} />
+        </button>
+        <button
+          className="term-key term-key-icon term-pin-cycle"
+          type="button"
+          aria-label="Next pane (hold to switch between pinned-only and all panes)"
+          title={
+            paneCycleMode === "pin"
+              ? "Next pinned agent (hold to switch mode)"
+              : "Next agent (hold to switch mode)"
+          }
+          data-cycle-mode={paneCycleMode}
+          {...paneCyclePress}
+        >
+          <SkipForward size={15} />
         </button>
         <ParlayInput
             key={fieldKey}

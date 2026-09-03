@@ -11,6 +11,16 @@
 
 ### Added
 
+- Added a "Jump to present" control to terminal panes. Scrolling up from the live tail reveals a
+  floating pill over the pane; clicking it returns to the bottom. The return is a purely local
+  viewport reset — everything the bridge has sent is already in the local terminal buffer — so it
+  needs no server round trip and lands at the true bottom even while output is actively streaming.
+  Presence is tracked per pane, so each split-grid pane shows its own control.
+
+- PageUp/PageDown now scroll the terminal scrollback a full viewport per press, matching the
+  2-finger trackpad rate. They pass through to the app untouched when it has mouse tracking
+  enabled, when combined with ctrl/alt/meta, and during IME composition.
+
 - Added a pane-cycle button to the mobile terminal control row. Tap advances to the next agent
   pane; long-press toggles whether it walks only pinned panes or all of them, falling back to all
   panes when nothing is pinned. The control row tints muted green while the active pane is pinned.
@@ -83,6 +93,12 @@
   agent binary name, which was identical across every row. The promoted label is dropped from
   the row subtitle so it is not shown twice. Rows without a workspace or tab label keep their
   previous title.
+
+- Terminal mount no longer emits redundant resize sends. Mount, the `ResizeObserver`'s initial
+  callback, the font-preload completion, and `document.fonts.ready` all fire within a few ms of
+  each other on a fresh pane and each sent its own resize — one full reflow/redraw round trip
+  apiece. They now coalesce to the last one in a 120 ms window, which is barely noticeable on a
+  local bridge but visibly faster over a remote-proxied (double-hop) connection.
 
 - Made the parlay-backed command composer the single terminal input experience at every viewport
   width and pointer type. Previously the composer (key strip, expanding/voice input, stage/send

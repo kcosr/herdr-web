@@ -1,4 +1,5 @@
 import {
+  ChevronsDown,
   Copy,
   ExternalLink,
   Keyboard,
@@ -75,6 +76,10 @@ import type {
   MobileTerminalTapTarget,
   MobileTouchSelectionEndpointTimeoutMs,
 } from "./mobileTerminalPrefs";
+import {
+  advanceTerminalScrollOffset,
+  isTerminalScrolledAwayFromPresent,
+} from "./terminalScrollPresence";
 import type { PaneInfo } from "./types";
 
 import { ParlayInput } from "./ParlayInput";
@@ -181,6 +186,13 @@ type TerminalRendererReady = {
 };
 const MAX_UPLOAD_FILES = 8;
 const DEBUG_TERMINAL_RECONNECT = false;
+// Mount, the ResizeObserver's initial callback, and document.fonts.ready all
+// fire within a few ms of each other on a fresh pane and each would otherwise
+// send its own "resize" over the socket — one full reflow/redraw round trip
+// per send. Harmless on a local bridge; visibly slow and chunky over a
+// remote-proxied (double-hop) connection. Coalescing to the last one in this
+// window cuts that to at most one corrective resize after the first connect.
+const TERMINAL_RESIZE_SETTLE_MS = 120;
 
 export function TerminalView({
   pane,
@@ -242,6 +254,9 @@ export function TerminalView({
   const terminalIdRef = useRef(pane?.terminal_id ?? null);
   const overlayTerminalIdRef = useRef(pane?.terminal_id ?? null);
   const delayConnectingOverlayRef = useRef(false);
+  // Net lines the user has scrolled up by, tracked per TerminalView instance so each
+  // split-grid pane shows its own jump-to-present control independently.
+  const terminalScrollOffsetRef = useRef(0);
   const [connectionState, setConnectionState] = useState<TerminalConnectionState>("idle");
   const [closeReason, setCloseReason] = useState<string | null>(null);
   const [rendererReady, setRendererReady] = useState<TerminalRendererReady | null>(null);
@@ -254,6 +269,7 @@ export function TerminalView({
   const [mobileSelectionAction, setMobileSelectionAction] =
     useState<MobileSelectionAction | null>(null);
   const [mobileModeActive, setMobileModeActive] = useState(false);
+  const [scrolledAwayFromPresent, setScrolledAwayFromPresent] = useState(false);
   // Read at attach time without re-running the effect (which would re-attach the socket).
   const autoFocusRef = useRef(autoFocus);
   autoFocusRef.current = autoFocus;
@@ -501,6 +517,17 @@ export function TerminalView({
     [flushBatchedTerminalInput, scheduleBatchedTerminalInputFlush, sendTerminalInputFrame],
   );
 
+  const jumpToTerminalPresent = useCallback(() => {
+    // All output is written to the local terminal buffer regardless of scroll position
+    // (see the socket message handler), so returning to present is a local viewport reset
+    // — no server round trip needed, and nothing to undershoot if output kept streaming
+    // in while scrolled away.
+    terminalScrollOffsetRef.current = 0;
+    setScrolledAwayFromPresent(false);
+    rendererRef.current?.scrollToBottom();
+    focusPreferredInput();
+  }, [focusPreferredInput]);
+
   useEffect(() => {
     if (terminalInputBatchDelayMs <= 0) {
       flushBatchedTerminalInput();
@@ -543,6 +570,8 @@ export function TerminalView({
     setShowConnectionOverlay(false);
     setCloseReason(null);
     terminalInputBlockedRef.current = false;
+    terminalScrollOffsetRef.current = 0;
+    setScrolledAwayFromPresent(false);
     if (!host || !terminalId) {
       setConnectionState("idle");
       host?.replaceChildren();
@@ -579,6 +608,20 @@ export function TerminalView({
         setRendererReady(ready);
       }
       sendResizeRef.current(size);
+    };
+    let settleTimer: number | null = null;
+    let pendingSettleMode: "fit" | "refresh" = "fit";
+    const scheduleSettledPublish = (mode: "fit" | "refresh") => {
+      pendingSettleMode = pendingSettleMode === "refresh" ? "refresh" : mode;
+      if (settleTimer !== null) {
+        window.clearTimeout(settleTimer);
+      }
+      settleTimer = window.setTimeout(() => {
+        settleTimer = null;
+        const flushMode = pendingSettleMode;
+        pendingSettleMode = "fit";
+        publishReady(flushMode);
+      }, TERMINAL_RESIZE_SETTLE_MS);
     };
 
     void renderer
@@ -617,10 +660,23 @@ export function TerminalView({
               lines: Math.min(Math.abs(lines), 200),
             }),
           );
+          const wasScrolledAway = isTerminalScrolledAwayFromPresent(
+            terminalScrollOffsetRef.current,
+          );
+          terminalScrollOffsetRef.current = advanceTerminalScrollOffset(
+            terminalScrollOffsetRef.current,
+            lines,
+          );
+          const isScrolledAway = isTerminalScrolledAwayFromPresent(
+            terminalScrollOffsetRef.current,
+          );
+          if (isScrolledAway !== wasScrolledAway) {
+            setScrolledAwayFromPresent(isScrolledAway);
+          }
         });
 
         resizeObserver = new ResizeObserver(() => {
-          publishReady();
+          scheduleSettledPublish("fit");
           if (socketRef.current?.readyState !== WebSocket.OPEN) {
             requestReconnectRef.current("resize");
           }
@@ -631,7 +687,7 @@ export function TerminalView({
         if (fontReady) {
           void fontReady.then(() => {
             if (!disposed) {
-              publishReady("refresh");
+              scheduleSettledPublish("refresh");
             }
           });
         }
@@ -640,7 +696,7 @@ export function TerminalView({
           ?.load('13px "JetBrainsMono Nerd Font Mono"', "\uE0B0")
           .then(() => {
             if (!disposed) {
-              publishReady("refresh");
+              scheduleSettledPublish("refresh");
             }
           })
           .catch(() => undefined);
@@ -657,6 +713,9 @@ export function TerminalView({
 
     return () => {
       disposed = true;
+      if (settleTimer !== null) {
+        window.clearTimeout(settleTimer);
+      }
       flushBatchedTerminalInput();
       batchedInputRef.current = emptyTerminalInputBatch();
       clearQueuedTerminalInput();
@@ -1487,6 +1546,12 @@ export function TerminalView({
           <ConnectionConflictCard terminalId={pane.terminal_id} httpUrl={httpUrl} />
         </div>
       )}
+      {scrolledAwayFromPresent ? (
+        <button className="terminal-jump-to-present" type="button" onClick={jumpToTerminalPresent}>
+          <ChevronsDown size={14} aria-hidden="true" />
+          Jump to present
+        </button>
+      ) : null}
       {uploadStatus ? (
         <div className="terminal-upload-status" role="status" aria-live="polite">
           {uploadStatus}

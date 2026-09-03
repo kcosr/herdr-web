@@ -205,6 +205,7 @@ export type TerminalRenderer = {
   setAccessibleScreenListener(callback: ((text: string) => void) | null): void;
   onInput(callback: (data: string) => void): () => void;
   onScroll(callback: (lines: number) => void): () => void;
+  scrollToBottom(): void;
   setTapFocusHandler(callback: (() => TerminalTapFocusResult) | null): void;
   setMobileTouchSelection(
     behavior: MobileLongPressBehavior,
@@ -340,6 +341,13 @@ export class GhosttyRenderer implements TerminalRenderer {
         this.#scrollCallback = null;
       }
     };
+  }
+
+  // Local-only viewport reset. Unlike onScroll (which forwards a scroll request to the
+  // bridge so the server-owned scrollback can be paged through), everything needed to
+  // return to the live tail is already in the local buffer, so no round trip is needed.
+  scrollToBottom() {
+    this.#terminal?.scrollToBottom();
   }
 
   setTapFocusHandler(callback: (() => TerminalTapFocusResult) | null) {
@@ -1308,6 +1316,25 @@ export class GhosttyRenderer implements TerminalRenderer {
         // edit, so cancellation suppression must not consume this new key.
         imeState = reduceTerminalImeState(imeState, { type: "settle" }).state;
       }
+      // PageUp/PageDown scroll the scrollback a viewport at a time, matching the
+      // 2-finger trackpad rate. Handled here rather than passed to the terminal so
+      // it goes through the same scroll path as wheel/touch; when a CLI app has
+      // mouse tracking on, the keys pass through to the app untouched. Placed after
+      // the composition guards above so it can never intercept an IME keystroke.
+      const scrollPageLines = pageScrollLines(event, terminal.rows);
+      if (scrollPageLines !== null && !this.#hasMouseTracking(terminal)) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === "function") {
+          event.stopImmediatePropagation();
+        }
+        if (this.#scrollCallback) {
+          this.#scrollCallback(scrollPageLines);
+        } else {
+          terminal.scrollLines(scrollPageLines);
+        }
+        return;
+      }
       const customOutput = textareaKeyboardEventOutput(event);
       if (customOutput) {
         event.preventDefault();
@@ -1647,6 +1674,22 @@ function cleanupEditableArtifacts(container: HTMLElement | null) {
       node.remove();
     }
   }
+}
+
+// PageUp/PageDown map to a full viewport of scrollback; every other key returns null
+// so the caller leaves it alone. Modified presses (ctrl/alt/meta) pass through to the
+// terminal, where apps bind them to their own actions.
+export function pageScrollLines(event: KeyboardEvent, rows: number): number | null {
+  if (event.ctrlKey || event.altKey || event.metaKey) {
+    return null;
+  }
+  if (event.key === "PageUp") {
+    return -rows;
+  }
+  if (event.key === "PageDown") {
+    return rows;
+  }
+  return null;
 }
 
 function customKeyboardEventOutput(event: KeyboardEvent) {

@@ -186,8 +186,8 @@ Settings are grouped by area:
 - Features: client feature toggles such as Notes.
 - Display: browser-wide navigation synchronization, agent features in Tabs, multi-host Space
   selection, top/bottom app padding, and mobile terminal controls size.
-- Terminal: font size, optional screen-reader text, browser-to-bridge transport, and input/output
-  batching delays.
+- Terminal: font size, optional screen-reader text, upload-conflict behavior, browser-to-bridge
+  transport, and input/output batching delays.
 - Mobile: touch-specific terminal behavior when running on a coarse pointer device.
 
 When viewing all of multiple hosts, use the Spaces list `…` menu to group spaces by host or keep a
@@ -208,6 +208,10 @@ Terminal screen-reader text is off by default. Enable it under Settings → Term
 visible terminal viewport as bounded plain text for assistive technology. The mirror follows output,
 scrolling, resizing, and alternate-screen changes, and replaces concealed terminal cells with
 spaces. Disable it when screen-reader access is not needed to avoid the additional snapshot work.
+
+Automatic upload conflict renaming is on by default. If `image.png` already exists, another upload
+is saved as `image-1.png` without a replacement prompt. Turn it off under Settings → Terminal →
+Uploads to keep the existing Replace or Cancel prompt instead.
 
 ## Launcher Presets
 

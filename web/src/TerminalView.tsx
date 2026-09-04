@@ -59,6 +59,11 @@ import type {
   MobileTouchSelectionEndpointTimeoutMs,
 } from "./mobileTerminalPrefs";
 import type { PaneInfo } from "./types";
+import {
+  UploadConflictError,
+  uploadWithOverwritePrompt,
+} from "./terminalUploads";
+import type { UploadCandidate, UploadedFile } from "./terminalUploads";
 
 type Props = {
   pane: PaneInfo | null;
@@ -100,22 +105,14 @@ type Props = {
   focusToken?: number;
   /** Whether to maintain a hidden plain-text mirror of the visible terminal viewport. */
   terminalScreenReaderText?: boolean;
+  /** Whether upload filename conflicts are resolved with a numeric suffix. */
+  autoRenameUploadConflicts?: boolean;
   /** Pane-specific accessible name for the terminal and its screen mirror. */
   accessibilityLabel?: string;
   /** Whether this is the currently selected terminal in a split. */
   selected?: boolean;
 };
 
-type UploadCandidate = {
-  blob: Blob;
-  name: string | null;
-};
-type UploadedFile = {
-  name: string;
-  path: string;
-  size: number;
-  mime?: string | null;
-};
 type UploadConflictState = {
   name: string;
   path: string;
@@ -167,6 +164,7 @@ export function TerminalView({
   refitToken = 0,
   focusToken = 0,
   terminalScreenReaderText = false,
+  autoRenameUploadConflicts = true,
   accessibilityLabel = "Terminal",
   selected = false,
 }: Props) {
@@ -1267,7 +1265,14 @@ export function TerminalView({
     try {
       const uploaded: UploadedFile[] = [];
       for (const file of uploadFiles) {
-        uploaded.push(await uploadWithOverwritePrompt(httpUrl, file, confirmUploadReplace));
+        uploaded.push(
+          await uploadWithOverwritePrompt(
+            httpUrl,
+            file,
+            autoRenameUploadConflicts,
+            confirmUploadReplace,
+          ),
+        );
       }
       if (
         connectionKeyRef.current !== uploadConnectionKey ||
@@ -1898,71 +1903,8 @@ function uploadCandidatesFromClipboard(data: DataTransfer): UploadCandidate[] {
   return files;
 }
 
-async function uploadWithOverwritePrompt(
-  httpUrl: (path: string, query?: URLSearchParams) => string,
-  file: UploadCandidate,
-  confirmReplace: (error: UploadConflictError) => Promise<boolean>,
-): Promise<UploadedFile> {
-  try {
-    return await uploadFile(httpUrl, file, false);
-  } catch (error) {
-    if (!(error instanceof UploadConflictError)) {
-      throw error;
-    }
-    const replace = await confirmReplace(error);
-    if (!replace) {
-      throw new Error("Upload canceled");
-    }
-    return uploadFile(httpUrl, file, true);
-  }
-}
-
 function uploadConflictMessage(conflict: UploadConflictState) {
   return conflict.path
     ? `${conflict.name} already exists at ${conflict.path}.`
     : `${conflict.name} already exists.`;
-}
-
-async function uploadFile(
-  httpUrl: (path: string, query?: URLSearchParams) => string,
-  file: UploadCandidate,
-  overwrite: boolean,
-): Promise<UploadedFile> {
-  const params = new URLSearchParams();
-  if (file.name) {
-    params.set("name", file.name);
-  }
-  if (overwrite) {
-    params.set("overwrite", "true");
-  }
-  const response = await fetch(httpUrl("/api/uploads", params), {
-    method: "POST",
-    headers: file.blob.type ? { "content-type": file.blob.type } : undefined,
-    body: file.blob,
-  });
-  const payload = (await response.json().catch(() => ({}))) as {
-    file?: UploadedFile;
-    error?: string;
-    name?: string;
-    path?: string;
-  };
-  if (response.status === 409) {
-    throw new UploadConflictError(
-      typeof payload.name === "string" ? payload.name : file.name || "file",
-      typeof payload.path === "string" ? payload.path : "",
-    );
-  }
-  if (!response.ok || !payload.file) {
-    throw new Error(payload.error || `Upload failed (${response.status})`);
-  }
-  return payload.file;
-}
-
-class UploadConflictError extends Error {
-  constructor(
-    readonly name: string,
-    readonly path: string,
-  ) {
-    super(`file exists: ${path || name}`);
-  }
 }

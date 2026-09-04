@@ -74,6 +74,8 @@ type Props = {
   onTerminalFontSizePx: (value: number) => void;
   terminalScreenReaderText: boolean;
   onTerminalScreenReaderText: (enabled: boolean) => void;
+  autoRenameUploadConflicts: boolean;
+  onAutoRenameUploadConflicts: (enabled: boolean) => void;
   terminalInputTransport: TerminalInputTransport;
   onTerminalInputTransport: (transport: TerminalInputTransport) => void;
   terminalInputBatchDelayMs: number;
@@ -130,6 +132,8 @@ export function BackendSettingsDialog({
   onTerminalFontSizePx,
   terminalScreenReaderText,
   onTerminalScreenReaderText,
+  autoRenameUploadConflicts,
+  onAutoRenameUploadConflicts,
   terminalInputTransport,
   onTerminalInputTransport,
   terminalInputBatchDelayMs,
@@ -720,6 +724,34 @@ export function BackendSettingsDialog({
                       data-on={terminalScreenReaderText}
                       aria-pressed={terminalScreenReaderText}
                       onClick={() => onTerminalScreenReaderText(true)}
+                    >
+                      On
+                    </button>
+                  </div>
+                </div>
+                <div className="settings-label">Uploads</div>
+                <div className="settings-row">
+                  <span title="Add a numeric suffix when an uploaded filename already exists instead of asking whether to replace it">
+                    Automatically rename conflicts
+                  </span>
+                  <div
+                    className="segmented-control"
+                    role="group"
+                    aria-label="Automatically rename conflicting uploads"
+                  >
+                    <button
+                      type="button"
+                      data-on={!autoRenameUploadConflicts}
+                      aria-pressed={!autoRenameUploadConflicts}
+                      onClick={() => onAutoRenameUploadConflicts(false)}
+                    >
+                      Off
+                    </button>
+                    <button
+                      type="button"
+                      data-on={autoRenameUploadConflicts}
+                      aria-pressed={autoRenameUploadConflicts}
+                      onClick={() => onAutoRenameUploadConflicts(true)}
                     >
                       On
                     </button>

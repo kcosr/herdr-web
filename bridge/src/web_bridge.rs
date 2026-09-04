@@ -707,6 +707,7 @@ enum BridgeError {
 enum UploadError {
     BadRequest(String),
     Conflict { name: String, path: String },
+    NameExhausted(String),
     Forbidden(String),
     TooLarge,
     Io(io::Error),
@@ -786,6 +787,15 @@ impl IntoResponse for UploadError {
                     "error": "file exists",
                     "name": name,
                     "path": path,
+                }),
+            ),
+            Self::NameExhausted(name) => (
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "error": format!(
+                        "no available filename for {name} after {MAX_UPLOAD_NAME_ATTEMPTS} attempts"
+                    ),
+                    "name": name,
                 }),
             ),
             Self::Forbidden(message) => (
@@ -1338,14 +1348,58 @@ fn upload_name_candidate(name: &str, attempt: u32) -> String {
     }
 }
 
-/// Preserve the uploader's original filename while never clobbering an earlier
-/// upload: return `name` when it is free, otherwise the first `name-N.ext`
-/// variant `is_taken` reports as free. Returns `None` when every candidate is
-/// taken.
-fn unique_upload_file_name(name: &str, mut is_taken: impl FnMut(&str) -> bool) -> Option<String> {
-    (0..MAX_UPLOAD_NAME_ATTEMPTS)
-        .map(|attempt| upload_name_candidate(name, attempt))
-        .find(|candidate| !is_taken(candidate))
+/// Atomically reserve and write a new upload. When rename conflicts is enabled,
+/// an occupied candidate advances to the next suffix without a separate
+/// filesystem scan, so concurrent uploads cannot select the same free name.
+async fn create_new_upload(
+    upload_dir: &Path,
+    requested_name: &str,
+    body: &[u8],
+    rename_conflicts: bool,
+) -> Result<(String, PathBuf), UploadError> {
+    let attempts = if rename_conflicts {
+        MAX_UPLOAD_NAME_ATTEMPTS
+    } else {
+        1
+    };
+    for attempt in 0..attempts {
+        let name = upload_name_candidate(requested_name, attempt);
+        let destination = upload_dir.join(&name);
+        if !is_direct_child(upload_dir, &destination) {
+            return Err(UploadError::BadRequest("invalid file name".to_string()));
+        }
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+            .await
+        {
+            Ok(mut file) => {
+                use tokio::io::AsyncWriteExt;
+
+                if let Err(err) = async {
+                    file.write_all(body).await?;
+                    file.flush().await
+                }
+                .await
+                {
+                    drop(file);
+                    let _ = tokio::fs::remove_file(&destination).await;
+                    return Err(UploadError::Io(err));
+                }
+                return Ok((name, destination));
+            }
+            Err(err) if err.kind() == ErrorKind::AlreadyExists && rename_conflicts => continue,
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                return Err(UploadError::Conflict {
+                    name,
+                    path: destination.display().to_string(),
+                });
+            }
+            Err(err) => return Err(UploadError::Io(err)),
+        }
+    }
+    Err(UploadError::NameExhausted(requested_name.to_string()))
 }
 
 fn generated_upload_name(mime: Option<&str>) -> String {
@@ -1802,6 +1856,8 @@ struct UploadQuery {
     name: Option<String>,
     #[serde(default)]
     overwrite: bool,
+    #[serde(default)]
+    rename_conflicts: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -2797,80 +2853,35 @@ async fn upload_handler(
         bytes = body.len(),
         mime = ?mime,
         overwrite = query.overwrite,
+        rename_conflicts = query.rename_conflicts,
         "herdr-web-bridge upload request"
     );
     let requested_name = match query.name.as_deref().and_then(sanitize_upload_file_name) {
         Some(name) => name,
         None => generated_upload_name(mime.as_deref()),
     };
-    // Keep the uploader's original filename. When it is already taken, save
-    // alongside the earlier file under a de-duplicated name
-    // (`notes.txt` -> `notes-1.txt`) rather than reporting a conflict;
-    // `overwrite=true` stays the only way to replace an existing upload.
-    let name = if query.overwrite {
-        requested_name
-    } else {
-        let upload_dir = &state.upload_dir;
-        let unique = unique_upload_file_name(&requested_name, |candidate| {
-            upload_dir.join(candidate).symlink_metadata().is_ok()
-        });
-        match unique {
-            Some(name) => name,
-            None => {
-                return Err(UploadError::Conflict {
-                    path: upload_dir.join(&requested_name).display().to_string(),
-                    name: requested_name,
-                })
-            }
-        }
-    };
-    let destination = state.upload_dir.join(&name);
-    if !is_direct_child(&state.upload_dir, &destination) {
-        return Err(UploadError::BadRequest("invalid file name".to_string()));
-    }
-
     tokio::fs::create_dir_all(&state.upload_dir).await?;
-    let existing = tokio::fs::symlink_metadata(&destination).await.ok();
-    if let Some(existing) = existing {
-        // Only reachable when another upload claimed the de-duplicated name
-        // between selection and this check; the client can retry.
-        if !query.overwrite {
-            info!(
-                name = %name,
-                "herdr-web-bridge upload conflict"
-            );
-            return Err(UploadError::Conflict {
-                name,
-                path: destination.display().to_string(),
-            });
-        }
-        if existing.file_type().is_symlink() || existing.is_dir() {
-            return Err(UploadError::BadRequest(
-                "refusing to overwrite non-file path".to_string(),
-            ));
-        }
-    }
-
-    if !query.overwrite {
-        match tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&destination)
-            .await
-        {
-            Ok(mut file) => {
-                tokio::io::AsyncWriteExt::write_all(&mut file, &body).await?;
-                tokio::io::AsyncWriteExt::flush(&mut file).await?;
-            }
-            Err(err) if err.kind() == ErrorKind::AlreadyExists => {
-                return Err(UploadError::Conflict {
-                    name,
-                    path: destination.display().to_string(),
-                });
-            }
-            Err(err) => return Err(UploadError::Io(err)),
-        }
+    let (name, destination) = if !query.overwrite {
+        create_new_upload(
+            &state.upload_dir,
+            &requested_name,
+            &body,
+            query.rename_conflicts,
+        )
+        .await?
     } else {
+        let name = requested_name;
+        let destination = state.upload_dir.join(&name);
+        if !is_direct_child(&state.upload_dir, &destination) {
+            return Err(UploadError::BadRequest("invalid file name".to_string()));
+        }
+        if let Some(existing) = tokio::fs::symlink_metadata(&destination).await.ok() {
+            if existing.file_type().is_symlink() || existing.is_dir() {
+                return Err(UploadError::BadRequest(
+                    "refusing to overwrite non-file path".to_string(),
+                ));
+            }
+        }
         let temp_path = state.upload_dir.join(format!(
             ".herdr-web-upload-{}-{}.tmp",
             std::process::id(),
@@ -2887,7 +2898,8 @@ async fn upload_handler(
                 return Err(UploadError::Io(err));
             }
         }
-    }
+        (name, destination)
+    };
 
     let response = UploadResponse {
         file: UploadEntry {
@@ -6695,57 +6707,17 @@ mod tests {
     }
 
     #[test]
-    fn unique_upload_file_name_keeps_original_when_free() {
+    fn upload_name_candidates_preserve_extensions() {
         assert_eq!(
-            unique_upload_file_name("screen shot.png", |_| false).as_deref(),
-            Some("screen shot.png")
+            upload_name_candidate("screen shot.png", 0),
+            "screen shot.png"
         );
-    }
-
-    #[test]
-    fn unique_upload_file_name_suffixes_taken_names() {
-        let taken: HashSet<&str> = ["image.png", "image-1.png"].into_iter().collect();
+        assert_eq!(upload_name_candidate("image.png", 2), "image-2.png");
+        assert_eq!(upload_name_candidate("notes", 1), "notes-1");
         assert_eq!(
-            unique_upload_file_name("image.png", |candidate| taken.contains(candidate)).as_deref(),
-            Some("image-2.png")
+            upload_name_candidate("archive.tar.gz", 1),
+            "archive.tar-1.gz"
         );
-    }
-
-    #[test]
-    fn unique_upload_file_name_suffixes_names_without_extension() {
-        let taken: HashSet<&str> = ["notes"].into_iter().collect();
-        assert_eq!(
-            unique_upload_file_name("notes", |candidate| taken.contains(candidate)).as_deref(),
-            Some("notes-1")
-        );
-    }
-
-    #[test]
-    fn unique_upload_file_name_suffixes_before_the_last_extension() {
-        let taken: HashSet<&str> = ["archive.tar.gz"].into_iter().collect();
-        assert_eq!(
-            unique_upload_file_name("archive.tar.gz", |candidate| taken.contains(candidate))
-                .as_deref(),
-            Some("archive.tar-1.gz")
-        );
-    }
-
-    #[test]
-    fn unique_upload_file_name_gives_up_when_every_candidate_is_taken() {
-        assert_eq!(unique_upload_file_name("image.png", |_| true), None);
-    }
-
-    #[test]
-    fn unique_upload_file_name_repeats_produce_distinct_names() {
-        let mut taken: HashSet<String> = HashSet::new();
-        let mut names = Vec::new();
-        for _ in 0..3 {
-            let name = unique_upload_file_name("image.png", |candidate| taken.contains(candidate))
-                .expect("name available");
-            taken.insert(name.clone());
-            names.push(name);
-        }
-        assert_eq!(names, vec!["image.png", "image-1.png", "image-2.png"]);
     }
 
     #[test]
@@ -6782,7 +6754,7 @@ mod tests {
     }
 
     #[test]
-    fn unique_upload_file_name_keeps_traversal_attempts_inside_upload_dir() {
+    fn upload_name_candidates_keep_sanitized_names_inside_upload_dir() {
         let upload_dir = PathBuf::from("/tmp/herdr-web/uploads");
         for hostile in [
             "../secret.txt",
@@ -6793,10 +6765,7 @@ mod tests {
         ] {
             let sanitized =
                 sanitize_upload_file_name(hostile).unwrap_or_else(|| panic!("{hostile} sanitized"));
-            // Force the de-duplication path too: the suffix must not reopen an escape.
-            let taken: HashSet<String> = [sanitized.clone()].into_iter().collect();
-            let unique = unique_upload_file_name(&sanitized, |candidate| taken.contains(candidate))
-                .expect("name available");
+            let unique = upload_name_candidate(&sanitized, 1);
             assert_ne!(
                 unique, sanitized,
                 "{hostile} should have been de-duplicated"
@@ -6810,27 +6779,89 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unique_upload_file_name_does_not_reuse_a_name_already_on_disk() {
-        let dir =
-            std::env::temp_dir().join(format!("herdr-web-upload-name-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        // The predicate the upload handler uses, against a real directory.
-        let taken = |candidate: &str| dir.join(candidate).symlink_metadata().is_ok();
+    #[tokio::test]
+    async fn create_new_upload_preserves_existing_files_and_renames_conflicts() {
+        let dir = upload_test_dir("rename");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
 
-        let first = unique_upload_file_name("image.png", taken).unwrap();
-        assert_eq!(first, "image.png");
-        std::fs::write(dir.join(&first), b"first").unwrap();
+        let (first, _) = create_new_upload(&dir, "image.png", b"first", true)
+            .await
+            .unwrap();
+        let (second, _) = create_new_upload(&dir, "image.png", b"second", true)
+            .await
+            .unwrap();
+        let (third, _) = create_new_upload(&dir, "image.png", b"third", true)
+            .await
+            .unwrap();
 
-        let second = unique_upload_file_name("image.png", taken).unwrap();
-        assert_eq!(second, "image-1.png");
-        std::fs::write(dir.join(&second), b"second").unwrap();
+        assert_eq!(
+            [first, second, third],
+            ["image.png", "image-1.png", "image-2.png"]
+        );
+        assert_eq!(
+            tokio::fs::read(dir.join("image.png")).await.unwrap(),
+            b"first"
+        );
+        assert_eq!(
+            tokio::fs::read(dir.join("image-1.png")).await.unwrap(),
+            b"second"
+        );
+        assert_eq!(
+            tokio::fs::read(dir.join("image-2.png")).await.unwrap(),
+            b"third"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
 
-        assert_eq!(std::fs::read(dir.join("image.png")).unwrap(), b"first");
-        assert_eq!(std::fs::read(dir.join("image-1.png")).unwrap(), b"second");
+    #[tokio::test]
+    async fn create_new_upload_returns_conflict_when_renaming_is_disabled() {
+        let dir = upload_test_dir("prompt");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("image.png"), b"first")
+            .await
+            .unwrap();
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let err = create_new_upload(&dir, "image.png", b"second", false)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            UploadError::Conflict { ref name, .. } if name == "image.png"
+        ));
+        assert_eq!(
+            tokio::fs::read(dir.join("image.png")).await.unwrap(),
+            b"first"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_uploads_atomically_reserve_distinct_names() {
+        let dir = upload_test_dir("concurrent");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let first = create_new_upload(&dir, "image.png", b"first", true);
+        let second = create_new_upload(&dir, "image.png", b"second", true);
+        let (first, second) = tokio::join!(first, second);
+        let mut names = [first.unwrap().0, second.unwrap().0];
+        names.sort();
+
+        assert_eq!(names, ["image-1.png", "image.png"]);
+        let mut contents = [
+            tokio::fs::read(dir.join("image.png")).await.unwrap(),
+            tokio::fs::read(dir.join("image-1.png")).await.unwrap(),
+        ];
+        contents.sort();
+        assert_eq!(contents, [b"first".to_vec(), b"second".to_vec()]);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    fn upload_test_dir(label: &str) -> PathBuf {
+        let suffix = UPLOAD_TEMP_COUNTER.fetch_add(1, Ordering::AcqRel);
+        std::env::temp_dir().join(format!(
+            "herdr-web-upload-{label}-{}-{suffix}",
+            std::process::id()
+        ))
     }
 
     #[test]

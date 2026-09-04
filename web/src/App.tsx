@@ -162,6 +162,10 @@ import {
   parseTerminalFontSizePx,
 } from "./terminalPrefs";
 import {
+  DEFAULT_AUTO_RENAME_UPLOAD_CONFLICTS,
+  parseAutoRenameUploadConflicts,
+} from "./uploadPrefs";
+import {
   aggregateStatus,
   basename,
   canClearTabName,
@@ -412,6 +416,7 @@ type DisplayPrefs = {
   sidebarOpen: boolean;
   terminalFontSizePx: number;
   terminalScreenReaderText: boolean;
+  autoRenameUploadConflicts: boolean;
   terminalInputTransport: TerminalInputTransport;
   terminalInputBatchDelayMs: number;
   terminalOutputCoalesceMs: number;
@@ -476,6 +481,7 @@ function readDisplayPrefs(): DisplayPrefs {
     sidebarOpen: true,
     terminalFontSizePx: DEFAULT_TERMINAL_FONT_SIZE_PX,
     terminalScreenReaderText: DEFAULT_TERMINAL_SCREEN_READER_TEXT,
+    autoRenameUploadConflicts: DEFAULT_AUTO_RENAME_UPLOAD_CONFLICTS,
     terminalInputTransport: DEFAULT_TERMINAL_INPUT_TRANSPORT,
     terminalInputBatchDelayMs: DEFAULT_TERMINAL_INPUT_BATCH_DELAY_MS,
     terminalOutputCoalesceMs: DEFAULT_TERMINAL_OUTPUT_COALESCE_MS,
@@ -674,6 +680,10 @@ function parseDisplayPrefsValue(
     terminalScreenReaderText: parseTerminalScreenReaderText(
       parsed.terminalScreenReaderText,
       fallback.terminalScreenReaderText,
+    ),
+    autoRenameUploadConflicts: parseAutoRenameUploadConflicts(
+      parsed.autoRenameUploadConflicts,
+      fallback.autoRenameUploadConflicts,
     ),
     terminalInputTransport: parseTerminalInputTransport(parsed.terminalInputTransport),
     terminalInputBatchDelayMs: parseTerminalInputBatchDelayMs(parsed.terminalInputBatchDelayMs),
@@ -1053,6 +1063,9 @@ export function App() {
   const [terminalScreenReaderText, setTerminalScreenReaderText] = useState(
     initialPrefs.terminalScreenReaderText,
   );
+  const [autoRenameUploadConflicts, setAutoRenameUploadConflicts] = useState(
+    initialPrefs.autoRenameUploadConflicts,
+  );
   const [terminalInputTransport, setTerminalInputTransport] = useState(
     initialPrefs.terminalInputTransport,
   );
@@ -1181,6 +1194,7 @@ export function App() {
       setActiveWorkspacesByBridgeId(sharedNavigationPrefs.activeWorkspacesByBridgeId);
       setTerminalFontSizePx(prefs.terminalFontSizePx);
       setTerminalScreenReaderText(prefs.terminalScreenReaderText);
+      setAutoRenameUploadConflicts(prefs.autoRenameUploadConflicts);
       setTerminalInputTransport(prefs.terminalInputTransport);
       setTerminalInputBatchDelayMs(prefs.terminalInputBatchDelayMs);
       setTerminalOutputCoalesceMs(prefs.terminalOutputCoalesceMs);
@@ -1724,6 +1738,7 @@ export function App() {
       sidebarOpen,
       terminalFontSizePx,
       terminalScreenReaderText,
+      autoRenameUploadConflicts,
       terminalInputTransport,
       terminalInputBatchDelayMs,
       terminalOutputCoalesceMs,
@@ -1760,6 +1775,7 @@ export function App() {
     sidebarOpen,
     terminalFontSizePx,
     terminalScreenReaderText,
+    autoRenameUploadConflicts,
     terminalInputTransport,
     terminalInputBatchDelayMs,
     terminalOutputCoalesceMs,
@@ -4065,6 +4081,7 @@ export function App() {
             touchInput={isTouchInput}
             terminalFontSizePx={terminalFontSizePx}
             terminalScreenReaderText={terminalScreenReaderText}
+            autoRenameUploadConflicts={autoRenameUploadConflicts}
             mobileControlsScalePercent={mobileControlsScalePercent}
             mobileTapTarget={mobileTerminalTapTarget}
             mobileLongPressBehavior={mobileLongPressBehavior}
@@ -4092,6 +4109,7 @@ export function App() {
             cursorBlink={!isTouchInput}
             terminalFontSizePx={terminalFontSizePx}
             terminalScreenReaderText={terminalScreenReaderText}
+            autoRenameUploadConflicts={autoRenameUploadConflicts}
             mobileControlsScalePercent={mobileControlsScalePercent}
             mobileTapTarget={mobileTerminalTapTarget}
             mobileLongPressBehavior={mobileLongPressBehavior}
@@ -4330,6 +4348,8 @@ export function App() {
           onTerminalFontSizePx={setTerminalFontSizePx}
           terminalScreenReaderText={terminalScreenReaderText}
           onTerminalScreenReaderText={setTerminalScreenReaderText}
+          autoRenameUploadConflicts={autoRenameUploadConflicts}
+          onAutoRenameUploadConflicts={setAutoRenameUploadConflicts}
           terminalInputTransport={terminalInputTransport}
           onTerminalInputTransport={setTerminalInputTransport}
           terminalInputBatchDelayMs={terminalInputBatchDelayMs}
@@ -5795,6 +5815,7 @@ function SplitGrid({
   touchInput,
   terminalFontSizePx,
   terminalScreenReaderText,
+  autoRenameUploadConflicts,
   mobileControlsScalePercent,
   mobileTapTarget,
   mobileLongPressBehavior,
@@ -5817,6 +5838,7 @@ function SplitGrid({
   touchInput: boolean;
   terminalFontSizePx: number;
   terminalScreenReaderText: boolean;
+  autoRenameUploadConflicts: boolean;
   mobileControlsScalePercent: number;
   mobileTapTarget: MobileTerminalTapTarget;
   mobileLongPressBehavior: MobileLongPressBehavior;
@@ -5856,6 +5878,7 @@ function SplitGrid({
               cursorBlink={!touchInput}
               terminalFontSizePx={terminalFontSizePx}
               terminalScreenReaderText={terminalScreenReaderText}
+              autoRenameUploadConflicts={autoRenameUploadConflicts}
               mobileControlsScalePercent={mobileControlsScalePercent}
               mobileTapTarget={mobileTapTarget}
               mobileLongPressBehavior={mobileLongPressBehavior}

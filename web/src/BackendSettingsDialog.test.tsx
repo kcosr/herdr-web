@@ -71,6 +71,31 @@ describe("BackendSettingsDialog terminal accessibility", () => {
     expect(off?.getAttribute("aria-pressed")).toBe("false");
     expect(on?.getAttribute("aria-pressed")).toBe("true");
   });
+
+  it("allows automatic conflict renaming to be disabled in the Terminal area", async () => {
+    const onChange = vi.fn();
+    const { container } = await render(<UploadSettingsHarness onChange={onChange} />);
+    const terminalTab = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ).find((button) => button.textContent?.includes("Terminal"));
+    if (!terminalTab) {
+      throw new Error("missing Terminal settings tab");
+    }
+
+    await act(async () => terminalTab.click());
+    const group = requiredElement<HTMLElement>(
+      container,
+      '[role="group"][aria-label="Automatically rename conflicting uploads"]',
+    );
+    const [off, on] = Array.from(group.querySelectorAll<HTMLButtonElement>("button"));
+    expect(off?.getAttribute("aria-pressed")).toBe("false");
+    expect(on?.getAttribute("aria-pressed")).toBe("true");
+
+    await act(async () => off?.click());
+    expect(onChange).toHaveBeenCalledWith(false);
+    expect(off?.getAttribute("aria-pressed")).toBe("true");
+    expect(on?.getAttribute("aria-pressed")).toBe("false");
+  });
 });
 
 function SettingsHarness({ onChange }: { onChange: (enabled: boolean) => void }) {
@@ -82,6 +107,20 @@ function SettingsHarness({ onChange }: { onChange: (enabled: boolean) => void })
       onTerminalScreenReaderText={(enabled) => {
         onChange(enabled);
         setTerminalScreenReaderText(enabled);
+      }}
+    />
+  );
+}
+
+function UploadSettingsHarness({ onChange }: { onChange: (enabled: boolean) => void }) {
+  const [autoRenameUploadConflicts, setAutoRenameUploadConflicts] = useState(true);
+  return (
+    <BackendSettingsDialog
+      {...settingsProps()}
+      autoRenameUploadConflicts={autoRenameUploadConflicts}
+      onAutoRenameUploadConflicts={(enabled) => {
+        onChange(enabled);
+        setAutoRenameUploadConflicts(enabled);
       }}
     />
   );
@@ -104,6 +143,8 @@ function settingsProps() {
     onTerminalFontSizePx: vi.fn(),
     terminalScreenReaderText: false,
     onTerminalScreenReaderText: vi.fn(),
+    autoRenameUploadConflicts: true,
+    onAutoRenameUploadConflicts: vi.fn(),
     terminalInputTransport: "json" as const,
     onTerminalInputTransport: vi.fn(),
     terminalInputBatchDelayMs: 0,

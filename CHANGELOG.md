@@ -13,9 +13,10 @@
 
 ### Changed
 
-- Uploads now keep their original filename and de-duplicate on a collision: re-uploading
-  `image.png` into a directory that already has one lands as `image-1.png` instead of failing
-  with a conflict. `?overwrite=true` remains the only way to replace an existing file.
+- Upload conflicts are now atomically de-duplicated by default: re-uploading `image.png` lands as
+  `image-1.png` instead of prompting to replace the original, including when uploads race. Turn off
+  automatic conflict renaming under Settings → Terminal → Uploads to keep the Replace or Cancel
+  prompt. Existing files are replaced only after explicit confirmation.
   [PR #77](https://github.com/kcosr/herdr-web/pull/77), contributed by
   [Trillium Smith (@trillium)](https://github.com/trillium).
 

@@ -1,8 +1,6 @@
 # Changelog
 
-## [Unreleased]
-
-### Breaking Changes
+## [0.5.1] - 2026-09-04
 
 ### Added
 
@@ -19,10 +17,6 @@
   prompt. Existing files are replaced only after explicit confirmation.
   [PR #77](https://github.com/kcosr/herdr-web/pull/77), contributed by
   [Trillium Smith (@trillium)](https://github.com/trillium).
-
-### Fixed
-
-### Removed
 
 ## [0.5.0] - 2026-08-21
 

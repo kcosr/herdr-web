@@ -1391,6 +1391,10 @@ async fn create_new_upload(
             }
             Err(err) if err.kind() == ErrorKind::AlreadyExists && rename_conflicts => continue,
             Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                info!(
+                    name = %name,
+                    "herdr-web-bridge upload conflict"
+                );
                 return Err(UploadError::Conflict {
                     name,
                     path: destination.display().to_string(),
@@ -2875,7 +2879,7 @@ async fn upload_handler(
         if !is_direct_child(&state.upload_dir, &destination) {
             return Err(UploadError::BadRequest("invalid file name".to_string()));
         }
-        if let Some(existing) = tokio::fs::symlink_metadata(&destination).await.ok() {
+        if let Ok(existing) = tokio::fs::symlink_metadata(&destination).await {
             if existing.file_type().is_symlink() || existing.is_dir() {
                 return Err(UploadError::BadRequest(
                     "refusing to overwrite non-file path".to_string(),

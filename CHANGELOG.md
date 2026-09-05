@@ -6,6 +6,10 @@
 
 ### Added
 
+- Added an opt-in desktop command composer under Settings → Terminal for editing multiline input
+  before sending it, without changing desktop terminal selection, scrolling, focus, or cursor
+  behavior.
+
 ### Changed
 
 ### Fixed

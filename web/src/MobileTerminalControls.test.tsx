@@ -5,7 +5,10 @@ import { act, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { MobileTerminalControls } from "./TerminalView";
+import {
+  isCommandComposerSubmitShortcut,
+  TerminalCommandControls,
+} from "./TerminalView";
 
 const roots: Root[] = [];
 
@@ -24,7 +27,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-describe("MobileTerminalControls", () => {
+describe("TerminalCommandControls", () => {
   for (const expandingInput of [false, true]) {
     it(`clears and remounts the ${
       expandingInput ? "textarea" : "input"
@@ -88,9 +91,79 @@ describe("MobileTerminalControls", () => {
 
     expect(onSubmitCommand).toHaveBeenCalledWith("");
   });
+
+  it("keeps multiline paste as one editable value until Send", async () => {
+    const { container, onSubmitCommand } = await renderControls(true, {
+      enterNewline: true,
+      mobileControls: false,
+    });
+    const field = commandField(container);
+
+    await setCommandValue(field, "first line\nsecond line");
+
+    expect(onSubmitCommand).not.toHaveBeenCalled();
+    expect(field.value).toBe("first line\nsecond line");
+    await submitForm(container);
+    expect(onSubmitCommand).toHaveBeenCalledWith("first line\nsecond line");
+  });
+
+  it("renders the composer without mobile terminal keys in desktop mode", async () => {
+    const { container } = await renderControls(true, { mobileControls: false });
+
+    expect(commandField(container)).toBeInstanceOf(HTMLTextAreaElement);
+    expect(container.querySelector<HTMLElement>(".term-key-strip")?.hidden).toBe(true);
+    expect(container.querySelector(".term-input-row")).not.toBeNull();
+  });
+
+  it("inserts Enter and submits Ctrl+Enter in a Linux desktop composer", async () => {
+    vi.spyOn(window.navigator, "platform", "get").mockReturnValue("Linux x86_64");
+    const { container, onSubmitCommand } = await renderControls(true, {
+      enterNewline: true,
+      mobileControls: false,
+    });
+    const field = commandField(container);
+    await setCommandValue(field, "two\nlines");
+
+    const enter = await keyDown(field, { key: "Enter" });
+    expect(enter.defaultPrevented).toBe(false);
+    expect(onSubmitCommand).not.toHaveBeenCalled();
+
+    const submit = await keyDown(field, { key: "Enter", ctrlKey: true });
+    expect(submit.defaultPrevented).toBe(true);
+    expect(onSubmitCommand).toHaveBeenCalledWith("two\nlines");
+  });
+
+  it("uses Cmd+Enter, not Ctrl+Enter, as the macOS submit shortcut", () => {
+    expect(
+      isCommandComposerSubmitShortcut(
+        { key: "Enter", altKey: false, ctrlKey: false, metaKey: true, shiftKey: false },
+        "MacIntel",
+      ),
+    ).toBe(true);
+    expect(
+      isCommandComposerSubmitShortcut(
+        { key: "Enter", altKey: false, ctrlKey: true, metaKey: false, shiftKey: false },
+        "MacIntel",
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps the existing mobile multiline modifier behavior", async () => {
+    const { container, onSubmitCommand } = await renderControls(true, {
+      enterNewline: true,
+      mobileControls: true,
+    });
+    const event = await keyDown(commandField(container), { key: "Enter", ctrlKey: true });
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(onSubmitCommand).not.toHaveBeenCalled();
+  });
 });
 
-async function renderControls(expandingInput: boolean) {
+async function renderControls(
+  expandingInput: boolean,
+  options: { enterNewline?: boolean; mobileControls?: boolean } = {},
+) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -101,12 +174,13 @@ async function renderControls(expandingInput: boolean) {
 
   await act(async () => {
     root.render(
-      <MobileTerminalControls
+      <TerminalCommandControls
         commandInputRef={commandInputRef}
         disabled={false}
         uploadDisabled={false}
         expandingInput={expandingInput}
-        enterNewline={false}
+        enterNewline={options.enterNewline ?? false}
+        mobileControls={options.mobileControls ?? true}
         controlsScalePercent={100}
         onControlsHeightChange={vi.fn()}
         onInput={vi.fn()}
@@ -124,6 +198,17 @@ async function renderControls(expandingInput: boolean) {
     onStageCommand,
     onSubmitCommand,
   };
+}
+
+async function keyDown(
+  field: HTMLInputElement | HTMLTextAreaElement,
+  init: KeyboardEventInit,
+) {
+  const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+  await act(async () => {
+    field.dispatchEvent(event);
+  });
+  return event;
 }
 
 function commandField(container: HTMLElement) {

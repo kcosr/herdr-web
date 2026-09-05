@@ -158,7 +158,11 @@ import {
   parseTerminalOutputCoalesceMs,
 } from "./terminalOutputCoalescing";
 import {
+  DEFAULT_DESKTOP_COMMAND_COMPOSER,
+  DEFAULT_DESKTOP_COMMAND_ENTER_NEWLINE,
   DEFAULT_TERMINAL_FONT_SIZE_PX,
+  parseDesktopCommandComposer,
+  parseDesktopCommandEnterNewline,
   parseTerminalFontSizePx,
 } from "./terminalPrefs";
 import {
@@ -415,6 +419,8 @@ type DisplayPrefs = {
   notesPanelOpen: boolean;
   sidebarOpen: boolean;
   terminalFontSizePx: number;
+  desktopCommandComposer: boolean;
+  desktopCommandEnterNewline: boolean;
   terminalScreenReaderText: boolean;
   autoRenameUploadConflicts: boolean;
   terminalInputTransport: TerminalInputTransport;
@@ -480,6 +486,8 @@ function readDisplayPrefs(): DisplayPrefs {
     notesPanelOpen: false,
     sidebarOpen: true,
     terminalFontSizePx: DEFAULT_TERMINAL_FONT_SIZE_PX,
+    desktopCommandComposer: DEFAULT_DESKTOP_COMMAND_COMPOSER,
+    desktopCommandEnterNewline: DEFAULT_DESKTOP_COMMAND_ENTER_NEWLINE,
     terminalScreenReaderText: DEFAULT_TERMINAL_SCREEN_READER_TEXT,
     autoRenameUploadConflicts: DEFAULT_AUTO_RENAME_UPLOAD_CONFLICTS,
     terminalInputTransport: DEFAULT_TERMINAL_INPUT_TRANSPORT,
@@ -677,6 +685,14 @@ function parseDisplayPrefsValue(
       typeof parsed.notesPanelOpen === "boolean" ? parsed.notesPanelOpen : fallback.notesPanelOpen,
     sidebarOpen,
     terminalFontSizePx: parseTerminalFontSizePx(parsed.terminalFontSizePx),
+    desktopCommandComposer: parseDesktopCommandComposer(
+      parsed.desktopCommandComposer,
+      fallback.desktopCommandComposer,
+    ),
+    desktopCommandEnterNewline: parseDesktopCommandEnterNewline(
+      parsed.desktopCommandEnterNewline,
+      fallback.desktopCommandEnterNewline,
+    ),
     terminalScreenReaderText: parseTerminalScreenReaderText(
       parsed.terminalScreenReaderText,
       fallback.terminalScreenReaderText,
@@ -1060,6 +1076,12 @@ export function App() {
   const [terminalFontSizePx, setTerminalFontSizePx] = useState(
     initialPrefs.terminalFontSizePx,
   );
+  const [desktopCommandComposer, setDesktopCommandComposer] = useState(
+    initialPrefs.desktopCommandComposer,
+  );
+  const [desktopCommandEnterNewline, setDesktopCommandEnterNewline] = useState(
+    initialPrefs.desktopCommandEnterNewline,
+  );
   const [terminalScreenReaderText, setTerminalScreenReaderText] = useState(
     initialPrefs.terminalScreenReaderText,
   );
@@ -1193,6 +1215,8 @@ export function App() {
       setSelectedPanesByBridgeId(sharedNavigationPrefs.selectedPanesByBridgeId);
       setActiveWorkspacesByBridgeId(sharedNavigationPrefs.activeWorkspacesByBridgeId);
       setTerminalFontSizePx(prefs.terminalFontSizePx);
+      setDesktopCommandComposer(prefs.desktopCommandComposer);
+      setDesktopCommandEnterNewline(prefs.desktopCommandEnterNewline);
       setTerminalScreenReaderText(prefs.terminalScreenReaderText);
       setAutoRenameUploadConflicts(prefs.autoRenameUploadConflicts);
       setTerminalInputTransport(prefs.terminalInputTransport);
@@ -1737,6 +1761,8 @@ export function App() {
       notesPanelOpen,
       sidebarOpen,
       terminalFontSizePx,
+      desktopCommandComposer,
+      desktopCommandEnterNewline,
       terminalScreenReaderText,
       autoRenameUploadConflicts,
       terminalInputTransport,
@@ -1774,6 +1800,8 @@ export function App() {
     notesPanelOpen,
     sidebarOpen,
     terminalFontSizePx,
+    desktopCommandComposer,
+    desktopCommandEnterNewline,
     terminalScreenReaderText,
     autoRenameUploadConflicts,
     terminalInputTransport,
@@ -4079,6 +4107,8 @@ export function App() {
             refitToken={refitToken}
             focusToken={terminalFocusToken}
             touchInput={isTouchInput}
+            desktopCommandComposer={desktopCommandComposer}
+            desktopCommandEnterNewline={desktopCommandEnterNewline}
             terminalFontSizePx={terminalFontSizePx}
             terminalScreenReaderText={terminalScreenReaderText}
             autoRenameUploadConflicts={autoRenameUploadConflicts}
@@ -4106,6 +4136,8 @@ export function App() {
             autoFocus={!isTouchInput}
             scrollSensitivity={isTouchInput ? 2 : 0.4}
             mobileControls={isTouchInput}
+            desktopCommandComposer={desktopCommandComposer}
+            desktopCommandEnterNewline={desktopCommandEnterNewline}
             cursorBlink={!isTouchInput}
             terminalFontSizePx={terminalFontSizePx}
             terminalScreenReaderText={terminalScreenReaderText}
@@ -4346,6 +4378,10 @@ export function App() {
           onMultiHostSpaceSelection={setMultiHostSpaceSelection}
           terminalFontSizePx={terminalFontSizePx}
           onTerminalFontSizePx={setTerminalFontSizePx}
+          desktopCommandComposer={desktopCommandComposer}
+          onDesktopCommandComposer={setDesktopCommandComposer}
+          desktopCommandEnterNewline={desktopCommandEnterNewline}
+          onDesktopCommandEnterNewline={setDesktopCommandEnterNewline}
           terminalScreenReaderText={terminalScreenReaderText}
           onTerminalScreenReaderText={setTerminalScreenReaderText}
           autoRenameUploadConflicts={autoRenameUploadConflicts}
@@ -5813,6 +5849,8 @@ function SplitGrid({
   refitToken,
   focusToken,
   touchInput,
+  desktopCommandComposer,
+  desktopCommandEnterNewline,
   terminalFontSizePx,
   terminalScreenReaderText,
   autoRenameUploadConflicts,
@@ -5836,6 +5874,8 @@ function SplitGrid({
   refitToken: number;
   focusToken: number;
   touchInput: boolean;
+  desktopCommandComposer: boolean;
+  desktopCommandEnterNewline: boolean;
   terminalFontSizePx: number;
   terminalScreenReaderText: boolean;
   autoRenameUploadConflicts: boolean;
@@ -5875,6 +5915,8 @@ function SplitGrid({
               autoFocus={selected && !touchInput}
               scrollSensitivity={touchInput ? 2 : 0.4}
               mobileControls={selected && touchInput}
+              desktopCommandComposer={selected && !touchInput && desktopCommandComposer}
+              desktopCommandEnterNewline={desktopCommandEnterNewline}
               cursorBlink={!touchInput}
               terminalFontSizePx={terminalFontSizePx}
               terminalScreenReaderText={terminalScreenReaderText}

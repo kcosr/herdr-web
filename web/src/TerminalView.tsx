@@ -77,6 +77,10 @@ type Props = {
   scrollSensitivity?: number;
   /** Supplemental browser-native input controls for narrow touch screens. */
   mobileControls?: boolean;
+  /** Whether to show the expanding command composer without enabling mobile terminal behavior. */
+  desktopCommandComposer?: boolean;
+  /** Whether Enter inserts a newline in the desktop command composer. */
+  desktopCommandEnterNewline?: boolean;
   /** Whether the terminal cursor blinks. Off on touch devices. */
   cursorBlink?: boolean;
   /** Terminal renderer font size in CSS pixels. */
@@ -150,6 +154,8 @@ export function TerminalView({
   autoFocus = true,
   scrollSensitivity = 1,
   mobileControls = false,
+  desktopCommandComposer = false,
+  desktopCommandEnterNewline = true,
   cursorBlink = true,
   terminalFontSizePx = DEFAULT_TERMINAL_FONT_SIZE_PX,
   mobileControlsScalePercent = 100,
@@ -241,13 +247,13 @@ export function TerminalView({
     return true;
   }, []);
 
-  const setMobileControlsHeight = useCallback((heightPx: number | null) => {
+  const setCommandControlsHeight = useCallback((heightPx: number | null) => {
     if (heightPx === null) {
-      stageRef.current?.style.removeProperty("--terminal-mobile-controls-height");
+      stageRef.current?.style.removeProperty("--terminal-command-controls-height");
       return;
     }
     stageRef.current?.style.setProperty(
-      "--terminal-mobile-controls-height",
+      "--terminal-command-controls-height",
       `${Math.ceil(heightPx)}px`,
     );
   }, []);
@@ -1347,6 +1353,8 @@ export function TerminalView({
     return true;
   };
 
+  const showCommandControls = mobileControls || desktopCommandComposer;
+
   return (
     <section
       ref={stageRef}
@@ -1405,15 +1413,16 @@ export function TerminalView({
           <Paperclip size={16} />
         </button>
       ) : null}
-      {mobileControls ? (
-        <MobileTerminalControls
+      {showCommandControls ? (
+        <TerminalCommandControls
           commandInputRef={mobileCommandInputRef}
           disabled={!pane || connectionState !== "attached"}
           uploadDisabled={uploadDisabled}
-          expandingInput={mobileCommandExpandingInput}
-          enterNewline={mobileCommandEnterNewline}
-          controlsScalePercent={mobileControlsScalePercent}
-          onControlsHeightChange={setMobileControlsHeight}
+          expandingInput={mobileControls ? mobileCommandExpandingInput : true}
+          enterNewline={mobileControls ? mobileCommandEnterNewline : desktopCommandEnterNewline}
+          mobileControls={mobileControls}
+          controlsScalePercent={mobileControls ? mobileControlsScalePercent : 100}
+          onControlsHeightChange={setCommandControlsHeight}
           onInput={sendTerminalInput}
           onTerminalFocus={() => rendererRef.current?.focusTextInput()}
           onUpload={openFilePicker}
@@ -1497,12 +1506,13 @@ function MobileSelectionActions({
   );
 }
 
-export function MobileTerminalControls({
+export function TerminalCommandControls({
   commandInputRef,
   disabled,
   uploadDisabled,
   expandingInput,
   enterNewline,
+  mobileControls,
   controlsScalePercent,
   onControlsHeightChange,
   onInput,
@@ -1516,6 +1526,7 @@ export function MobileTerminalControls({
   uploadDisabled: boolean;
   expandingInput: boolean;
   enterNewline: boolean;
+  mobileControls: boolean;
   controlsScalePercent: number;
   onControlsHeightChange: (heightPx: number | null) => void;
   onInput: (data: string) => void;
@@ -1602,14 +1613,17 @@ export function MobileTerminalControls({
     if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) {
       return;
     }
-    if (
-      event.key !== "Enter" ||
-      enterNewline ||
-      event.shiftKey ||
-      event.altKey ||
-      event.ctrlKey ||
-      event.metaKey
-    ) {
+    if (event.key !== "Enter") {
+      return;
+    }
+    if (!mobileControls && isCommandComposerSubmitShortcut(event)) {
+      event.preventDefault();
+      if (!disabled) {
+        submit();
+      }
+      return;
+    }
+    if (enterNewline || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) {
       return;
     }
     event.preventDefault();
@@ -1619,8 +1633,13 @@ export function MobileTerminalControls({
   };
 
   return (
-    <div ref={rootRef} className="terminal-mobile-controls" data-expanded={expanded ? "true" : "false"}>
-      <div className="term-key-strip" aria-label="Common terminal keys">
+    <div
+      ref={rootRef}
+      className="terminal-command-controls"
+      data-expanded={expanded ? "true" : "false"}
+      data-mobile-controls={mobileControls ? "true" : "false"}
+    >
+      <div className="term-key-strip" aria-label="Common terminal keys" hidden={!mobileControls}>
         <div className="term-key-group" aria-label="Terminal quick keys">
           <button
             className="term-key"
@@ -1702,7 +1721,7 @@ export function MobileTerminalControls({
         </div>
       </div>
 
-      {expanded ? (
+      {mobileControls && expanded ? (
         <div className="term-key-panel" aria-label="Special terminal keys">
           {SPECIAL_KEYS.map((key) => (
             <button
@@ -1783,6 +1802,23 @@ export function MobileTerminalControls({
       </form>
     </div>
   );
+}
+
+type CommandComposerShortcutEvent = Pick<
+  KeyboardEvent<HTMLTextAreaElement>,
+  "altKey" | "ctrlKey" | "key" | "metaKey" | "shiftKey"
+>;
+
+export function isCommandComposerSubmitShortcut(
+  event: CommandComposerShortcutEvent,
+  platform = typeof navigator === "undefined" ? "" : navigator.platform,
+) {
+  if (event.key !== "Enter" || event.altKey || event.shiftKey) {
+    return false;
+  }
+  return platform.startsWith("Mac")
+    ? event.metaKey && !event.ctrlKey
+    : event.ctrlKey && !event.metaKey;
 }
 
 type TerminalKey = {

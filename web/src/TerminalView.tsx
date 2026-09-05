@@ -1,3 +1,4 @@
+import { useCommandDraft } from "./commandDrafts";
 import {
   Copy,
   ExternalLink,
@@ -66,6 +67,7 @@ import {
 import type { UploadCandidate, UploadedFile } from "./terminalUploads";
 
 type Props = {
+  bridgeId: string;
   pane: PaneInfo | null;
   connectionKey: string;
   resumeToken: number;
@@ -146,6 +148,7 @@ const MAX_UPLOAD_FILES = 8;
 const DEBUG_TERMINAL_RECONNECT = false;
 
 export function TerminalView({
+  bridgeId,
   pane,
   connectionKey,
   resumeToken,
@@ -1413,8 +1416,11 @@ export function TerminalView({
           <Paperclip size={16} />
         </button>
       ) : null}
-      {showCommandControls ? (
+      {showCommandControls && pane ? (
         <TerminalCommandControls
+          key={JSON.stringify([bridgeId, pane.pane_id])}
+          bridgeId={bridgeId}
+          paneId={pane.pane_id}
           commandInputRef={mobileCommandInputRef}
           disabled={!pane || connectionState !== "attached"}
           uploadDisabled={uploadDisabled}
@@ -1507,6 +1513,8 @@ function MobileSelectionActions({
 }
 
 export function TerminalCommandControls({
+  bridgeId,
+  paneId,
   commandInputRef,
   disabled,
   uploadDisabled,
@@ -1521,6 +1529,8 @@ export function TerminalCommandControls({
   onStageCommand,
   onSubmitCommand,
 }: {
+  bridgeId: string;
+  paneId: string;
   commandInputRef: RefObject<HTMLInputElement | HTMLTextAreaElement | null>;
   disabled: boolean;
   uploadDisabled: boolean;
@@ -1536,7 +1546,7 @@ export function TerminalCommandControls({
   onSubmitCommand: (command: string) => void;
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const [value, setValue] = useState("");
+  const [value, setValue] = useCommandDraft(bridgeId, paneId);
   const [fieldKey, setFieldKey] = useState(0);
   const [expanded, setExpanded] = useState(false);
   const [ctrlLatch, setCtrlLatch] = useState(false);

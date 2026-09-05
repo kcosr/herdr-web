@@ -197,6 +197,13 @@ Multi-host Space selection is enabled by default, retaining one active Space per
 Space-scoped views. Turn it off under Settings → Display to keep only the selected host's Space,
 Agents, Tabs, and Notes in those views. All scope continues to show content from every host.
 
+Desktop users can enable Command composer under Settings → Terminal to edit multiline prompts
+before staging or sending them. Enter inserts a newline by default; Ctrl+Enter on Windows/Linux or
+Cmd+Enter on macOS sends the prompt. Desktop and mobile command drafts stay separate per bridge and
+pane while switching panes, tabs, or hosts, hiding the composer, or reconnecting. Sending or staging
+clears that pane's draft, and a successful snapshot removes drafts for closed panes. Drafts live only
+in the current browser tab's memory: reloading the page clears them, and other clients do not share them.
+
 Terminal input payloads can be sent as JSON or binary WebSocket frames. JSON remains the default;
 binary is available for comparing terminal input performance. Terminal input batching is off by
 default. When enabled, short input chunks are coalesced for `32`, `64`, `128`, or `256` ms and are

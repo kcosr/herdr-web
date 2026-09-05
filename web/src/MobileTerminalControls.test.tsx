@@ -1,3 +1,4 @@
+import { CommandDraftContext, createCommandDraftStore } from "./commandDrafts";
 /**
  * @vitest-environment jsdom
  */
@@ -158,6 +159,62 @@ describe("TerminalCommandControls", () => {
     expect(event.defaultPrevented).toBe(false);
     expect(onSubmitCommand).not.toHaveBeenCalled();
   });
+  for (const mobileControls of [false, true]) {
+    it(`retains separate ${mobileControls ? "mobile" : "desktop"} drafts through pane switches, hiding and disconnects`, async () => {
+      const { container, renderPane } = await renderControls(true, { mobileControls });
+      await setCommandValue(commandField(container), "first pane\nunsent prompt");
+      await renderPane("bridge-a", "pane-b");
+      expect(commandField(container).value).toBe("");
+      await setCommandValue(commandField(container), "second pane");
+      await renderPane("bridge-b", "pane-a");
+      expect(commandField(container).value).toBe("");
+      await setCommandValue(commandField(container), "other host");
+      await renderPane("bridge-a", "pane-a", false);
+      await renderPane("bridge-a", "pane-a", true, true);
+      expect(commandField(container).value).toBe("first pane\nunsent prompt");
+      await renderPane();
+      expect(commandField(container).value).toBe("first pane\nunsent prompt");
+      await renderPane("bridge-a", "pane-b");
+      expect(commandField(container).value).toBe("second pane");
+      await renderPane("bridge-b", "pane-a");
+      expect(commandField(container).value).toBe("other host");
+    });
+  }
+
+  for (const action of ["send", "stage"] as const) {
+    it(`clears only the submitted pane's retained draft after ${action}`, async () => {
+      const { container, renderPane } = await renderControls(true, { mobileControls: false });
+      await setCommandValue(commandField(container), "first draft");
+      await renderPane("bridge-a", "pane-b");
+      await setCommandValue(commandField(container), "second draft");
+      if (action === "send") await submitForm(container);
+      else await clickStage(container);
+      await renderPane();
+      expect(commandField(container).value).toBe("first draft");
+      await renderPane("bridge-a", "pane-b");
+      expect(commandField(container).value).toBe("");
+      await setCommandValue(commandField(container), "new draft after submit");
+      expect(commandField(container).value).toBe("new draft after submit");
+    });
+  }
+
+  it("removes closed-pane drafts after a confirmed snapshot, preserving other panes and bridges", async () => {
+    const { container, drafts, renderPane } = await renderControls(true);
+    await setCommandValue(commandField(container), "closed pane");
+    await renderPane("bridge-a", "pane-b");
+    await setCommandValue(commandField(container), "live pane");
+    await renderPane("bridge-b", "pane-a");
+    await setCommandValue(commandField(container), "other bridge");
+    await act(async () => drafts.retainPanes("bridge-a", ["pane-b"]));
+    expect(commandField(container).value).toBe("other bridge");
+    await renderPane();
+    expect(commandField(container).value).toBe("");
+    await renderPane("bridge-a", "pane-b");
+    expect(commandField(container).value).toBe("live pane");
+    await act(async () => drafts.retainPanes("bridge-a", []));
+    expect(commandField(container).value).toBe("");
+  });
+
 });
 
 async function renderControls(
@@ -172,27 +229,38 @@ async function renderControls(
   const onSubmitCommand = vi.fn();
   const onStageCommand = vi.fn();
 
-  await act(async () => {
-    root.render(
-      <TerminalCommandControls
-        commandInputRef={commandInputRef}
-        disabled={false}
-        uploadDisabled={false}
-        expandingInput={expandingInput}
-        enterNewline={options.enterNewline ?? false}
-        mobileControls={options.mobileControls ?? true}
-        controlsScalePercent={100}
-        onControlsHeightChange={vi.fn()}
-        onInput={vi.fn()}
-        onTerminalFocus={vi.fn()}
-        onUpload={vi.fn()}
-        onStageCommand={onStageCommand}
-        onSubmitCommand={onSubmitCommand}
-      />,
-    );
-  });
+  const drafts = createCommandDraftStore();
+  const renderPane = async (bridgeId = "bridge-a", paneId = "pane-a", visible = true, disabled = false) => {
+    await act(async () => {
+      root.render(
+        <CommandDraftContext.Provider value={drafts}>
+          {visible ? <TerminalCommandControls
+            key={JSON.stringify([bridgeId, paneId])}
+            bridgeId={bridgeId}
+            paneId={paneId}
+            commandInputRef={commandInputRef}
+            disabled={disabled}
+            uploadDisabled={false}
+            expandingInput={expandingInput}
+            enterNewline={options.enterNewline ?? false}
+            mobileControls={options.mobileControls ?? true}
+            controlsScalePercent={100}
+            onControlsHeightChange={vi.fn()}
+            onInput={vi.fn()}
+            onTerminalFocus={vi.fn()}
+            onUpload={vi.fn()}
+            onStageCommand={onStageCommand}
+            onSubmitCommand={onSubmitCommand}
+          /> : null}
+        </CommandDraftContext.Provider>,
+      );
+    });
+  };
+  await renderPane();
 
   return {
+    drafts,
+    renderPane,
     commandInputRef,
     container,
     onStageCommand,

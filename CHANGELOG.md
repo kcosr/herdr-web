@@ -8,11 +8,16 @@
 
 - Added an opt-in desktop command composer under Settings → Terminal for editing multiline input
   before sending it, without changing desktop terminal selection, scrolling, focus, or cursor
-  behavior.
+  behavior. [PR #82](https://github.com/kcosr/herdr-web/pull/82), contributed by
+  [Andreas Ahrens (@AndreasAhrens)](https://github.com/AndreasAhrens).
 
 ### Changed
 
 ### Fixed
+
+- Keep unsent desktop and mobile command drafts per bridge and pane while navigating, until
+  sent, staged, or the pane is confirmed closed. Drafts remain in memory for the current browser
+  tab only. [PR #82](https://github.com/kcosr/herdr-web/pull/82).
 
 ### Removed
 

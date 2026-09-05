@@ -1,3 +1,4 @@
+import { useTerminalFocusRequest } from "./useTerminalFocusRequest";
 import { useCommandDraft } from "./commandDrafts";
 import {
   Copy,
@@ -471,20 +472,11 @@ export function TerminalView({
     rendererRef.current?.setScrollSensitivity(scrollSensitivity);
   }, [scrollSensitivity]);
 
-  useEffect(() => {
-    if (focusToken === 0) {
-      return;
-    }
-    const focus = () => focusPreferredInput();
-    const frame = window.requestAnimationFrame(focus);
-    const timers = [80, 220].map((delay) => window.setTimeout(focus, delay));
-    return () => {
-      window.cancelAnimationFrame(frame);
-      for (const timer of timers) {
-        window.clearTimeout(timer);
-      }
-    };
-  }, [focusPreferredInput, focusToken]);
+  useTerminalFocusRequest(
+    focusToken,
+    focusPreferredInput,
+    mobileControls || !desktopCommandComposer,
+  );
 
   useEffect(() => {
     const host = hostRef.current;
@@ -1101,7 +1093,8 @@ export function TerminalView({
   // Selection changes alone must not override a direct click into a split terminal.
   useEffect(() => {
     if (connectionState === "attached" && autoFocusRef.current &&
-        desktopCommandComposerRef.current && !mobileControlsRef.current) {
+        desktopCommandComposerRef.current && !mobileControlsRef.current &&
+        !hostRef.current?.contains(document.activeElement)) {
       focusCommandInput();
     }
   }, [connectionState, focusCommandInput]);
@@ -1592,6 +1585,9 @@ export function TerminalCommandControls({
     const command = value;
     clearCommandInput();
     onStageCommand(command);
+    if (!mobileControls) {
+      onTerminalFocus();
+    }
   };
   const sendKey = (key: TerminalKey) => {
     onInput(ctrlLatch && key.ctrlData ? key.ctrlData : key.data);

@@ -17,7 +17,9 @@
 
 - Focus the enabled desktop command composer on terminal attach and navigation focus requests,
   after closing Settings, and after Send, including Ctrl+Enter and Cmd+Enter. Direct terminal
-  clicks and mobile keyboard behavior remain available. [PR #82](https://github.com/kcosr/herdr-web/pull/82).
+  clicks retain focus through reconnects and immediately after a default focus request. Desktop
+  Stage focuses the terminal to edit or run the staged input; mobile keyboard behavior
+  remains unchanged. [PR #82](https://github.com/kcosr/herdr-web/pull/82).
 
 - Keep unsent desktop and mobile command drafts per bridge and pane while navigating, until
   sent, staged, or the pane is confirmed closed. Drafts remain in memory for the current browser

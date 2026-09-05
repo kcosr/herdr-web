@@ -85,6 +85,28 @@ describe("TerminalCommandControls", () => {
     expect(onStageCommand).toHaveBeenCalledOnce();
   });
 
+  for (const mobileControls of [false, true]) {
+    it(`focuses the terminal after Stage only on desktop (mobile=${mobileControls})`, async () => {
+      const { container, onStageCommand, onTerminalFocus } = await renderControls(true, { mobileControls });
+      const terminal = document.createElement("input");
+      container.append(terminal);
+      onTerminalFocus.mockImplementation(() => terminal.focus());
+      const field = commandField(container);
+      await setCommandValue(field, "staged prompt");
+      field.focus();
+      await clickStage(container);
+      expect(onStageCommand).toHaveBeenCalledExactlyOnceWith("staged prompt");
+      expect(commandField(container).value).toBe("");
+      if (mobileControls) {
+        expect(onTerminalFocus).not.toHaveBeenCalled();
+        expect(document.activeElement).not.toBe(terminal);
+      } else {
+        expect(onTerminalFocus).toHaveBeenCalledOnce();
+        expect(document.activeElement).toBe(terminal);
+      }
+    });
+  }
+
   it("continues submitting an empty command as Enter", async () => {
     const { container, onSubmitCommand } = await renderControls(false);
 
@@ -261,6 +283,7 @@ async function renderControls(
   const commandInputRef = createRef<HTMLInputElement | HTMLTextAreaElement>();
   const onSubmitCommand = vi.fn();
   const onStageCommand = vi.fn();
+  const onTerminalFocus = vi.fn();
 
   const drafts = createCommandDraftStore();
   const renderPane = async (bridgeId = "bridge-a", paneId = "pane-a", visible = true, disabled = false) => {
@@ -280,7 +303,7 @@ async function renderControls(
             controlsScalePercent={100}
             onControlsHeightChange={vi.fn()}
             onInput={vi.fn()}
-            onTerminalFocus={vi.fn()}
+            onTerminalFocus={onTerminalFocus}
             onUpload={vi.fn()}
             onStageCommand={onStageCommand}
             onSubmitCommand={onSubmitCommand}
@@ -298,6 +321,7 @@ async function renderControls(
     container,
     onStageCommand,
     onSubmitCommand,
+    onTerminalFocus,
   };
 }
 

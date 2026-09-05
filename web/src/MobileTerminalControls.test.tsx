@@ -134,6 +134,39 @@ describe("TerminalCommandControls", () => {
     expect(onSubmitCommand).toHaveBeenCalledWith("two\nlines");
   });
 
+  for (const method of ["button", "ctrl-enter", "cmd-enter"] as const) {
+    it(`returns focus to the desktop composer after ${method} submission`, async () => {
+      vi.spyOn(window.navigator, "platform", "get").mockReturnValue(
+        method === "cmd-enter" ? "MacIntel" : "Linux x86_64",
+      );
+      const { container, onSubmitCommand } = await renderControls(true, {
+        enterNewline: true,
+        mobileControls: false,
+      });
+      const field = commandField(container);
+      await setCommandValue(field, "first prompt");
+      field.focus();
+      if (method === "button") {
+        const send = container.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+        send.focus();
+        await act(async () => send.click());
+      } else {
+        await keyDown(field, {
+          key: "Enter",
+          ctrlKey: method === "ctrl-enter",
+          metaKey: method === "cmd-enter",
+        });
+      }
+      const nextField = commandField(container);
+      expect(onSubmitCommand).toHaveBeenCalledExactlyOnceWith("first prompt");
+      expect(nextField).not.toBe(field);
+      expect(nextField.value).toBe("");
+      expect(document.activeElement).toBe(nextField);
+      await setCommandValue(nextField, "next prompt");
+      expect(nextField.value).toBe("next prompt");
+    });
+  }
+
   it("uses Cmd+Enter, not Ctrl+Enter, as the macOS submit shortcut", () => {
     expect(
       isCommandComposerSubmitShortcut(

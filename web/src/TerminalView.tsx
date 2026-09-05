@@ -217,6 +217,8 @@ export function TerminalView({
   autoFocusRef.current = autoFocus;
   const scrollSensitivityRef = useRef(scrollSensitivity);
   scrollSensitivityRef.current = scrollSensitivity;
+  const desktopCommandComposerRef = useRef(desktopCommandComposer);
+  desktopCommandComposerRef.current = desktopCommandComposer;
   const mobileControlsRef = useRef(mobileControls);
   mobileControlsRef.current = mobileControls;
   const cursorBlinkRef = useRef(cursorBlink);
@@ -238,8 +240,8 @@ export function TerminalView({
   connectionKeyRef.current = connectionKey;
   terminalIdRef.current = pane?.terminal_id ?? null;
 
-  const focusMobileCommandInput = useCallback(() => {
-    if (!mobileControlsRef.current) {
+  const focusCommandInput = useCallback(() => {
+    if (!mobileControlsRef.current && !desktopCommandComposerRef.current) {
       return false;
     }
     const input = mobileCommandInputRef.current;
@@ -271,10 +273,10 @@ export function TerminalView({
       rendererRef.current?.focusTextInput();
       return;
     }
-    if (!focusMobileCommandInput()) {
+    if (!focusCommandInput()) {
       rendererRef.current?.focusTextInput();
     }
-  }, [focusMobileCommandInput]);
+  }, [focusCommandInput]);
 
   const showUploadStatus = useCallback((message: string | null, timeoutMs?: number) => {
     if (uploadStatusTimerRef.current !== null) {
@@ -548,7 +550,7 @@ export function TerminalView({
           !mobileControlsRef.current
             ? null
             : mobileTapTargetRef.current === "command-input"
-              ? focusMobileCommandInput
+              ? focusCommandInput
               : focusTerminalKeyboardInput,
         );
         renderer.setMobileTouchSelection(
@@ -633,7 +635,7 @@ export function TerminalView({
     connectionKey,
     clearQueuedTerminalInput,
     flushBatchedTerminalInput,
-    focusMobileCommandInput,
+    focusCommandInput,
     focusTerminalKeyboardInput,
     handleMobileTerminalTouch,
     measureTerminal,
@@ -817,8 +819,13 @@ export function TerminalView({
         if (size) {
           sendResize(size);
         }
-        if (autoFocusRef.current) {
-          window.setTimeout(() => ready.renderer.focus(), 0);
+        if (autoFocusRef.current && !desktopCommandComposerRef.current) {
+          window.setTimeout(() => {
+            if (!disposed && socket === nextSocket && autoFocusRef.current &&
+                !desktopCommandComposerRef.current) {
+              ready.renderer.focus();
+            }
+          }, 0);
         }
         flushBatchedTerminalInput();
         flushQueuedTerminalInput();
@@ -1090,6 +1097,15 @@ export function TerminalView({
     wsUrl,
   ]);
 
+  // Wait for React to enable the composer after attach before focusing it.
+  // Selection changes alone must not override a direct click into a split terminal.
+  useEffect(() => {
+    if (connectionState === "attached" && autoFocusRef.current &&
+        desktopCommandComposerRef.current && !mobileControlsRef.current) {
+      focusCommandInput();
+    }
+  }, [connectionState, focusCommandInput]);
+
   useEffect(() => {
     if (resumeToken > 0) {
       requestReconnectRef.current("resume");
@@ -1130,10 +1146,10 @@ export function TerminalView({
       !mobileControls
         ? null
         : mobileTapTarget === "command-input"
-          ? focusMobileCommandInput
+          ? focusCommandInput
           : focusTerminalKeyboardInput,
     );
-  }, [focusMobileCommandInput, focusTerminalKeyboardInput, mobileControls, mobileTapTarget]);
+  }, [focusCommandInput, focusTerminalKeyboardInput, mobileControls, mobileTapTarget]);
 
   useEffect(() => {
     rendererRef.current?.setMobileTouchSelection(
@@ -1548,6 +1564,7 @@ export function TerminalCommandControls({
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [value, setValue] = useCommandDraft(bridgeId, paneId);
   const [fieldKey, setFieldKey] = useState(0);
+  const focusAfterSubmitRef = useRef(false);
   const [expanded, setExpanded] = useState(false);
   const [ctrlLatch, setCtrlLatch] = useState(false);
   const setCommandInputNode = (node: HTMLInputElement | HTMLTextAreaElement | null) => {
@@ -1563,6 +1580,7 @@ export function TerminalCommandControls({
     setFieldKey((key) => key + 1);
   };
   const submit = () => {
+    focusAfterSubmitRef.current = !mobileControls;
     const command = value;
     clearCommandInput();
     onSubmitCommand(command);
@@ -1587,6 +1605,10 @@ export function TerminalCommandControls({
     if (fieldKey > 0 && node) {
       node.value = "";
       node.defaultValue = "";
+      if (focusAfterSubmitRef.current) {
+        focusAfterSubmitRef.current = false;
+        node.focus();
+      }
     }
   }, [commandInputRef, fieldKey]);
 

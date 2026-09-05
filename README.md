@@ -199,7 +199,9 @@ Agents, Tabs, and Notes in those views. All scope continues to show content from
 
 Desktop users can enable Command composer under Settings → Terminal to edit multiline prompts
 before staging or sending them. Enter inserts a newline by default; Ctrl+Enter on Windows/Linux or
-Cmd+Enter on macOS sends the prompt. Desktop and mobile command drafts stay separate per bridge and
+Cmd+Enter on macOS sends the prompt. With the desktop composer enabled, automatic input focus goes
+to the composer and returns there after Send; click the terminal to type directly into it.
+Desktop and mobile command drafts stay separate per bridge and
 pane while switching panes, tabs, or hosts, hiding the composer, or reconnecting. Sending or staging
 clears that pane's draft, and a successful snapshot removes drafts for closed panes. Drafts live only
 in the current browser tab's memory: reloading the page clears them, and other clients do not share them.

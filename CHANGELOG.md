@@ -7,13 +7,17 @@
 ### Added
 
 - Added an opt-in desktop command composer under Settings → Terminal for editing multiline input
-  before sending it, without changing desktop terminal selection, scrolling, focus, or cursor
+  before sending it, without changing desktop terminal selection, scrolling, or cursor
   behavior. [PR #82](https://github.com/kcosr/herdr-web/pull/82), contributed by
   [Andreas Ahrens (@AndreasAhrens)](https://github.com/AndreasAhrens).
 
 ### Changed
 
 ### Fixed
+
+- Focus the enabled desktop command composer on terminal attach and navigation focus requests,
+  after closing Settings, and after Send, including Ctrl+Enter and Cmd+Enter. Direct terminal
+  clicks and mobile keyboard behavior remain available. [PR #82](https://github.com/kcosr/herdr-web/pull/82).
 
 - Keep unsent desktop and mobile command drafts per bridge and pane while navigating, until
   sent, staged, or the pane is confirmed closed. Drafts remain in memory for the current browser

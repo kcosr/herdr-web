@@ -4433,7 +4433,12 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
           showMobileKeyboardHideRefit={showMobileKeyboardHideRefit}
           mobileKeyboardHideRefit={mobileKeyboardHideRefit}
           onMobileKeyboardHideRefit={setMobileKeyboardHideRefit}
-          onClose={() => setBackendSettingsOpen(false)}
+          onClose={() => {
+            setBackendSettingsOpen(false);
+            if (desktopCommandComposer && !isTouchInput) {
+              requestTerminalFocus();
+            }
+          }}
         />
       ) : null}
 

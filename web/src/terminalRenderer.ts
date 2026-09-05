@@ -213,21 +213,9 @@ export class GhosttyRenderer implements TerminalRenderer {
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(container);
-    terminal.attachCustomKeyEventHandler((event) => {
-      if (isImeComposingKeyEvent(event)) {
-        return false;
-      }
-      const output = customKeyboardEventOutput(event);
-      if (!output) {
-        return false;
-      }
-      event.stopPropagation();
-      if (typeof event.stopImmediatePropagation === "function") {
-        event.stopImmediatePropagation();
-      }
-      terminal.input(output, true);
-      return true;
-    });
+    terminal.attachCustomKeyEventHandler((event) =>
+      handleTerminalCustomKeyEvent(event, terminal),
+    );
     terminal.textarea?.blur();
     container.blur();
     container.removeAttribute("contenteditable");
@@ -1592,6 +1580,49 @@ function customKeyboardEventOutput(event: KeyboardEvent) {
     return "\x1B[Z";
   }
   return null;
+}
+
+export function handleTerminalCustomKeyEvent(
+  event: KeyboardEvent,
+  terminal: Pick<Terminal, "getSelection" | "input">,
+  platform = typeof navigator === "undefined" ? "" : navigator.platform,
+) {
+  if (isImeComposingKeyEvent(event)) {
+    return false;
+  }
+  // Ghostty copies the canonical selection on mouseup. Consume the matching
+  // desktop copy shortcut here so its input handler cannot also emit ^C.
+  const consumesSelectionCopy =
+    isTerminalSelectionCopyShortcut(event, platform) && terminal.getSelection().length > 0;
+  const output = customKeyboardEventOutput(event);
+  if (!consumesSelectionCopy && !output) {
+    return false;
+  }
+  event.stopPropagation();
+  if (typeof event.stopImmediatePropagation === "function") {
+    event.stopImmediatePropagation();
+  }
+  if (output) {
+    terminal.input(output, true);
+  }
+  return true;
+}
+
+type TerminalSelectionCopyShortcutEvent = Pick<
+  KeyboardEvent,
+  "altKey" | "code" | "ctrlKey" | "metaKey" | "shiftKey"
+>;
+
+function isTerminalSelectionCopyShortcut(
+  event: TerminalSelectionCopyShortcutEvent,
+  platform = typeof navigator === "undefined" ? "" : navigator.platform,
+) {
+  if (event.code !== "KeyC" || event.altKey || event.shiftKey) {
+    return false;
+  }
+  return platform.startsWith("Mac")
+    ? event.metaKey && !event.ctrlKey
+    : event.ctrlKey && !event.metaKey;
 }
 
 function textareaKeyboardEventOutput(event: KeyboardEvent) {

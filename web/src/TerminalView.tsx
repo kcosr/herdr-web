@@ -207,6 +207,7 @@ export function TerminalView({
   const [rendererReady, setRendererReady] = useState<TerminalRendererReady | null>(null);
   const [accessibleScreen, setAccessibleScreen] = useState("");
   const [hasAttachedForTerminal, setHasAttachedForTerminal] = useState(false);
+  const terminalAttachCountRef = useRef(0);
   const [showConnectionOverlay, setShowConnectionOverlay] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -490,6 +491,7 @@ export function TerminalView({
     setRendererReady(null);
     setAccessibleScreen("");
     setHasAttachedForTerminal(false);
+    terminalAttachCountRef.current = 0;
     setShowConnectionOverlay(false);
     setCloseReason(null);
     terminalInputBlockedRef.current = false;
@@ -804,6 +806,7 @@ export function TerminalView({
         lastCloseReason = null;
         terminalInputBlockedRef.current = false;
         setCloseReason(null);
+        terminalAttachCountRef.current += 1;
         setHasAttachedForTerminal(true);
         setConnectionState("attached");
         debugReconnect("open", { socketGeneration: currentSocketGeneration });
@@ -1093,9 +1096,10 @@ export function TerminalView({
   // Selection changes alone must not override a direct click into a split terminal.
   useEffect(() => {
     if (connectionState === "attached" && autoFocusRef.current &&
-        desktopCommandComposerRef.current && !mobileControlsRef.current &&
-        !hostRef.current?.contains(document.activeElement)) {
-      focusCommandInput();
+        desktopCommandComposerRef.current && !mobileControlsRef.current) {
+      if (terminalAttachCountRef.current === 1 || !hostRef.current?.contains(document.activeElement)) {
+        focusCommandInput();
+      }
     }
   }, [connectionState, focusCommandInput]);
 

@@ -1726,7 +1726,7 @@ button {
 /* ------------------------------------------------------------ terminal */
 
 .terminal-stage {
-  --terminal-mobile-controls-height: calc(82px * var(--mobile-controls-scale));
+  --terminal-command-controls-height: calc(82px * var(--mobile-controls-scale));
   position: relative;
   display: flex;
   flex-direction: column;
@@ -1975,7 +1975,7 @@ button {
   pointer-events: none;
 }
 
-.terminal-mobile-controls {
+.terminal-command-controls {
   --mobile-control-gap: calc(5px * var(--mobile-controls-scale));
   --mobile-key-height: calc(30px * var(--mobile-controls-scale));
   --mobile-key-min-width: calc(34px * var(--mobile-controls-scale));
@@ -1985,13 +1985,18 @@ button {
   --mobile-input-row-height: calc(34px * var(--mobile-controls-scale));
   --mobile-input-padding-x: calc(10px * var(--mobile-controls-scale));
   --mobile-send-width: calc(38px * var(--mobile-controls-scale));
-  display: none;
+  display: flex;
   flex: 0 0 auto;
+  flex-direction: column;
   gap: var(--mobile-control-gap);
   padding: calc(6px * var(--mobile-controls-scale)) max(8px, env(safe-area-inset-right))
     calc(7px * var(--mobile-controls-scale)) max(8px, env(safe-area-inset-left));
   border-top: 1px solid var(--line);
   background: color-mix(in srgb, var(--mantle) 94%, black);
+}
+
+.terminal-command-controls[data-mobile-controls="false"] {
+  --mobile-controls-scale: 1;
 }
 
 .term-key-strip,
@@ -2002,6 +2007,10 @@ button {
   display: flex;
   min-width: 0;
   gap: var(--mobile-control-gap);
+}
+
+.term-key-strip[hidden] {
+  display: none;
 }
 
 .term-key-strip {
@@ -3345,19 +3354,20 @@ button {
   height: 60px;
 }
 
-.app[data-touch="true"] .terminal-mobile-controls {
-  display: flex;
-  flex-direction: column;
+.terminal-stage:has(.terminal-command-controls) .terminal-overlay {
+  bottom: calc(var(--terminal-command-controls-height) + 14px);
 }
 
-.app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-overlay {
-  bottom: calc(var(--terminal-mobile-controls-height) + 38px * var(--mobile-controls-scale));
+.terminal-stage:has(.terminal-command-controls) .terminal-upload-status,
+.terminal-stage:has(.terminal-command-controls) .terminal-selection-sheet {
+  bottom: calc(var(--terminal-command-controls-height) + 8px);
 }
 
-.app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-upload-status {
-  bottom: calc(var(--terminal-mobile-controls-height) + 8px * var(--mobile-controls-scale));
+.app[data-touch="true"] .terminal-stage:has(.terminal-command-controls) .terminal-overlay {
+  bottom: calc(var(--terminal-command-controls-height) + 38px * var(--mobile-controls-scale));
 }
 
-.app[data-touch="true"] .terminal-stage:has(.terminal-mobile-controls) .terminal-selection-sheet {
-  bottom: calc(var(--terminal-mobile-controls-height) + 8px * var(--mobile-controls-scale));
+.app[data-touch="true"] .terminal-stage:has(.terminal-command-controls) .terminal-upload-status,
+.app[data-touch="true"] .terminal-stage:has(.terminal-command-controls) .terminal-selection-sheet {
+  bottom: calc(var(--terminal-command-controls-height) + 8px * var(--mobile-controls-scale));
 }

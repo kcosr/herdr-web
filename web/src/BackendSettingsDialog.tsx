@@ -72,6 +72,10 @@ type Props = {
   onMultiHostSpaceSelection: (enabled: boolean) => void;
   terminalFontSizePx: number;
   onTerminalFontSizePx: (value: number) => void;
+  desktopCommandComposer: boolean;
+  onDesktopCommandComposer: (enabled: boolean) => void;
+  desktopCommandEnterNewline: boolean;
+  onDesktopCommandEnterNewline: (enabled: boolean) => void;
   terminalScreenReaderText: boolean;
   onTerminalScreenReaderText: (enabled: boolean) => void;
   autoRenameUploadConflicts: boolean;
@@ -130,6 +134,10 @@ export function BackendSettingsDialog({
   onMultiHostSpaceSelection,
   terminalFontSizePx,
   onTerminalFontSizePx,
+  desktopCommandComposer,
+  onDesktopCommandComposer,
+  desktopCommandEnterNewline,
+  onDesktopCommandEnterNewline,
   terminalScreenReaderText,
   onTerminalScreenReaderText,
   autoRenameUploadConflicts,
@@ -701,6 +709,67 @@ export function BackendSettingsDialog({
                     onChange={(value) => onTerminalFontSizePx(parseTerminalFontSizePx(value))}
                   />
                 </div>
+                {!showMobileTerminalSettings ? (
+                  <>
+                    <div className="settings-label">Command input</div>
+                    <div className="settings-row">
+                      <span title="Compose and edit commands below the terminal before sending them">
+                        Command composer
+                      </span>
+                      <div
+                        className="segmented-control"
+                        role="group"
+                        aria-label="Command composer"
+                      >
+                        <button
+                          type="button"
+                          data-on={!desktopCommandComposer}
+                          aria-pressed={!desktopCommandComposer}
+                          onClick={() => onDesktopCommandComposer(false)}
+                        >
+                          Off
+                        </button>
+                        <button
+                          type="button"
+                          data-on={desktopCommandComposer}
+                          aria-pressed={desktopCommandComposer}
+                          onClick={() => onDesktopCommandComposer(true)}
+                        >
+                          On
+                        </button>
+                      </div>
+                    </div>
+                    {desktopCommandComposer ? (
+                      <div className="settings-row">
+                        <span title="Use Ctrl+Enter on Windows/Linux or Cmd+Enter on macOS to send">
+                          Enter inserts newline
+                        </span>
+                        <div
+                          className="segmented-control"
+                          role="group"
+                          aria-label="Desktop composer Enter inserts newline"
+                        >
+                          <button
+                            type="button"
+                            data-on={!desktopCommandEnterNewline}
+                            aria-pressed={!desktopCommandEnterNewline}
+                            onClick={() => onDesktopCommandEnterNewline(false)}
+                          >
+                            Off
+                          </button>
+                          <button
+                            type="button"
+                            data-on={desktopCommandEnterNewline}
+                            aria-pressed={desktopCommandEnterNewline}
+                            onClick={() => onDesktopCommandEnterNewline(true)}
+                          >
+                            On
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+                  </>
+                ) : null}
                 <div className="settings-label">Accessibility</div>
                 <div className="settings-row">
                   <span title="Expose the visible terminal contents as screen-reader text; may add processing during heavy output">

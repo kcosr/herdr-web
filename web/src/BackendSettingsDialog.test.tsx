@@ -96,6 +96,50 @@ describe("BackendSettingsDialog terminal accessibility", () => {
     expect(off?.getAttribute("aria-pressed")).toBe("true");
     expect(on?.getAttribute("aria-pressed")).toBe("false");
   });
+
+  it("offers desktop command composer settings in the Terminal area", async () => {
+    const onComposerChange = vi.fn();
+    const onEnterNewlineChange = vi.fn();
+    const { container } = await render(
+      <ComposerSettingsHarness
+        onComposerChange={onComposerChange}
+        onEnterNewlineChange={onEnterNewlineChange}
+      />,
+    );
+    const terminalTab = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ).find((button) => button.textContent?.includes("Terminal"));
+    if (!terminalTab) {
+      throw new Error("missing Terminal settings tab");
+    }
+
+    await act(async () => terminalTab.click());
+    const composerGroup = requiredElement<HTMLElement>(
+      container,
+      '[role="group"][aria-label="Command composer"]',
+    );
+    const [composerOff, composerOn] = Array.from(
+      composerGroup.querySelectorAll<HTMLButtonElement>("button"),
+    );
+    expect(composerOff?.getAttribute("aria-pressed")).toBe("true");
+
+    await act(async () => composerOn?.click());
+    expect(onComposerChange).toHaveBeenCalledWith(true);
+    expect(composerOn?.getAttribute("aria-pressed")).toBe("true");
+
+    const newlineGroup = requiredElement<HTMLElement>(
+      container,
+      '[role="group"][aria-label="Desktop composer Enter inserts newline"]',
+    );
+    const [newlineOff, newlineOn] = Array.from(
+      newlineGroup.querySelectorAll<HTMLButtonElement>("button"),
+    );
+    expect(newlineOn?.getAttribute("aria-pressed")).toBe("true");
+
+    await act(async () => newlineOff?.click());
+    expect(onEnterNewlineChange).toHaveBeenCalledWith(false);
+    expect(newlineOff?.getAttribute("aria-pressed")).toBe("true");
+  });
 });
 
 function SettingsHarness({ onChange }: { onChange: (enabled: boolean) => void }) {
@@ -126,6 +170,33 @@ function UploadSettingsHarness({ onChange }: { onChange: (enabled: boolean) => v
   );
 }
 
+function ComposerSettingsHarness({
+  onComposerChange,
+  onEnterNewlineChange,
+}: {
+  onComposerChange: (enabled: boolean) => void;
+  onEnterNewlineChange: (enabled: boolean) => void;
+}) {
+  const [desktopCommandComposer, setDesktopCommandComposer] = useState(false);
+  const [desktopCommandEnterNewline, setDesktopCommandEnterNewline] = useState(true);
+  return (
+    <BackendSettingsDialog
+      {...settingsProps()}
+      showMobileTerminalSettings={false}
+      desktopCommandComposer={desktopCommandComposer}
+      onDesktopCommandComposer={(enabled) => {
+        onComposerChange(enabled);
+        setDesktopCommandComposer(enabled);
+      }}
+      desktopCommandEnterNewline={desktopCommandEnterNewline}
+      onDesktopCommandEnterNewline={(enabled) => {
+        onEnterNewlineChange(enabled);
+        setDesktopCommandEnterNewline(enabled);
+      }}
+    />
+  );
+}
+
 function settingsProps() {
   return {
     showMobileTerminalSettings: true,
@@ -141,6 +212,10 @@ function settingsProps() {
     onMultiHostSpaceSelection: vi.fn(),
     terminalFontSizePx: 13,
     onTerminalFontSizePx: vi.fn(),
+    desktopCommandComposer: false,
+    onDesktopCommandComposer: vi.fn(),
+    desktopCommandEnterNewline: true,
+    onDesktopCommandEnterNewline: vi.fn(),
     terminalScreenReaderText: false,
     onTerminalScreenReaderText: vi.fn(),
     autoRenameUploadConflicts: true,

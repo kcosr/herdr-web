@@ -15,6 +15,9 @@
 
 ### Fixed
 
+- Update locked development dependencies to established security-patched releases for the
+  Capacitor, lint, test, and frontend build tools, preserving cross-platform optional packages.
+
 - Focus the enabled desktop command composer on terminal attach and navigation focus requests,
   after closing Settings, and after Send, including Ctrl+Enter and Cmd+Enter. Direct terminal
   clicks retain focus through reconnects and immediately after a default focus request. Desktop

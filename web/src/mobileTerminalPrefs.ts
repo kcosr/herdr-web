@@ -44,3 +44,9 @@ export function parseMobileCommandExpandingInput(value: unknown) {
 export function parseMobileCommandEnterNewline(value: unknown) {
   return typeof value === "boolean" ? value : DEFAULT_MOBILE_COMMAND_ENTER_NEWLINE;
 }
+
+export const DEFAULT_MOBILE_COMMAND_FOCUS_AFTER_SUBMIT = false;
+
+export function parseMobileCommandFocusAfterSubmit(value: unknown) {
+  return typeof value === "boolean" ? value : DEFAULT_MOBILE_COMMAND_FOCUS_AFTER_SUBMIT;
+}

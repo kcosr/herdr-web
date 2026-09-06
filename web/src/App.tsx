@@ -91,12 +91,14 @@ import type { LauncherPresetsResponse } from "./launcherPresets";
 import { fetchWithTimeout } from "./fetchWithTimeout";
 import {
   DEFAULT_MOBILE_COMMAND_ENTER_NEWLINE,
+  DEFAULT_MOBILE_COMMAND_FOCUS_AFTER_SUBMIT,
   DEFAULT_MOBILE_COMMAND_EXPANDING_INPUT,
   DEFAULT_MOBILE_KEYBOARD_HIDE_REFIT,
   DEFAULT_MOBILE_LONG_PRESS_BEHAVIOR,
   DEFAULT_MOBILE_TOUCH_SELECTION_ENDPOINT_TIMEOUT_MS,
   DEFAULT_MOBILE_TERMINAL_TAP_TARGET,
   parseMobileCommandEnterNewline,
+  parseMobileCommandFocusAfterSubmit,
   parseMobileCommandExpandingInput,
   parseMobileKeyboardHideRefit,
   parseMobileLongPressBehavior,
@@ -436,6 +438,7 @@ type DisplayPrefs = {
   mobileKeyboardHideRefit: boolean;
   mobileCommandExpandingInput: boolean;
   mobileCommandEnterNewline: boolean;
+  mobileCommandFocusAfterSubmit: boolean;
 };
 type SharedNavigationPrefs = {
   selectedBridgeId: BridgeId | null;
@@ -503,6 +506,7 @@ function readDisplayPrefs(): DisplayPrefs {
     mobileKeyboardHideRefit: DEFAULT_MOBILE_KEYBOARD_HIDE_REFIT,
     mobileCommandExpandingInput: DEFAULT_MOBILE_COMMAND_EXPANDING_INPUT,
     mobileCommandEnterNewline: DEFAULT_MOBILE_COMMAND_ENTER_NEWLINE,
+    mobileCommandFocusAfterSubmit: DEFAULT_MOBILE_COMMAND_FOCUS_AFTER_SUBMIT,
   };
   try {
     const raw = window.localStorage.getItem(DISPLAY_PREFS_KEY);
@@ -723,6 +727,9 @@ function parseDisplayPrefsValue(
     ),
     mobileCommandEnterNewline: parseMobileCommandEnterNewline(
       parsed.mobileCommandEnterNewline,
+    ),
+    mobileCommandFocusAfterSubmit: parseMobileCommandFocusAfterSubmit(
+      parsed.mobileCommandFocusAfterSubmit,
     ),
   };
 }
@@ -1133,6 +1140,9 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
   const [mobileCommandEnterNewline, setMobileCommandEnterNewline] = useState(
     initialPrefs.mobileCommandEnterNewline,
   );
+  const [mobileCommandFocusAfterSubmit, setMobileCommandFocusAfterSubmit] = useState(
+    initialPrefs.mobileCommandFocusAfterSubmit,
+  );
   const [launchTarget, setLaunchTarget] = useState<ScopedLaunchTarget | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1241,6 +1251,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
       setMobileKeyboardHideRefit(prefs.mobileKeyboardHideRefit);
       setMobileCommandExpandingInput(prefs.mobileCommandExpandingInput);
       setMobileCommandEnterNewline(prefs.mobileCommandEnterNewline);
+      setMobileCommandFocusAfterSubmit(prefs.mobileCommandFocusAfterSubmit);
       setDisplayPrefsLoaded(true);
       },
     );
@@ -1795,6 +1806,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
       mobileKeyboardHideRefit,
       mobileCommandExpandingInput,
       mobileCommandEnterNewline,
+      mobileCommandFocusAfterSubmit,
     });
   }, [
     displayPrefsLoaded,
@@ -1834,6 +1846,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
     mobileKeyboardHideRefit,
     mobileCommandExpandingInput,
     mobileCommandEnterNewline,
+    mobileCommandFocusAfterSubmit,
   ]);
 
   useEffect(() => {
@@ -4137,6 +4150,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
             mobileTouchSelectionEndpointTimeoutMs={mobileTouchSelectionEndpointTimeoutMs}
             mobileCommandExpandingInput={mobileCommandExpandingInput}
             mobileCommandEnterNewline={mobileCommandEnterNewline}
+            mobileCommandFocusAfterSubmit={mobileCommandFocusAfterSubmit}
             terminalInputTransport={terminalInputTransport}
             terminalInputBatchDelayMs={terminalInputBatchDelayMs}
             terminalOutputCoalesceMs={terminalOutputCoalesceMs}
@@ -4168,6 +4182,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
             mobileTouchSelectionEndpointTimeoutMs={mobileTouchSelectionEndpointTimeoutMs}
             mobileCommandExpandingInput={mobileCommandExpandingInput}
             mobileCommandEnterNewline={mobileCommandEnterNewline}
+            mobileCommandFocusAfterSubmit={mobileCommandFocusAfterSubmit}
             terminalInputTransport={terminalInputTransport}
             terminalInputBatchDelayMs={terminalInputBatchDelayMs}
             terminalOutputCoalesceMs={terminalOutputCoalesceMs}
@@ -4429,7 +4444,9 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
           mobileCommandExpandingInput={mobileCommandExpandingInput}
           onMobileCommandExpandingInput={setMobileCommandExpandingInput}
           mobileCommandEnterNewline={mobileCommandEnterNewline}
+          mobileCommandFocusAfterSubmit={mobileCommandFocusAfterSubmit}
           onMobileCommandEnterNewline={setMobileCommandEnterNewline}
+          onMobileCommandFocusAfterSubmit={setMobileCommandFocusAfterSubmit}
           showMobileKeyboardHideRefit={showMobileKeyboardHideRefit}
           mobileKeyboardHideRefit={mobileKeyboardHideRefit}
           onMobileKeyboardHideRefit={setMobileKeyboardHideRefit}
@@ -5886,6 +5903,7 @@ function SplitGrid({
   mobileTouchSelectionEndpointTimeoutMs,
   mobileCommandExpandingInput,
   mobileCommandEnterNewline,
+  mobileCommandFocusAfterSubmit,
   terminalInputTransport,
   terminalInputBatchDelayMs,
   terminalOutputCoalesceMs,
@@ -5912,6 +5930,7 @@ function SplitGrid({
   mobileTouchSelectionEndpointTimeoutMs: MobileTouchSelectionEndpointTimeoutMs;
   mobileCommandExpandingInput: boolean;
   mobileCommandEnterNewline: boolean;
+  mobileCommandFocusAfterSubmit: boolean;
   terminalInputTransport: TerminalInputTransport;
   terminalInputBatchDelayMs: number;
   terminalOutputCoalesceMs: number;
@@ -5955,6 +5974,7 @@ function SplitGrid({
               mobileTouchSelectionEndpointTimeoutMs={mobileTouchSelectionEndpointTimeoutMs}
               mobileCommandExpandingInput={mobileCommandExpandingInput}
               mobileCommandEnterNewline={mobileCommandEnterNewline}
+              mobileCommandFocusAfterSubmit={mobileCommandFocusAfterSubmit}
               terminalInputTransport={terminalInputTransport}
               terminalInputBatchDelayMs={terminalInputBatchDelayMs}
               terminalOutputCoalesceMs={terminalOutputCoalesceMs}

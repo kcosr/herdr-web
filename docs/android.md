@@ -93,7 +93,8 @@ device backup storage.
 
 The Android shell uses the same area-based Settings UI described in the project README. Android
 starts disconnected, so the Bridge area is required for selecting a backend. On narrow screens the
-area selector appears as horizontal tabs. Android-specific touch behavior lives in the Mobile area.
+area selector appears as horizontal tabs. Android-specific touch behavior lives in the Mobile area. Enable **Focus command input after Send** there to refocus the cleared command field
+for continued typing. This option is off by default and does not change Stage behavior.
 
 ## Build Prerequisites
 

@@ -6,6 +6,10 @@
 
 ### Added
 
+- Add an optional mobile “Focus command input after Send” setting, off by default,
+  to refocus the cleared command field for continued typing.
+  [PR #85](https://github.com/kcosr/herdr-web/pull/85).
+
 - Added an opt-in desktop command composer under Settings → Terminal for editing multiline input
   before sending it, without changing desktop terminal selection, scrolling, or cursor
   behavior. [PR #82](https://github.com/kcosr/herdr-web/pull/82), contributed by
@@ -14,6 +18,16 @@
 ### Changed
 
 ### Fixed
+
+- Discard late keyboard composition updates for 250 ms after command Send or Stage so
+  submitted dictation cannot immediately repopulate the replacement input. Preserve existing
+  field replacement and focus behavior; ordinary non-composing typing and paste remain accepted.
+  New composition started within this brief window can also be discarded.
+  [PR #85](https://github.com/kcosr/herdr-web/pull/85).
+
+- Update locked development dependencies to established security-patched releases for the
+  Capacitor, lint, test, and frontend build tools, preserving cross-platform optional packages.
+  [PR #85](https://github.com/kcosr/herdr-web/pull/85).
 
 - Focus the enabled desktop command composer on terminal attach and navigation focus requests,
   after closing Settings, and after Send, including Ctrl+Enter and Cmd+Enter. Direct terminal

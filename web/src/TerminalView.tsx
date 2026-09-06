@@ -100,6 +100,8 @@ type Props = {
   mobileCommandExpandingInput?: boolean;
   /** Whether Enter inserts a newline in the expanding mobile command input. */
   mobileCommandEnterNewline?: boolean;
+  /** Refocus the mobile command field after Send. */
+  mobileCommandFocusAfterSubmit?: boolean;
   /** Browser-to-bridge transport for terminal input payloads. */
   terminalInputTransport?: TerminalInputTransport;
   /** Delay for coalescing short terminal input payloads. Zero disables batching. */
@@ -168,6 +170,7 @@ export function TerminalView({
   mobileTouchSelectionEndpointTimeoutMs = DEFAULT_MOBILE_TOUCH_SELECTION_ENDPOINT_TIMEOUT_MS,
   mobileCommandExpandingInput = false,
   mobileCommandEnterNewline = false,
+  mobileCommandFocusAfterSubmit = false,
   terminalInputTransport = "json",
   terminalInputBatchDelayMs = 0,
   terminalOutputCoalesceMs = DEFAULT_TERMINAL_OUTPUT_COALESCE_MS,
@@ -1440,6 +1443,7 @@ export function TerminalView({
           expandingInput={mobileControls ? mobileCommandExpandingInput : true}
           enterNewline={mobileControls ? mobileCommandEnterNewline : desktopCommandEnterNewline}
           mobileControls={mobileControls}
+          mobileFocusAfterSubmit={mobileCommandFocusAfterSubmit}
           controlsScalePercent={mobileControls ? mobileControlsScalePercent : 100}
           onControlsHeightChange={setCommandControlsHeight}
           onInput={sendTerminalInput}
@@ -1534,6 +1538,7 @@ export function TerminalCommandControls({
   expandingInput,
   enterNewline,
   mobileControls,
+  mobileFocusAfterSubmit = false,
   controlsScalePercent,
   onControlsHeightChange,
   onInput,
@@ -1550,6 +1555,7 @@ export function TerminalCommandControls({
   expandingInput: boolean;
   enterNewline: boolean;
   mobileControls: boolean;
+  mobileFocusAfterSubmit?: boolean;
   controlsScalePercent: number;
   onControlsHeightChange: (heightPx: number | null) => void;
   onInput: (data: string) => void;
@@ -1560,6 +1566,28 @@ export function TerminalCommandControls({
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [value, setValue] = useCommandDraft(bridgeId, paneId);
+  // Keep this deadline outside the keyed field so it survives input replacement.
+  const compositionGuardUntilRef = useRef(0);
+  const acceptedValueRef = useRef(value);
+  useLayoutEffect(() => {
+    acceptedValueRef.current = value;
+  }, [value]);
+  const onCommandChange = (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    const input = event.nativeEvent;
+    if (
+      performance.now() < compositionGuardUntilRef.current &&
+      input instanceof InputEvent &&
+      (input.isComposing || input.inputType === "insertCompositionText" ||
+        input.inputType === "insertFromComposition" || input.inputType === "deleteCompositionText")
+    ) {
+      // Native composition edits may not be cancelable. Restore synchronously
+      // without blurring, remounting again, or clearing subsequent accepted input.
+      event.currentTarget.value = acceptedValueRef.current;
+      return;
+    }
+    acceptedValueRef.current = event.currentTarget.value;
+    setValue(event.currentTarget.value);
+  };
   const [fieldKey, setFieldKey] = useState(0);
   const focusAfterSubmitRef = useRef(false);
   const [expanded, setExpanded] = useState(false);
@@ -1568,6 +1596,8 @@ export function TerminalCommandControls({
     commandInputRef.current = node;
   };
   const clearCommandInput = () => {
+    compositionGuardUntilRef.current = performance.now() + 250;
+    acceptedValueRef.current = "";
     setValue("");
     const node = commandInputRef.current;
     if (node) {
@@ -1577,7 +1607,7 @@ export function TerminalCommandControls({
     setFieldKey((key) => key + 1);
   };
   const submit = () => {
-    focusAfterSubmitRef.current = !mobileControls;
+    focusAfterSubmitRef.current = !mobileControls || mobileFocusAfterSubmit;
     const command = value;
     clearCommandInput();
     onSubmitCommand(command);
@@ -1793,7 +1823,7 @@ export function TerminalCommandControls({
             enterKeyHint={enterNewline ? "enter" : "send"}
             disabled={disabled}
             value={value}
-            onChange={(event) => setValue(event.target.value)}
+            onChange={onCommandChange}
             onKeyDown={onCommandTextareaKeyDown}
           />
         ) : (
@@ -1809,7 +1839,7 @@ export function TerminalCommandControls({
             enterKeyHint="send"
             disabled={disabled}
             value={value}
-            onChange={(event) => setValue(event.target.value)}
+            onChange={onCommandChange}
           />
         )}
         <button

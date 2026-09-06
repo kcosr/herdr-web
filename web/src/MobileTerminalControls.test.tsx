@@ -62,6 +62,73 @@ describe("TerminalCommandControls", () => {
     });
   }
 
+  for (const expanding of [false, true]) {
+    it(`refocuses mobile Send when enabled, with guard intact (textarea=${expanding})`, async () => {
+      vi.spyOn(performance, "now").mockReturnValue(1000);
+      const { container } = await renderControls(expanding, { mobileFocusAfterSubmit: true });
+      const original = commandField(container);
+      original.focus();
+      await setCommandValue(original, "dictated command");
+      await submitForm(container);
+      const replacement = commandField(container);
+      expect(replacement).not.toBe(original);
+      expect(document.activeElement).toBe(replacement);
+      expect(replacement.value).toBe("");
+      await setCommandInput(replacement, "late correction", "insertCompositionText", true);
+      expect(replacement.value).toBe("");
+      expect(document.activeElement).toBe(replacement);
+      await setCommandInput(replacement, "next", "insertText");
+      expect(replacement.value).toBe("next");
+      await clickStage(container);
+      expect(commandField(container).value).toBe("");
+      expect(document.activeElement).not.toBe(commandField(container));
+    });
+  }
+
+  for (const expanding of [false, true]) {
+    for (const action of ["send", "stage"] as const) {
+      it(`guards late composition after ${action} across replacement (textarea=${expanding})`, async () => {
+        let now = 1000;
+        vi.spyOn(performance, "now").mockImplementation(() => now);
+        const { container, onSubmitCommand, onStageCommand, drafts } = await renderControls(expanding);
+        const original = commandField(container);
+        await setCommandValue(original, "accepted dictation");
+        if (action === "send") await submitForm(container);
+        else await clickStage(container);
+        expect(action === "send" ? onSubmitCommand : onStageCommand)
+          .toHaveBeenCalledExactlyOnceWith("accepted dictation");
+        const field = commandField(container);
+        expect(field).not.toBe(original);
+        field.focus();
+        await setCommandInput(field, "late correction", "insertCompositionText", true);
+        expect(field.value).toBe("");
+        expect(drafts.get("bridge-a", "pane-a")).toBe("");
+        expect(document.activeElement).toBe(field);
+        await setCommandInput(field, "new", "insertText");
+        await setCommandInput(field, "new paste", "insertFromPaste");
+        now = 1249;
+        await setCommandInput(field, "late correction again", "insertFromComposition");
+        expect(field.value).toBe("new paste");
+        expect(drafts.get("bridge-a", "pane-a")).toBe("new paste");
+        expect(commandField(container)).toBe(field);
+        now = 1250;
+        await setCommandInput(field, "fresh dictation", "insertCompositionText", true);
+        expect(field.value).toBe("fresh dictation");
+        expect(drafts.get("bridge-a", "pane-a")).toBe("fresh dictation");
+      });
+    }
+  }
+
+  it("does not carry a submitted pane's guard into another pane", async () => {
+    vi.spyOn(performance, "now").mockReturnValue(1000);
+    const { container, renderPane } = await renderControls(true);
+    await setCommandValue(commandField(container), "first pane");
+    await submitForm(container);
+    await renderPane("bridge-a", "pane-b");
+    await setCommandInput(commandField(container), "second pane", "insertCompositionText", true);
+    expect(commandField(container).value).toBe("second pane");
+  });
+
   it("clears and remounts after Stage while keeping empty Stage disabled", async () => {
     const { container, onStageCommand } = await renderControls(false);
     const firstField = commandField(container);
@@ -274,7 +341,7 @@ describe("TerminalCommandControls", () => {
 
 async function renderControls(
   expandingInput: boolean,
-  options: { enterNewline?: boolean; mobileControls?: boolean } = {},
+  options: { enterNewline?: boolean; mobileControls?: boolean; mobileFocusAfterSubmit?: boolean } = {},
 ) {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -300,6 +367,7 @@ async function renderControls(
             expandingInput={expandingInput}
             enterNewline={options.enterNewline ?? false}
             mobileControls={options.mobileControls ?? true}
+            mobileFocusAfterSubmit={options.mobileFocusAfterSubmit}
             controlsScalePercent={100}
             onControlsHeightChange={vi.fn()}
             onInput={vi.fn()}
@@ -384,5 +452,19 @@ function stageButton(container: HTMLElement) {
 async function clickStage(container: HTMLElement) {
   await act(async () => {
     stageButton(container).click();
+  });
+}
+
+async function setCommandInput(
+  field: HTMLInputElement | HTMLTextAreaElement,
+  value: string,
+  inputType: string,
+  isComposing = false,
+) {
+  await act(async () => {
+    const prototype = field instanceof HTMLTextAreaElement
+      ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(prototype, "value")?.set?.call(field, value);
+    field.dispatchEvent(new InputEvent("input", { bubbles: true, inputType, isComposing }));
   });
 }

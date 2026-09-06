@@ -19,9 +19,9 @@
 
 ### Fixed
 
-- Add a Terminal setting for cursor blinking and default it off on Windows, avoiding
-  ghostty-web 0.4.0's continuous cursor-row redraws that can make large high-DPI
-  terminal canvases severely laggy.
+- Add a Terminal setting for cursor blinking and default it off on Windows. When it is
+  off, render only for terminal updates and interactions instead of repainting the
+  high-DPI canvas continuously, avoiding severe lag in large Windows browser windows.
 
 - Discard late keyboard composition updates for 250 ms after command Send or Stage so
   submitted dictation cannot immediately repopulate the replacement input. Preserve existing

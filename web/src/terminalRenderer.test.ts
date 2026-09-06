@@ -1,8 +1,44 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   handleTerminalCustomKeyEvent,
+  renderGhosttyTerminalFrame,
   refreshTerminalFontRendering,
+  shouldUseEventDrivenTerminalRendering,
+  suspendGhosttyIdleRenderLoop,
 } from "./terminalRenderer";
+
+describe("terminal event-driven rendering", () => {
+  it("only enables the idle-loop workaround for a non-blinking Windows terminal", () => {
+    expect(shouldUseEventDrivenTerminalRendering(false, "Win32")).toBe(true);
+    expect(shouldUseEventDrivenTerminalRendering(true, "Win32")).toBe(false);
+    expect(shouldUseEventDrivenTerminalRendering(false, "MacIntel")).toBe(false);
+    expect(shouldUseEventDrivenTerminalRendering(false, "Linux armv8l")).toBe(false);
+  });
+
+  it("cancels ghostty-web's pending idle frame", () => {
+    const cancelFrame = vi.fn();
+    const terminal = { animationFrameId: 42 } as never;
+
+    expect(suspendGhosttyIdleRenderLoop(terminal, cancelFrame)).toBe(true);
+    expect(cancelFrame).toHaveBeenCalledWith(42);
+    expect(terminal).not.toHaveProperty("animationFrameId");
+    expect(suspendGhosttyIdleRenderLoop(terminal, cancelFrame)).toBe(false);
+  });
+
+  it("renders the current viewport with ghostty's scrollbar state", () => {
+    const renderer = { render: vi.fn() };
+    const wasmTerm = {};
+    const terminal = {
+      renderer,
+      wasmTerm,
+      viewportY: 8,
+      scrollbarOpacity: 0.4,
+    } as never;
+
+    expect(renderGhosttyTerminalFrame(terminal)).toBe(true);
+    expect(renderer.render).toHaveBeenCalledWith(wasmTerm, false, 8, terminal, 0.4);
+  });
+});
 
 describe("terminal renderer font refresh", () => {
   it("forces the current viewport to redraw when font settings are unchanged", () => {

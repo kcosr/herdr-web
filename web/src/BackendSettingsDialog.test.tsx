@@ -47,6 +47,24 @@ afterEach(async () => {
 });
 
 describe("BackendSettingsDialog terminal accessibility", () => {
+  it("offers mobile refocus independently of expanding input", async () => {
+    const onFocusChange = vi.fn();
+    const { container } = await render(
+      <BackendSettingsDialog {...settingsProps()} showMobileTerminalSettings={true}
+        mobileCommandExpandingInput={false} onMobileCommandFocusAfterSubmit={onFocusChange} />,
+    );
+    const tab = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
+      .find((button) => button.textContent?.includes("Mobile"));
+    expect(tab).toBeDefined();
+    await act(async () => tab!.click());
+    const group = requiredElement<HTMLElement>(container,
+      '[role="group"][aria-label="Focus command input after Send"]');
+    const [off, on] = Array.from(group.querySelectorAll<HTMLButtonElement>("button"));
+    expect(off.getAttribute("aria-pressed")).toBe("true");
+    await act(async () => on.click());
+    expect(onFocusChange).toHaveBeenCalledWith(true);
+  });
+
   it("exposes a persisted-style opt-in control in the Terminal area", async () => {
     const onChange = vi.fn();
     const { container } = await render(<SettingsHarness onChange={onChange} />);
@@ -241,6 +259,8 @@ function settingsProps() {
     mobileCommandExpandingInput: true,
     onMobileCommandExpandingInput: vi.fn(),
     mobileCommandEnterNewline: false,
+    mobileCommandFocusAfterSubmit: false,
+    onMobileCommandFocusAfterSubmit: vi.fn(),
     onMobileCommandEnterNewline: vi.fn(),
     showMobileKeyboardHideRefit: true,
     mobileKeyboardHideRefit: true,

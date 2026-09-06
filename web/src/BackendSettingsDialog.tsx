@@ -103,7 +103,9 @@ type Props = {
   mobileCommandExpandingInput: boolean;
   onMobileCommandExpandingInput: (enabled: boolean) => void;
   mobileCommandEnterNewline: boolean;
+  mobileCommandFocusAfterSubmit: boolean;
   onMobileCommandEnterNewline: (enabled: boolean) => void;
+  onMobileCommandFocusAfterSubmit: (enabled: boolean) => void;
   showMobileKeyboardHideRefit: boolean;
   mobileKeyboardHideRefit: boolean;
   onMobileKeyboardHideRefit: (enabled: boolean) => void;
@@ -163,7 +165,9 @@ export function BackendSettingsDialog({
   mobileCommandExpandingInput,
   onMobileCommandExpandingInput,
   mobileCommandEnterNewline,
+  mobileCommandFocusAfterSubmit,
   onMobileCommandEnterNewline,
+  onMobileCommandFocusAfterSubmit,
   showMobileKeyboardHideRefit,
   mobileKeyboardHideRefit,
   onMobileKeyboardHideRefit,
@@ -978,6 +982,31 @@ export function BackendSettingsDialog({
                       data-on={mobileCommandExpandingInput}
                       aria-pressed={mobileCommandExpandingInput}
                       onClick={() => onMobileCommandExpandingInput(true)}
+                    >
+                      On
+                    </button>
+                  </div>
+                </div>
+                <div className="settings-row">
+                  <span>Focus command input after Send</span>
+                  <div
+                    className="segmented-control"
+                    role="group"
+                    aria-label="Focus command input after Send"
+                  >
+                    <button
+                      type="button"
+                      data-on={!mobileCommandFocusAfterSubmit}
+                      aria-pressed={!mobileCommandFocusAfterSubmit}
+                      onClick={() => onMobileCommandFocusAfterSubmit(false)}
+                    >
+                      Off
+                    </button>
+                    <button
+                      type="button"
+                      data-on={mobileCommandFocusAfterSubmit}
+                      aria-pressed={mobileCommandFocusAfterSubmit}
+                      onClick={() => onMobileCommandFocusAfterSubmit(true)}
                     >
                       On
                     </button>

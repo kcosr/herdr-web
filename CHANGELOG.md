@@ -6,6 +6,11 @@
 
 ### Added
 
+- Added an opt-in desktop command composer under Settings → Terminal for editing multiline input
+  before sending it, without changing desktop terminal selection, scrolling, or cursor
+  behavior. [PR #82](https://github.com/kcosr/herdr-web/pull/82), contributed by
+  [Andreas Ahrens (@AndreasAhrens)](https://github.com/AndreasAhrens).
+
 ### Changed
 
 ### Fixed

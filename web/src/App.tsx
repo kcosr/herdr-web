@@ -1,3 +1,4 @@
+import { CommandDraftContext, createCommandDraftStore } from "./commandDrafts";
 import {
   Activity,
   Archive,
@@ -158,7 +159,11 @@ import {
   parseTerminalOutputCoalesceMs,
 } from "./terminalOutputCoalescing";
 import {
+  DEFAULT_DESKTOP_COMMAND_COMPOSER,
+  DEFAULT_DESKTOP_COMMAND_ENTER_NEWLINE,
   DEFAULT_TERMINAL_FONT_SIZE_PX,
+  parseDesktopCommandComposer,
+  parseDesktopCommandEnterNewline,
   parseTerminalFontSizePx,
 } from "./terminalPrefs";
 import {
@@ -415,6 +420,8 @@ type DisplayPrefs = {
   notesPanelOpen: boolean;
   sidebarOpen: boolean;
   terminalFontSizePx: number;
+  desktopCommandComposer: boolean;
+  desktopCommandEnterNewline: boolean;
   terminalScreenReaderText: boolean;
   autoRenameUploadConflicts: boolean;
   terminalInputTransport: TerminalInputTransport;
@@ -480,6 +487,8 @@ function readDisplayPrefs(): DisplayPrefs {
     notesPanelOpen: false,
     sidebarOpen: true,
     terminalFontSizePx: DEFAULT_TERMINAL_FONT_SIZE_PX,
+    desktopCommandComposer: DEFAULT_DESKTOP_COMMAND_COMPOSER,
+    desktopCommandEnterNewline: DEFAULT_DESKTOP_COMMAND_ENTER_NEWLINE,
     terminalScreenReaderText: DEFAULT_TERMINAL_SCREEN_READER_TEXT,
     autoRenameUploadConflicts: DEFAULT_AUTO_RENAME_UPLOAD_CONFLICTS,
     terminalInputTransport: DEFAULT_TERMINAL_INPUT_TRANSPORT,
@@ -677,6 +686,14 @@ function parseDisplayPrefsValue(
       typeof parsed.notesPanelOpen === "boolean" ? parsed.notesPanelOpen : fallback.notesPanelOpen,
     sidebarOpen,
     terminalFontSizePx: parseTerminalFontSizePx(parsed.terminalFontSizePx),
+    desktopCommandComposer: parseDesktopCommandComposer(
+      parsed.desktopCommandComposer,
+      fallback.desktopCommandComposer,
+    ),
+    desktopCommandEnterNewline: parseDesktopCommandEnterNewline(
+      parsed.desktopCommandEnterNewline,
+      fallback.desktopCommandEnterNewline,
+    ),
     terminalScreenReaderText: parseTerminalScreenReaderText(
       parsed.terminalScreenReaderText,
       fallback.terminalScreenReaderText,
@@ -936,6 +953,15 @@ function usePointerDragResize(
 }
 
 export function App() {
+  const [commandDrafts] = useState(createCommandDraftStore);
+  return (
+    <CommandDraftContext.Provider value={commandDrafts}>
+      <AppContent commandDrafts={commandDrafts} />
+    </CommandDraftContext.Provider>
+  );
+}
+
+function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof createCommandDraftStore> }) {
   const bridge = useBridge();
   const initialPrefs = useMemo(readDisplayPrefs, []);
   const initialSharedNavigationPrefs = useMemo(readSharedNavigationPrefs, []);
@@ -1059,6 +1085,12 @@ export function App() {
   const [backendSettingsOpen, setBackendSettingsOpen] = useState(false);
   const [terminalFontSizePx, setTerminalFontSizePx] = useState(
     initialPrefs.terminalFontSizePx,
+  );
+  const [desktopCommandComposer, setDesktopCommandComposer] = useState(
+    initialPrefs.desktopCommandComposer,
+  );
+  const [desktopCommandEnterNewline, setDesktopCommandEnterNewline] = useState(
+    initialPrefs.desktopCommandEnterNewline,
   );
   const [terminalScreenReaderText, setTerminalScreenReaderText] = useState(
     initialPrefs.terminalScreenReaderText,
@@ -1193,6 +1225,8 @@ export function App() {
       setSelectedPanesByBridgeId(sharedNavigationPrefs.selectedPanesByBridgeId);
       setActiveWorkspacesByBridgeId(sharedNavigationPrefs.activeWorkspacesByBridgeId);
       setTerminalFontSizePx(prefs.terminalFontSizePx);
+      setDesktopCommandComposer(prefs.desktopCommandComposer);
+      setDesktopCommandEnterNewline(prefs.desktopCommandEnterNewline);
       setTerminalScreenReaderText(prefs.terminalScreenReaderText);
       setAutoRenameUploadConflicts(prefs.autoRenameUploadConflicts);
       setTerminalInputTransport(prefs.terminalInputTransport);
@@ -1297,6 +1331,14 @@ export function App() {
       }),
     [bridge.enabledRuntimes, connectionStates],
   );
+  useEffect(() => {
+    for (const { runtime, snapshot, loadState } of bridgeViews) {
+      if (runtime.canConnect && loadState === "ready" && snapshot) {
+        commandDrafts.retainPanes(runtime.id, snapshot.panes.map((pane) => pane.pane_id));
+      }
+    }
+  }, [bridgeViews, commandDrafts]);
+
   const pinnedAgentKeys = useMemo(
     () => buildAgentPinKeySet(bridgeViews, agentPinsStates),
     [agentPinsStates, bridgeViews],
@@ -1737,6 +1779,8 @@ export function App() {
       notesPanelOpen,
       sidebarOpen,
       terminalFontSizePx,
+      desktopCommandComposer,
+      desktopCommandEnterNewline,
       terminalScreenReaderText,
       autoRenameUploadConflicts,
       terminalInputTransport,
@@ -1774,6 +1818,8 @@ export function App() {
     notesPanelOpen,
     sidebarOpen,
     terminalFontSizePx,
+    desktopCommandComposer,
+    desktopCommandEnterNewline,
     terminalScreenReaderText,
     autoRenameUploadConflicts,
     terminalInputTransport,
@@ -4066,6 +4112,7 @@ export function App() {
         </header>
         {showSplit && splitCells ? (
           <SplitGrid
+            bridgeId={selectedRuntime?.id ?? ""}
             cells={splitCells}
             selectedPaneId={selectedPane?.pane_id ?? null}
             onSelectPane={(pane) => {
@@ -4079,6 +4126,8 @@ export function App() {
             refitToken={refitToken}
             focusToken={terminalFocusToken}
             touchInput={isTouchInput}
+            desktopCommandComposer={desktopCommandComposer}
+            desktopCommandEnterNewline={desktopCommandEnterNewline}
             terminalFontSizePx={terminalFontSizePx}
             terminalScreenReaderText={terminalScreenReaderText}
             autoRenameUploadConflicts={autoRenameUploadConflicts}
@@ -4098,6 +4147,7 @@ export function App() {
           />
         ) : renderTerminal ? (
           <TerminalView
+            bridgeId={selectedRuntime?.id ?? ""}
             pane={selectedPane}
             connectionKey={selectedRuntime?.connectionKey ?? "disconnected"}
             resumeToken={selectedRuntime?.resumeToken ?? 0}
@@ -4106,6 +4156,8 @@ export function App() {
             autoFocus={!isTouchInput}
             scrollSensitivity={isTouchInput ? 2 : 0.4}
             mobileControls={isTouchInput}
+            desktopCommandComposer={desktopCommandComposer}
+            desktopCommandEnterNewline={desktopCommandEnterNewline}
             cursorBlink={!isTouchInput}
             terminalFontSizePx={terminalFontSizePx}
             terminalScreenReaderText={terminalScreenReaderText}
@@ -4346,6 +4398,10 @@ export function App() {
           onMultiHostSpaceSelection={setMultiHostSpaceSelection}
           terminalFontSizePx={terminalFontSizePx}
           onTerminalFontSizePx={setTerminalFontSizePx}
+          desktopCommandComposer={desktopCommandComposer}
+          onDesktopCommandComposer={setDesktopCommandComposer}
+          desktopCommandEnterNewline={desktopCommandEnterNewline}
+          onDesktopCommandEnterNewline={setDesktopCommandEnterNewline}
           terminalScreenReaderText={terminalScreenReaderText}
           onTerminalScreenReaderText={setTerminalScreenReaderText}
           autoRenameUploadConflicts={autoRenameUploadConflicts}
@@ -4377,7 +4433,12 @@ export function App() {
           showMobileKeyboardHideRefit={showMobileKeyboardHideRefit}
           mobileKeyboardHideRefit={mobileKeyboardHideRefit}
           onMobileKeyboardHideRefit={setMobileKeyboardHideRefit}
-          onClose={() => setBackendSettingsOpen(false)}
+          onClose={() => {
+            setBackendSettingsOpen(false);
+            if (desktopCommandComposer && !isTouchInput) {
+              requestTerminalFocus();
+            }
+          }}
         />
       ) : null}
 
@@ -5807,12 +5868,15 @@ function hasOpenModal() {
 }
 
 function SplitGrid({
+  bridgeId,
   cells,
   selectedPaneId,
   onSelectPane,
   refitToken,
   focusToken,
   touchInput,
+  desktopCommandComposer,
+  desktopCommandEnterNewline,
   terminalFontSizePx,
   terminalScreenReaderText,
   autoRenameUploadConflicts,
@@ -5830,12 +5894,15 @@ function SplitGrid({
   httpUrl,
   wsUrl,
 }: {
+  bridgeId: string;
   cells: { pane: PaneInfo; style: CSSProperties }[];
   selectedPaneId: string | null;
   onSelectPane: (pane: PaneInfo) => void;
   refitToken: number;
   focusToken: number;
   touchInput: boolean;
+  desktopCommandComposer: boolean;
+  desktopCommandEnterNewline: boolean;
   terminalFontSizePx: number;
   terminalScreenReaderText: boolean;
   autoRenameUploadConflicts: boolean;
@@ -5867,6 +5934,7 @@ function SplitGrid({
             onPointerDown={() => onSelectPane(pane)}
           >
             <TerminalView
+              bridgeId={bridgeId}
               pane={pane}
               connectionKey={connectionKey}
               resumeToken={resumeToken}
@@ -5875,6 +5943,8 @@ function SplitGrid({
               autoFocus={selected && !touchInput}
               scrollSensitivity={touchInput ? 2 : 0.4}
               mobileControls={selected && touchInput}
+              desktopCommandComposer={selected && !touchInput && desktopCommandComposer}
+              desktopCommandEnterNewline={desktopCommandEnterNewline}
               cursorBlink={!touchInput}
               terminalFontSizePx={terminalFontSizePx}
               terminalScreenReaderText={terminalScreenReaderText}

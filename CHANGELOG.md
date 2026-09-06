@@ -19,6 +19,10 @@
 
 ### Fixed
 
+- Add a Terminal setting for cursor blinking and default it off on Windows, avoiding
+  ghostty-web 0.4.0's continuous cursor-row redraws that can make large high-DPI
+  terminal canvases severely laggy.
+
 - Discard late keyboard composition updates for 250 ms after command Send or Stage so
   submitted dictation cannot immediately repopulate the replacement input. Preserve existing
   field replacement and focus behavior; ordinary non-composing typing and paste remain accepted.

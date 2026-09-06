@@ -158,7 +158,45 @@ describe("BackendSettingsDialog terminal accessibility", () => {
     expect(onEnterNewlineChange).toHaveBeenCalledWith(false);
     expect(newlineOff?.getAttribute("aria-pressed")).toBe("true");
   });
+
+  it("allows cursor blinking to be enabled in the Terminal area", async () => {
+    const onChange = vi.fn();
+    const { container } = await render(<CursorBlinkSettingsHarness onChange={onChange} />);
+    const terminalTab = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ).find((button) => button.textContent?.includes("Terminal"));
+    if (!terminalTab) {
+      throw new Error("missing Terminal settings tab");
+    }
+
+    await act(async () => terminalTab.click());
+    const group = requiredElement<HTMLElement>(
+      container,
+      '[role="group"][aria-label="Terminal cursor blink"]',
+    );
+    const [off, on] = Array.from(group.querySelectorAll<HTMLButtonElement>("button"));
+    expect(off?.getAttribute("aria-pressed")).toBe("true");
+
+    await act(async () => on?.click());
+    expect(onChange).toHaveBeenCalledWith(true);
+    expect(on?.getAttribute("aria-pressed")).toBe("true");
+  });
 });
+
+function CursorBlinkSettingsHarness({ onChange }: { onChange: (enabled: boolean) => void }) {
+  const [terminalCursorBlink, setTerminalCursorBlink] = useState(false);
+  return (
+    <BackendSettingsDialog
+      {...settingsProps()}
+      showMobileTerminalSettings={false}
+      terminalCursorBlink={terminalCursorBlink}
+      onTerminalCursorBlink={(enabled) => {
+        onChange(enabled);
+        setTerminalCursorBlink(enabled);
+      }}
+    />
+  );
+}
 
 function SettingsHarness({ onChange }: { onChange: (enabled: boolean) => void }) {
   const [terminalScreenReaderText, setTerminalScreenReaderText] = useState(false);
@@ -230,6 +268,8 @@ function settingsProps() {
     onMultiHostSpaceSelection: vi.fn(),
     terminalFontSizePx: 13,
     onTerminalFontSizePx: vi.fn(),
+    terminalCursorBlink: false,
+    onTerminalCursorBlink: vi.fn(),
     desktopCommandComposer: false,
     onDesktopCommandComposer: vi.fn(),
     desktopCommandEnterNewline: true,

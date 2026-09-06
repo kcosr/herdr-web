@@ -72,6 +72,8 @@ type Props = {
   onMultiHostSpaceSelection: (enabled: boolean) => void;
   terminalFontSizePx: number;
   onTerminalFontSizePx: (value: number) => void;
+  terminalCursorBlink: boolean;
+  onTerminalCursorBlink: (enabled: boolean) => void;
   desktopCommandComposer: boolean;
   onDesktopCommandComposer: (enabled: boolean) => void;
   desktopCommandEnterNewline: boolean;
@@ -136,6 +138,8 @@ export function BackendSettingsDialog({
   onMultiHostSpaceSelection,
   terminalFontSizePx,
   onTerminalFontSizePx,
+  terminalCursorBlink,
+  onTerminalCursorBlink,
   desktopCommandComposer,
   onDesktopCommandComposer,
   desktopCommandEnterNewline,
@@ -713,6 +717,35 @@ export function BackendSettingsDialog({
                     onChange={(value) => onTerminalFontSizePx(parseTerminalFontSizePx(value))}
                   />
                 </div>
+                {!showMobileTerminalSettings ? (
+                  <div className="settings-row">
+                    <span title="Cursor blinking can be expensive in ghostty-web 0.4.0 on large high-DPI terminals">
+                      Cursor blink
+                    </span>
+                    <div
+                      className="segmented-control"
+                      role="group"
+                      aria-label="Terminal cursor blink"
+                    >
+                      <button
+                        type="button"
+                        data-on={!terminalCursorBlink}
+                        aria-pressed={!terminalCursorBlink}
+                        onClick={() => onTerminalCursorBlink(false)}
+                      >
+                        Off
+                      </button>
+                      <button
+                        type="button"
+                        data-on={terminalCursorBlink}
+                        aria-pressed={terminalCursorBlink}
+                        onClick={() => onTerminalCursorBlink(true)}
+                      >
+                        On
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
                 {!showMobileTerminalSettings ? (
                   <>
                     <div className="settings-label">Command input</div>

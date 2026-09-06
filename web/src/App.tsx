@@ -164,8 +164,10 @@ import {
   DEFAULT_DESKTOP_COMMAND_COMPOSER,
   DEFAULT_DESKTOP_COMMAND_ENTER_NEWLINE,
   DEFAULT_TERMINAL_FONT_SIZE_PX,
+  defaultTerminalCursorBlink,
   parseDesktopCommandComposer,
   parseDesktopCommandEnterNewline,
+  parseTerminalCursorBlink,
   parseTerminalFontSizePx,
 } from "./terminalPrefs";
 import {
@@ -422,6 +424,7 @@ type DisplayPrefs = {
   notesPanelOpen: boolean;
   sidebarOpen: boolean;
   terminalFontSizePx: number;
+  terminalCursorBlink: boolean;
   desktopCommandComposer: boolean;
   desktopCommandEnterNewline: boolean;
   terminalScreenReaderText: boolean;
@@ -490,6 +493,7 @@ function readDisplayPrefs(): DisplayPrefs {
     notesPanelOpen: false,
     sidebarOpen: true,
     terminalFontSizePx: DEFAULT_TERMINAL_FONT_SIZE_PX,
+    terminalCursorBlink: defaultTerminalCursorBlink(),
     desktopCommandComposer: DEFAULT_DESKTOP_COMMAND_COMPOSER,
     desktopCommandEnterNewline: DEFAULT_DESKTOP_COMMAND_ENTER_NEWLINE,
     terminalScreenReaderText: DEFAULT_TERMINAL_SCREEN_READER_TEXT,
@@ -690,6 +694,10 @@ function parseDisplayPrefsValue(
       typeof parsed.notesPanelOpen === "boolean" ? parsed.notesPanelOpen : fallback.notesPanelOpen,
     sidebarOpen,
     terminalFontSizePx: parseTerminalFontSizePx(parsed.terminalFontSizePx),
+    terminalCursorBlink: parseTerminalCursorBlink(
+      parsed.terminalCursorBlink,
+      fallback.terminalCursorBlink,
+    ),
     desktopCommandComposer: parseDesktopCommandComposer(
       parsed.desktopCommandComposer,
       fallback.desktopCommandComposer,
@@ -1093,6 +1101,9 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
   const [terminalFontSizePx, setTerminalFontSizePx] = useState(
     initialPrefs.terminalFontSizePx,
   );
+  const [terminalCursorBlink, setTerminalCursorBlink] = useState(
+    initialPrefs.terminalCursorBlink,
+  );
   const [desktopCommandComposer, setDesktopCommandComposer] = useState(
     initialPrefs.desktopCommandComposer,
   );
@@ -1235,6 +1246,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
       setSelectedPanesByBridgeId(sharedNavigationPrefs.selectedPanesByBridgeId);
       setActiveWorkspacesByBridgeId(sharedNavigationPrefs.activeWorkspacesByBridgeId);
       setTerminalFontSizePx(prefs.terminalFontSizePx);
+      setTerminalCursorBlink(prefs.terminalCursorBlink);
       setDesktopCommandComposer(prefs.desktopCommandComposer);
       setDesktopCommandEnterNewline(prefs.desktopCommandEnterNewline);
       setTerminalScreenReaderText(prefs.terminalScreenReaderText);
@@ -1790,6 +1802,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
       notesPanelOpen,
       sidebarOpen,
       terminalFontSizePx,
+      terminalCursorBlink,
       desktopCommandComposer,
       desktopCommandEnterNewline,
       terminalScreenReaderText,
@@ -1830,6 +1843,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
     notesPanelOpen,
     sidebarOpen,
     terminalFontSizePx,
+    terminalCursorBlink,
     desktopCommandComposer,
     desktopCommandEnterNewline,
     terminalScreenReaderText,
@@ -4141,6 +4155,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
             touchInput={isTouchInput}
             desktopCommandComposer={desktopCommandComposer}
             desktopCommandEnterNewline={desktopCommandEnterNewline}
+            terminalCursorBlink={terminalCursorBlink}
             terminalFontSizePx={terminalFontSizePx}
             terminalScreenReaderText={terminalScreenReaderText}
             autoRenameUploadConflicts={autoRenameUploadConflicts}
@@ -4172,7 +4187,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
             mobileControls={isTouchInput}
             desktopCommandComposer={desktopCommandComposer}
             desktopCommandEnterNewline={desktopCommandEnterNewline}
-            cursorBlink={!isTouchInput}
+            cursorBlink={!isTouchInput && terminalCursorBlink}
             terminalFontSizePx={terminalFontSizePx}
             terminalScreenReaderText={terminalScreenReaderText}
             autoRenameUploadConflicts={autoRenameUploadConflicts}
@@ -4413,6 +4428,8 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
           onMultiHostSpaceSelection={setMultiHostSpaceSelection}
           terminalFontSizePx={terminalFontSizePx}
           onTerminalFontSizePx={setTerminalFontSizePx}
+          terminalCursorBlink={terminalCursorBlink}
+          onTerminalCursorBlink={setTerminalCursorBlink}
           desktopCommandComposer={desktopCommandComposer}
           onDesktopCommandComposer={setDesktopCommandComposer}
           desktopCommandEnterNewline={desktopCommandEnterNewline}
@@ -5894,6 +5911,7 @@ function SplitGrid({
   touchInput,
   desktopCommandComposer,
   desktopCommandEnterNewline,
+  terminalCursorBlink,
   terminalFontSizePx,
   terminalScreenReaderText,
   autoRenameUploadConflicts,
@@ -5921,6 +5939,7 @@ function SplitGrid({
   touchInput: boolean;
   desktopCommandComposer: boolean;
   desktopCommandEnterNewline: boolean;
+  terminalCursorBlink: boolean;
   terminalFontSizePx: number;
   terminalScreenReaderText: boolean;
   autoRenameUploadConflicts: boolean;
@@ -5964,7 +5983,7 @@ function SplitGrid({
               mobileControls={selected && touchInput}
               desktopCommandComposer={selected && !touchInput && desktopCommandComposer}
               desktopCommandEnterNewline={desktopCommandEnterNewline}
-              cursorBlink={!touchInput}
+              cursorBlink={!touchInput && terminalCursorBlink}
               terminalFontSizePx={terminalFontSizePx}
               terminalScreenReaderText={terminalScreenReaderText}
               autoRenameUploadConflicts={autoRenameUploadConflicts}

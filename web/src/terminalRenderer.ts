@@ -30,7 +30,10 @@ import type {
   MobileLongPressBehavior,
   MobileTouchSelectionEndpointTimeoutMs,
 } from "./mobileTerminalPrefs";
-import { DEFAULT_TERMINAL_FONT_SIZE_PX } from "./terminalPrefs";
+import {
+  DEFAULT_TERMINAL_FONT_SIZE_PX,
+  defaultTerminalCursorBlink,
+} from "./terminalPrefs";
 import {
   beforeInputOutput,
   idleTerminalImeState,
@@ -105,6 +108,15 @@ type GhosttySelectionManagerAccess = {
     fire?: () => void;
   };
 };
+type GhosttyIdleRenderLoopAccess = {
+  animationFrameId?: number;
+};
+type GhosttyRenderAccess = {
+  renderer?: Terminal["renderer"];
+  wasmTerm?: Terminal["wasmTerm"];
+  viewportY: number;
+  scrollbarOpacity?: number;
+};
 type TerminalBufferLine = {
   readonly length: number;
   getCell(x: number):
@@ -166,11 +178,14 @@ export class GhosttyRenderer implements TerminalRenderer {
   #textInputTapGraceUntil = 0;
   #fontSizePx: number;
   #cursorBlink: boolean;
+  #eventDrivenRendering: boolean;
+  #renderFrameId: number | null = null;
   #disposed = false;
 
   constructor(fontSizePx = DEFAULT_TERMINAL_FONT_SIZE_PX, cursorBlink = true) {
     this.#fontSizePx = fontSizePx;
     this.#cursorBlink = cursorBlink;
+    this.#eventDrivenRendering = shouldUseEventDrivenTerminalRendering(cursorBlink);
   }
 
   async mount(container: HTMLElement) {
@@ -213,6 +228,9 @@ export class GhosttyRenderer implements TerminalRenderer {
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(container);
+    if (this.#eventDrivenRendering) {
+      suspendGhosttyIdleRenderLoop(terminal);
+    }
     terminal.attachCustomKeyEventHandler((event) =>
       handleTerminalCustomKeyEvent(event, terminal),
     );
@@ -235,15 +253,9 @@ export class GhosttyRenderer implements TerminalRenderer {
     if (!terminal) {
       return;
     }
-    if (!this.#accessibleScreenPublisher) {
-      terminal.write(data);
-      return;
-    }
-    terminal.write(data, () => {
-      if (this.#isCurrentTerminal(terminal)) {
-        this.#accessibleScreenPublisher?.request();
-      }
-    });
+    terminal.write(data);
+    this.#requestRender(terminal);
+    this.#accessibleScreenPublisher?.request();
   }
 
   setAccessibleScreenListener(callback: ((text: string) => void) | null) {
@@ -350,6 +362,10 @@ export class GhosttyRenderer implements TerminalRenderer {
 
   dispose() {
     this.#disposed = true;
+    if (this.#renderFrameId !== null) {
+      window.cancelAnimationFrame(this.#renderFrameId);
+      this.#renderFrameId = null;
+    }
     this.#touchCleanup?.();
     this.#touchCleanup = null;
     this.#mobileInputCleanup?.();
@@ -374,6 +390,18 @@ export class GhosttyRenderer implements TerminalRenderer {
 
   #isCurrentTerminal(terminal: Terminal) {
     return this.#terminal === terminal;
+  }
+
+  #requestRender(terminal: Terminal) {
+    if (!this.#eventDrivenRendering || this.#renderFrameId !== null) {
+      return;
+    }
+    this.#renderFrameId = window.requestAnimationFrame(() => {
+      this.#renderFrameId = null;
+      if (this.#isCurrentTerminal(terminal)) {
+        renderGhosttyTerminalFrame(terminal);
+      }
+    });
   }
 
   #installAccessibleScreenPublisher() {
@@ -1448,6 +1476,44 @@ export function refreshTerminalFontRendering(
     terminal.renderer.render(terminal.wasmTerm, true, terminal.viewportY, terminal, 0);
   }
   return size;
+}
+
+export function suspendGhosttyIdleRenderLoop(
+  terminal: Terminal,
+  cancelFrame: (frameId: number) => void = (frameId) => window.cancelAnimationFrame(frameId),
+) {
+  // ghostty-web 0.4.0 starts a permanent requestAnimationFrame loop even when
+  // cursor blinking is disabled. A large high-DPI canvas is particularly costly
+  // on Windows, so event-driven mode cancels the pending continuation after open().
+  const access = terminal as unknown as GhosttyIdleRenderLoopAccess;
+  if (access.animationFrameId === undefined) {
+    return false;
+  }
+  cancelFrame(access.animationFrameId);
+  delete access.animationFrameId;
+  return true;
+}
+
+export function shouldUseEventDrivenTerminalRendering(
+  cursorBlink: boolean,
+  platform = typeof navigator === "undefined" ? "" : navigator.platform,
+) {
+  return !cursorBlink && !defaultTerminalCursorBlink(platform);
+}
+
+export function renderGhosttyTerminalFrame(terminal: Terminal) {
+  const access = terminal as unknown as GhosttyRenderAccess;
+  if (!access.renderer || !access.wasmTerm) {
+    return false;
+  }
+  access.renderer.render(
+    access.wasmTerm,
+    false,
+    access.viewportY,
+    terminal,
+    access.scrollbarOpacity ?? 0,
+  );
+  return true;
 }
 
 function hideGhosttyTextarea(textarea: HTMLTextAreaElement) {

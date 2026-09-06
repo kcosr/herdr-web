@@ -19,6 +19,11 @@
 
 ### Fixed
 
+- Add a Terminal setting for cursor blinking and default it off on Windows. When it is
+  off, render only for terminal updates and interactions instead of repainting the
+  high-DPI canvas continuously, avoiding severe lag in large Windows browser windows.
+  [PR #86](https://github.com/kcosr/herdr-web/pull/86).
+
 - Discard late keyboard composition updates for 250 ms after command Send or Stage so
   submitted dictation cannot immediately repopulate the replacement input. Preserve existing
   field replacement and focus behavior; ordinary non-composing typing and paste remain accepted.

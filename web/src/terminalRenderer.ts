@@ -180,6 +180,7 @@ export class GhosttyRenderer implements TerminalRenderer {
   #cursorBlink: boolean;
   #eventDrivenRendering: boolean;
   #renderFrameId: number | null = null;
+  #renderInteractionCleanup: (() => void) | null = null;
   #disposed = false;
 
   constructor(fontSizePx = DEFAULT_TERMINAL_FONT_SIZE_PX, cursorBlink = true) {
@@ -230,6 +231,9 @@ export class GhosttyRenderer implements TerminalRenderer {
     terminal.open(container);
     if (this.#eventDrivenRendering) {
       suspendGhosttyIdleRenderLoop(terminal);
+      this.#renderInteractionCleanup = installTerminalInteractionRendering(
+        terminal, () => this.#requestRender(terminal),
+      );
     }
     terminal.attachCustomKeyEventHandler((event) =>
       handleTerminalCustomKeyEvent(event, terminal),
@@ -362,6 +366,8 @@ export class GhosttyRenderer implements TerminalRenderer {
 
   dispose() {
     this.#disposed = true;
+    this.#renderInteractionCleanup?.();
+    this.#renderInteractionCleanup = null;
     if (this.#renderFrameId !== null) {
       window.cancelAnimationFrame(this.#renderFrameId);
       this.#renderFrameId = null;
@@ -1476,6 +1482,26 @@ export function refreshTerminalFontRendering(
     terminal.renderer.render(terminal.wasmTerm, true, terminal.viewportY, terminal, 0);
   }
   return size;
+}
+
+export function installTerminalInteractionRendering(
+  terminal: Terminal,
+  requestRender: () => void,
+) {
+  // In ghostty-web 0.4.0 this method is empty: selection changes rely on
+  // the permanent frame loop. Replace it while event-driven rendering is active.
+  const selection = terminalSelectionManager(terminal);
+  const originalRequestRender = selection?.requestRender;
+  if (selection) {
+    selection.requestRender = requestRender;
+  }
+  const scroll = terminal.onScroll(requestRender);
+  return () => {
+    scroll.dispose();
+    if (selection && originalRequestRender) {
+      selection.requestRender = originalRequestRender;
+    }
+  };
 }
 
 export function suspendGhosttyIdleRenderLoop(

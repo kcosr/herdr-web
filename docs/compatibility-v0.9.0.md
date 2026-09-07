@@ -2,7 +2,9 @@
 
 ## Scope
 
-Branch: `compat/herdr-v0.9.0`, based on main. The stable-endpoint experiment is
+The compatibility update began on `compat/herdr-v0.9.0`, based on main, and is
+committed on `feat/workspace-launch-context` with the launch-context follow-up.
+The stable-endpoint experiment is
 preserved separately as a named stash and `refs/archives/stable-endpoint-proof`
 (`6cb2baeb2905f6178e73d610830ce7c786dd2407`). It is not part of this update.
 
@@ -57,19 +59,28 @@ Browser tests used the terminal input textarea, word selection and clipboard
 permissions, the Shell/Create split dialog, and the Tabs sidebar pane row. No
 authentication was needed on the isolated loopback fixture.
 
+## Implemented follow-up: explicit workspace launch context
+
+New-space requests pass `source_workspace_id` from the active space on the selected
+bridge. Herdr applies its `terminal.new_cwd` policy using that source, rather than
+another client's workspace focus. Other directory policies remain unchanged.
+The follow-up passed the full check with 656 tests (143 compatibility, 148 bridge,
+360 web, and 5 development-runner tests), with build output isolated from production.
+
+If another client closes the source space before the request reaches Herdr, creation
+returns `workspace_not_found`. Refresh/select an existing space and retry. We do not
+silently retry without the source, which could launch in an unintended directory.
+
 ## Optional follow-up features (not implemented here)
 
-1. **Explicit workspace launch context:** pass `source_workspace_id` when creating
-   a workspace so the `follow` cwd policy uses the browser's selected workspace.
-   This is a small, useful improvement when several clients share a daemon.
-2. **Acknowledged agent submission:** offer an agent-aware composer action using
+1. **Acknowledged agent submission:** offer an agent-aware composer action using
    `agent.prompt`, with submission/wait/error feedback. Keep raw terminal input
    and Stage separate; upstream prompt acknowledgment does not automatically apply
    to today's WebSocket keystrokes.
-3. **Server-backed history search/copy:** the new selection/copy/search methods are
+2. **Server-backed history search/copy:** the new selection/copy/search methods are
    JSON APIs, not endpoint-only. They require synchronized content revisions and
    terminal coordinates, so this deserves a separate history/search design.
-4. **Muse icon/presentation:** detection can flow through existing generic agent
+3. **Muse icon/presentation:** detection can flow through existing generic agent
    fields; a dedicated icon is optional if Muse is used.
 
 Daemon-side detection, foreground-directory, and idle scrollback-compression

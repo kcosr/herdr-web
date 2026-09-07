@@ -71,3 +71,6 @@ This inherits the source space's directory as resolved by Herdr (its active tab'
 pane, or the space's seed directory).
 Other Herdr directory policies remain in effect; the browser does not override `cwd`.
 When there is no active space, Herdr chooses its default source.
+If another client closes the source space before creation, Herdr rejects the request;
+refresh/select an existing space and retry. The browser does not silently switch the
+launch directory by retrying without a source.

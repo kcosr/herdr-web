@@ -1,8 +1,6 @@
 # Changelog
 
-## [Unreleased]
-
-### Breaking Changes
+## [0.5.2] - 2026-09-07
 
 ### Added
 
@@ -14,8 +12,6 @@
   before sending it, without changing desktop terminal selection, scrolling, or cursor
   behavior. [PR #82](https://github.com/kcosr/herdr-web/pull/82), contributed by
   [Andreas Ahrens (@AndreasAhrens)](https://github.com/AndreasAhrens).
-
-### Changed
 
 ### Fixed
 
@@ -52,8 +48,6 @@
   the PTY; Ctrl+C without a selection and Ctrl+C on macOS retain their normal interrupt behavior.
   [PR #84](https://github.com/kcosr/herdr-web/pull/84), contributed by
   [Andreas Ahrens (@AndreasAhrens)](https://github.com/AndreasAhrens).
-
-### Removed
 
 ## [0.5.1] - 2026-09-04
 

@@ -5937,6 +5937,23 @@ mod tests {
     }
 
     #[test]
+    fn workspace_create_preserves_explicit_source_without_widening_launch_permissions() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "method": "workspace.create",
+            "params": { "focus": true, "source_workspace_id": "ws_selected" }
+        }))
+        .unwrap();
+        assert!(validate_web_command(&request.method).is_ok());
+        let Method::WorkspaceCreate(mut params) = request.method else {
+            panic!("expected workspace.create");
+        };
+        assert_eq!(params.source_workspace_id.as_deref(), Some("ws_selected"));
+        params.cwd = Some("/tmp".into());
+        assert!(validate_web_command(&Method::WorkspaceCreate(params)).is_err());
+    }
+
+    #[test]
     fn validates_narrow_workspace_and_tab_create_commands() {
         let request: Request = serde_json::from_value(serde_json::json!({
             "id": "test",

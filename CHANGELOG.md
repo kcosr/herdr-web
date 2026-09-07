@@ -15,6 +15,8 @@
 
 ### Fixed
 
+- Use the browser's active space as the source for new-space launch directories,
+  respecting Herdr's `terminal.new_cwd` policy instead of another client's focus.
 - Require explicit confirmation before closing a primary workspace and its related workspaces.
 - Subscribe to live agent activity before establishing the initial status snapshot.
 

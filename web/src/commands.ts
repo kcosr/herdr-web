@@ -91,7 +91,11 @@ export function createdPaneId(result: CommandResult): string | null {
 
 export function createCommands(httpUrl: BridgeHttpUrl = sameOriginHttpUrl) {
   const api = {
-    createWorkspace: () => runCommand(httpUrl, "workspace.create", { focus: true }),
+    createWorkspace: (sourceWorkspaceId?: string) =>
+      runCommand(httpUrl, "workspace.create", {
+        focus: true,
+        source_workspace_id: sourceWorkspaceId,
+      }),
     renameWorkspace: (workspaceId: string, label: string | null) =>
       runCommand(httpUrl, "workspace.rename", { workspace_id: workspaceId, label }),
     closeWorkspace: (workspaceId: string, closeGroup: boolean = false) =>

@@ -3936,7 +3936,11 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
           onBackendSettings={() => setBackendSettingsOpen(true)}
           onCreateSpace={() =>
             selectedRuntime && selectedCommands
-              ? void exec(selectedRuntime, () => selectedCommands.createWorkspace(), true)
+              ? void exec(
+                  selectedRuntime,
+                  () => selectedCommands.createWorkspace(activeSpace?.workspace_id),
+                  true,
+                )
               : setError("Bridge is not ready")
           }
           onCreateTab={(bridgeId, workspaceId) =>

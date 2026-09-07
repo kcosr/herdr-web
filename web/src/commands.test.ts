@@ -36,6 +36,32 @@ describe("command helpers", () => {
     );
   });
 
+  it("creates a workspace using the selected bridge and explicit source workspace", async () => {
+    const requests: unknown[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      requests.push({ input, body: JSON.parse(String(init?.body)) });
+      return new Response(JSON.stringify({ type: "ok" }), { status: 200 });
+    });
+
+    const remote = createCommands((path) => `http://remote:4000${path}`);
+    await remote.createWorkspace("space-selected");
+    await remote.createWorkspace();
+
+    expect(requests).toEqual([
+      {
+        input: "http://remote:4000/api/command",
+        body: {
+          method: "workspace.create",
+          params: { focus: true, source_workspace_id: "space-selected" },
+        },
+      },
+      {
+        input: "http://remote:4000/api/command",
+        body: { method: "workspace.create", params: { focus: true } },
+      },
+    ]);
+  });
+
   it("clears workspace and tab names with null labels", async () => {
     const requests: unknown[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {

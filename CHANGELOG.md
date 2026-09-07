@@ -50,7 +50,8 @@
 
 - Fixed desktop terminal copy shortcuts so copying selected text no longer also sends Ctrl+C to
   the PTY; Ctrl+C without a selection and Ctrl+C on macOS retain their normal interrupt behavior.
-  [PR #84](https://github.com/kcosr/herdr-web/pull/84).
+  [PR #84](https://github.com/kcosr/herdr-web/pull/84), contributed by
+  [Andreas Ahrens (@AndreasAhrens)](https://github.com/AndreasAhrens).
 
 ### Removed
 

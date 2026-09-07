@@ -5,6 +5,7 @@
 ### Breaking Changes
 
 - Require Herdr v0.9.0 or newer with terminal protocol 22.
+  [PR #88](https://github.com/kcosr/herdr-web/pull/88).
 
 ### Added
 
@@ -12,13 +13,17 @@
 
 - Refresh the minimal Herdr compatibility code for v0.9.0 while retaining the existing
   per-terminal ANSI rendering, browser input, and shared-view behavior.
+  [PR #88](https://github.com/kcosr/herdr-web/pull/88).
 
 ### Fixed
 
 - Use the browser's active space as the source for new-space launch directories,
   respecting Herdr's `terminal.new_cwd` policy instead of another client's focus.
+  [PR #88](https://github.com/kcosr/herdr-web/pull/88).
 - Require explicit confirmation before closing a primary workspace and its related workspaces.
+  [PR #88](https://github.com/kcosr/herdr-web/pull/88).
 - Subscribe to live agent activity before establishing the initial status snapshot.
+  [PR #88](https://github.com/kcosr/herdr-web/pull/88).
 
 ### Removed
 

@@ -50,6 +50,7 @@ fn request_uses_dot_method_names() {
     let request = Request {
         id: "req_1".into(),
         method: Method::WorkspaceCreate(WorkspaceCreateParams {
+            source_workspace_id: None,
             cwd: Some("/tmp".into()),
             focus: true,
             label: Some("api".into()),
@@ -59,6 +60,47 @@ fn request_uses_dot_method_names() {
 
     let json = serde_json::to_value(&request).unwrap();
     assert_eq!(json["method"], "workspace.create");
+}
+
+#[test]
+fn workspace_close_requires_explicit_group_intent_in_serialized_request() {
+    let request: Request = serde_json::from_value(serde_json::json!({
+        "id": "close",
+        "method": "workspace.close",
+        "params": { "workspace_id": "w1" }
+    }))
+    .unwrap();
+    assert!(matches!(&request.method, Method::WorkspaceClose(params) if !params.close_group));
+    assert!(serde_json::to_value(&request).unwrap()["params"]
+        .get("close_group")
+        .is_none());
+
+    let explicit = Request {
+        id: "close-group".into(),
+        method: Method::WorkspaceClose(WorkspaceCloseParams {
+            workspace_id: "w1".into(),
+            close_group: true,
+        }),
+    };
+    let json = serde_json::to_value(&explicit).unwrap();
+    assert_eq!(json["params"]["close_group"], true);
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), explicit);
+}
+
+#[test]
+fn workspace_create_forwards_explicit_source_workspace() {
+    let request: Request = serde_json::from_value(serde_json::json!({
+        "id": "create",
+        "method": "workspace.create",
+        "params": { "source_workspace_id": "w1", "focus": true }
+    }))
+    .unwrap();
+    assert!(matches!(&request.method, Method::WorkspaceCreate(params)
+        if params.source_workspace_id.as_deref() == Some("w1")));
+    assert_eq!(
+        serde_json::to_value(request).unwrap()["params"]["source_workspace_id"],
+        "w1"
+    );
 }
 
 #[test]
@@ -102,6 +144,7 @@ fn agent_start_and_prompt_requests_round_trip() {
             target: "reviewer".into(),
             text: "review this".into(),
             wait: Some(AgentPromptWaitOptions {
+                submission_deadline: None,
                 until: vec![AgentStatus::Idle, AgentStatus::Done],
                 timeout_ms: Some(120_000),
             }),
@@ -612,6 +655,9 @@ fn success_response_round_trips() {
             capabilities: Some(ServerCapabilities {
                 live_handoff: true,
                 detached_server_daemon: true,
+                endpoint_protocol_generation: Some(1),
+                surface_interest: true,
+                health_check: true,
             }),
         },
     };

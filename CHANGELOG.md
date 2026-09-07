@@ -4,11 +4,19 @@
 
 ### Breaking Changes
 
+- Require Herdr v0.9.0 or newer with terminal protocol 22.
+
 ### Added
 
 ### Changed
 
+- Refresh the minimal Herdr compatibility code for v0.9.0 while retaining the existing
+  per-terminal ANSI rendering, browser input, and shared-view behavior.
+
 ### Fixed
+
+- Require explicit confirmation before closing a primary workspace and its related workspaces.
+- Subscribe to live agent activity before establishing the initial status snapshot.
 
 ### Removed
 

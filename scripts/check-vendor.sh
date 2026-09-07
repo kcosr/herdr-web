@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPAT="$ROOT/vendor/herdr-compat"
-EXPECTED_HERDR_COMMIT="346411fa21afd297f5ed3b3fa56f9e3fbf7654b7"
+EXPECTED_HERDR_COMMIT="b99002ac99b09e00b4ca692436cb15a6b0d676f1"
 
 if ! command -v rg >/dev/null; then
   echo "ripgrep (rg) is required for vendor checks" >&2
@@ -19,6 +19,7 @@ required=(
   "$COMPAT/src/api/schema"
   "$COMPAT/src/api/schema/agents.rs"
   "$COMPAT/src/api/schema/common.rs"
+  "$COMPAT/src/api/schema/commands.rs"
   "$COMPAT/src/api/schema/events.rs"
   "$COMPAT/src/api/schema/integrations.rs"
   "$COMPAT/src/api/schema/panes.rs"
@@ -36,6 +37,8 @@ required=(
   "$COMPAT/src/popup_size.rs"
   "$COMPAT/src/protocol.rs"
   "$COMPAT/src/protocol/wire.rs"
+  "$COMPAT/src/protocol/wire/upstream_wire_tests.rs"
+  "$COMPAT/src/terminal_theme.rs"
   "$COMPAT/src/raw_input.rs"
   "$COMPAT/src/server/socket_paths.rs"
 )
@@ -59,7 +62,7 @@ if rg -n '#\[path[[:space:]]*=' "$ROOT/bridge" "$COMPAT" >/dev/null; then
 fi
 
 if rg -n '\bcustom_status\b' "$COMPAT" >/dev/null; then
-  echo "obsolete custom_status fields are not allowed in the Herdr 0.8.0 compatibility copy" >&2
+  echo "obsolete custom_status fields are not allowed in the Herdr 0.9.0 compatibility copy" >&2
   rg -n '\bcustom_status\b' "$COMPAT" >&2
   exit 1
 fi
@@ -84,13 +87,13 @@ if [[ -n "${HERDR_SRC:-}" ]]; then
 
   upstream_commit="$(git -C "$HERDR_SRC" rev-parse HEAD 2>/dev/null || true)"
   if [[ "$upstream_commit" != "$EXPECTED_HERDR_COMMIT" ]]; then
-    echo "HERDR_SRC must be a Herdr v0.8.0 checkout at $EXPECTED_HERDR_COMMIT" >&2
+    echo "HERDR_SRC must be a Herdr v0.9.0 checkout at $EXPECTED_HERDR_COMMIT" >&2
     echo "found: ${upstream_commit:-not a git checkout}" >&2
     exit 1
   fi
 
   if [[ -n "$(git -C "$HERDR_SRC" status --short)" ]]; then
-    echo "HERDR_SRC must be a clean Herdr v0.8.0 checkout" >&2
+    echo "HERDR_SRC must be a clean Herdr v0.9.0 checkout" >&2
     git -C "$HERDR_SRC" status --short >&2
     exit 1
   fi
@@ -106,6 +109,8 @@ if [[ -n "${HERDR_SRC:-}" ]]; then
   }
 
   compare_wire_body() {
+    # Production wire definitions remain exact. Tests live in a separate local
+    # module so host keyboard-encoder tests do not pull terminal runtime into the shim.
     local wire_file
     for wire_file in "$HERDR_SRC/src/protocol/wire.rs" "$COMPAT/src/protocol/wire.rs"; do
       if ! grep -q '^use std::collections::HashMap;' "$wire_file"; then
@@ -114,13 +119,13 @@ if [[ -n "${HERDR_SRC:-}" ]]; then
       fi
     done
     if ! diff -q \
-      <(awk 'seen || /^use std::collections::HashMap;/{seen=1} seen {print}' "$HERDR_SRC/src/protocol/wire.rs") \
-      <(awk 'seen || /^use std::collections::HashMap;/{seen=1} seen {print}' "$COMPAT/src/protocol/wire.rs") \
+      <(awk '/^#\[cfg\(test\)\]$/{exit} seen || /^use std::collections::HashMap;/{seen=1} seen {print}' "$HERDR_SRC/src/protocol/wire.rs") \
+      <(awk '/^#\[cfg\(test\)\]$/{exit} seen || /^use std::collections::HashMap;/{seen=1} seen {print}' "$COMPAT/src/protocol/wire.rs") \
       >/dev/null; then
       echo "Herdr protocol wire copy drifted from HERDR_SRC" >&2
       diff -u \
-        <(awk 'seen || /^use std::collections::HashMap;/{seen=1} seen {print}' "$HERDR_SRC/src/protocol/wire.rs") \
-        <(awk 'seen || /^use std::collections::HashMap;/{seen=1} seen {print}' "$COMPAT/src/protocol/wire.rs") \
+        <(awk '/^#\[cfg\(test\)\]$/{exit} seen || /^use std::collections::HashMap;/{seen=1} seen {print}' "$HERDR_SRC/src/protocol/wire.rs") \
+        <(awk '/^#\[cfg\(test\)\]$/{exit} seen || /^use std::collections::HashMap;/{seen=1} seen {print}' "$COMPAT/src/protocol/wire.rs") \
         | sed -n '1,120p' >&2
       exit 1
     fi
@@ -162,9 +167,10 @@ if [[ -n "${HERDR_SRC:-}" ]]; then
   done < <(find "$HERDR_SRC/src/api/schema" -maxdepth 1 -type f -name '*.rs' -print0)
   compare_popup_size
   compare_wire_body
+  compare_exact "src/input/model.rs" "src/input.rs"
 
-  echo "Herdr v0.8.0 compatibility vendor layout and HERDR_SRC drift checks passed"
+  echo "Herdr v0.9.0 compatibility vendor layout and HERDR_SRC drift checks passed"
 else
-  echo "Herdr v0.8.0 compatibility vendor layout looks clean"
-  echo "Set HERDR_SRC=/path/to/clean/herdr-v0.8.0 to compare exact upstream schema/wire copies"
+  echo "Herdr v0.9.0 compatibility vendor layout looks clean"
+  echo "Set HERDR_SRC=/path/to/clean/herdr-v0.9.0 to compare exact upstream schema/wire copies"
 fi

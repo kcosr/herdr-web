@@ -1,7 +1,8 @@
 # Vendoring Herdr Compatibility
 
 `herdr-web` vendors a small Herdr compatibility crate because the bridge depends on private API and
-wire protocol details that are not exposed as a stable Herdr library or daemon API.
+wire protocol details needed for its existing per-terminal ANSI attach behavior. Herdr v0.9.0 also
+provides stable whole-tab endpoints, but this bridge deliberately retains the pane-oriented ANSI path.
 
 ## What Is Vendored
 
@@ -32,8 +33,9 @@ The browser app is not vendored into Herdr. It lives at `web/`, and `herdr-web-b
 ## Current Reference
 
 - Upstream checkout: a clean Herdr source checkout outside this repository
-- Upstream release baseline: `v0.8.2`
-- Terminal wire baseline: protocol `20`
+- Upstream release baseline: `v0.9.0`
+- Terminal wire baseline: protocol `22`
+- Upstream commit: `b99002ac99b09e00b4ca692436cb15a6b0d676f1`
 
 Use the upstream checkout as an external reference for audits and refreshes. It is not required to
 build `herdr-web`.
@@ -47,7 +49,7 @@ The bridge needs private pieces from Herdr:
 - `protocol::{ClientMessage, ServerMessage, RenderEncoding, ...}`
 - local IPC socket helpers
 - protocol version constants
-- terminal attach launch mode, resize, scroll, and input frames
+- direct terminal handshake, resize, scroll, and input frames
 
 Vendoring only `vendor/herdr-compat` keeps these dependencies explicit without carrying the full
 Herdr app, website, CI, terminal runtime build path, or legacy `herdr web-bridge` overlay. The cost
@@ -62,7 +64,7 @@ bridge narrows the drift check to only the terminal attach message regions.
 
 ## Refresh Process
 
-Use a clean Herdr checkout at the reviewed `v0.8.2` release tag as the source reference. Do not
+Use a clean Herdr checkout at the reviewed `v0.9.0` release tag as the source reference. Do not
 refresh from an experimental tree that may contain unrelated local drift. Copy the reviewed
 upstream source files into the minimal compatibility crate; do not make the bridge compile against
 the external checkout or recreate a full upstream vendor snapshot.
@@ -87,7 +89,7 @@ src/api/status.rs          -> vendor/herdr-compat/src/api/status.rs
 src/api/schema.rs          -> vendor/herdr-compat/src/api/schema.rs
 src/api/schema/*.rs        -> vendor/herdr-compat/src/api/schema/*.rs
 src/protocol/wire.rs       -> vendor/herdr-compat/src/protocol/wire.rs
-src/input/model.rs         -> vendor/herdr-compat/src/input.rs (minimal protocol shim)
+src/input/model.rs         -> vendor/herdr-compat/src/input.rs (pure input model)
 src/raw_input.rs           -> vendor/herdr-compat/src/raw_input.rs (minimal protocol shim)
 src/ipc.rs                 -> vendor/herdr-compat/src/ipc.rs
 src/logging.rs             -> vendor/herdr-compat/src/logging.rs
@@ -106,8 +108,11 @@ src/server/socket_paths.rs -> vendor/herdr-compat/src/server/socket_paths.rs
 - `PopupSize` is public in the compatibility crate because copied public plugin schema fields expose
   it, while upstream keeps the type crate-visible inside the full Herdr crate. This visibility-only
   adaptation is expected by the vendor drift check.
-- `input.rs` and `raw_input.rs` retain only the model surface required by the copied wire protocol;
-  terminal parsing and host input behavior remain owned by Herdr.
+- `input.rs` contains the upstream pure input model. Small config/terminal-theme shims satisfy
+  shared wire types; terminal parsing and rendering remain owned by Herdr.
+- Upstream wire serialization tests live in `protocol/wire/upstream_wire_tests.rs`; two tests requiring
+  the native terminal key encoder are excluded. The production wire body remains exact and
+  separately checked against the tagged source.
 - `protocol.rs` and schema tests include bridge fixture tests for the reviewed protocol/schema
   baseline.
 
@@ -119,7 +124,7 @@ HERDR_SRC="$HERDR_SRC" scripts/check-vendor.sh
 ```
 
 The optional `HERDR_SRC` mode exact-compares unmodified schema files and the terminal wire protocol
-body. Locally adapted files are intentionally excluded from exact comparison and must be reviewed
+production body (excluding the upstream test module). Locally adapted files are intentionally excluded from exact comparison and must be reviewed
 manually during refresh. `PopupSize` is compared with only the documented visibility adaptation
 allowed.
 
@@ -142,8 +147,8 @@ the refit button after changing browser sizes.
 
 ## Compatibility Policy
 
-The bridge pings Herdr's status API at startup and requires Herdr `v0.8.2` or newer with daemon
-protocol exactly `20`. Older daemons and any unreviewed newer protocol are rejected before serving
+The bridge pings Herdr's status API at startup and requires Herdr `v0.9.0` or newer with daemon
+protocol exactly `22`. Older daemons and any unreviewed newer protocol are rejected before serving
 the web app. The version floor covers the private JSON API shape, including the managed
 `agent.start` contract; the exact protocol check protects the copied bincode terminal wire format.
 This is not a complete stability guarantee because the bridge mirrors private APIs.

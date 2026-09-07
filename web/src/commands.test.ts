@@ -72,6 +72,22 @@ describe("command helpers", () => {
     ]);
   });
 
+  it("closes workspace groups only with explicit authorization", async () => {
+    const requests: unknown[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      requests.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ type: "ok" }), { status: 200 });
+    });
+
+    await commands.closeWorkspace("space-1");
+    await commands.closeWorkspace("space-1", true);
+
+    expect(requests).toEqual([
+      { method: "workspace.close", params: { workspace_id: "space-1", close_group: false } },
+      { method: "workspace.close", params: { workspace_id: "space-1", close_group: true } },
+    ]);
+  });
+
   it("launches presets through the bridge-owned launch endpoint", async () => {
     const requests: unknown[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {

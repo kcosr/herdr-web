@@ -12,5 +12,6 @@ pub mod protocol;
 pub mod raw_input;
 pub mod server;
 pub mod sound;
+pub mod terminal_theme;
 
 pub use interprocess::TryClone;

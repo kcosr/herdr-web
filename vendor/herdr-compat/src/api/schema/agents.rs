@@ -37,6 +37,9 @@ pub struct AgentPromptWaitOptions {
     pub until: Vec<AgentStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub(crate) submission_deadline: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

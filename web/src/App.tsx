@@ -1,4 +1,5 @@
 import { CommandDraftContext, createCommandDraftStore } from "./commandDrafts";
+import { linkedWorkspaceLabels } from "./workspaceClose";
 import {
   Activity,
   Archive,
@@ -402,6 +403,7 @@ type DialogState = {
   id: string;
   label: string;
   clearable?: boolean;
+  linkedWorkspaceLabels?: string[];
 };
 type DisplayPrefs = {
   hostScope: HostScope;
@@ -3642,7 +3644,10 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
     if (key === "rename") {
       setDialog({ mode: "rename", kind, bridgeId, id, label, clearable });
     } else if (key === "close") {
-      setDialog({ mode: "close", kind, bridgeId, id, label });
+      const linkedLabels = kind === "space"
+        ? linkedWorkspaceLabels(connectionRefs.current[bridgeId]?.snapshot?.workspaces ?? [], id)
+        : [];
+      setDialog({ mode: "close", kind, bridgeId, id, label, linkedWorkspaceLabels: linkedLabels });
     } else if (key === "newtab") {
       setSelectedBridgeId(bridgeId);
       setActiveWorkspaceRefState({ bridgeId, workspaceId: id });
@@ -3727,7 +3732,7 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
     }
     const action =
       kind === "space"
-        ? () => commands.closeWorkspace(id)
+        ? () => commands.closeWorkspace(id, Boolean(dialog.linkedWorkspaceLabels?.length))
         : kind === "tab"
           ? () => commands.closeTab(id)
           : () => commands.closePane(id);
@@ -4365,9 +4370,9 @@ function AppContent({ commandDrafts }: { commandDrafts: ReturnType<typeof create
 
       {dialog?.mode === "close" ? (
         <ConfirmDialog
-          title={closeCopy(dialog.kind).title}
-          message={closeCopy(dialog.kind).message}
-          confirmLabel={closeCopy(dialog.kind).confirm}
+          title={closeCopy(dialog.kind, dialog.linkedWorkspaceLabels).title}
+          message={closeCopy(dialog.kind, dialog.linkedWorkspaceLabels).message}
+          confirmLabel={closeCopy(dialog.kind, dialog.linkedWorkspaceLabels).confirm}
           busy={busy}
           onCancel={() => setDialog(null)}
           onConfirm={confirmClose}
@@ -9525,7 +9530,14 @@ export function menuItems(
   return paneItems;
 }
 
-function closeCopy(kind: MenuKind) {
+export function closeCopy(kind: MenuKind, linkedLabels: readonly string[] = []) {
+  if (kind === "space" && linkedLabels.length > 0) {
+    return {
+      title: "Close workspace group?",
+      message: `This closes this space and all linked worktree spaces (${linkedLabels.join(", ")}), including every tab and pane in the group.`,
+      confirm: "Close entire group",
+    };
+  }
   switch (kind) {
     case "space":
       return {

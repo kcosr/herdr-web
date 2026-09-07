@@ -2,6 +2,14 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// Minimal action model needed by the copied wire conversion helpers.
+pub enum CustomCommandAction {
+    Shell,
+    Pane,
+    Popup,
+    PluginAction,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum ToastHerdrPosition {

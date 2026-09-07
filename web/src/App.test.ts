@@ -11,6 +11,7 @@ import {
   buildVisibleTabEntries,
   buildVisibleTabWorkspaceGroups,
   canAddNoteFromPaneMenu,
+  closeCopy,
   filterCollapsedAgentPaneEntries,
   filterCollapsedTabEntries,
   mergeCreatedPaneNoteList,
@@ -50,6 +51,22 @@ import {
 import type { AgentStatus, PaneInfo, Snapshot, TabInfo, WorkspaceInfo } from "./types";
 import { notesForPane } from "./notes";
 import type { PaneNote } from "./notes";
+
+describe("close confirmation", () => {
+  it("explicitly warns that the whole linked workspace group will close", () => {
+    expect(closeCopy("space", ["feature-a", "feature-b"])).toEqual({
+      title: "Close workspace group?",
+      message: "This closes this space and all linked worktree spaces (feature-a, feature-b), including every tab and pane in the group.",
+      confirm: "Close entire group",
+    });
+  });
+
+  it("keeps ordinary space, tab and pane confirmations scoped to their target", () => {
+    expect(closeCopy("space").confirm).toBe("Close space");
+    expect(closeCopy("tab", ["unrelated"]).title).toBe("Close tab?");
+    expect(closeCopy("pane", ["unrelated"]).title).toBe("Close pane?");
+  });
+});
 
 describe("App connection guards", () => {
   it("hides snapshots from stale backend connections", () => {

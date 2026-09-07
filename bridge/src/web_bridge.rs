@@ -41,9 +41,8 @@ use herdr_compat::api::schema::{
     SubscriptionEventKind, TabCreateParams, TabInfo, TabListParams, TabTarget, WorkspaceInfo,
 };
 use herdr_compat::protocol::{
-    self, AttachScrollDirection, AttachScrollSource, ClientKeybindings, ClientLaunchMode,
-    ClientMessage, RenderEncoding, ServerMessage, MAX_FRAME_SIZE, MAX_GRAPHICS_FRAME_SIZE,
-    PROTOCOL_VERSION,
+    self, AttachScrollDirection, AttachScrollSource, ClientMessage, RenderEncoding, ServerMessage,
+    MAX_FRAME_SIZE, MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
 };
 
 use crate::agent_activity::{AgentActivityListResponse, AgentActivityManager};
@@ -63,8 +62,8 @@ const DEFAULT_PORT: u16 = 8787;
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 const DEFAULT_STATIC_DIR: &str = "web/dist";
-const MIN_HERDR_VERSION: (u64, u64, u64) = (0, 8, 2);
-const MIN_HERDR_VERSION_LABEL: &str = "0.8.2";
+const MIN_HERDR_VERSION: (u64, u64, u64) = (0, 9, 0);
+const MIN_HERDR_VERSION_LABEL: &str = "0.9.0";
 const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 const MAX_NOTES_REQUEST_BYTES: usize = 512 * 1024;
 const MAX_TERMINAL_INPUT_CHUNK_BYTES: usize = 768 * 1024;
@@ -2269,6 +2268,7 @@ fn launch_builtin_shell_split(
             cwd: None,
             focus: true,
             env: HashMap::new(),
+            right_click: Default::default(),
         }),
     )?;
     let ResponseResult::PaneInfo { pane } = result else {
@@ -2348,6 +2348,7 @@ fn launch_managed_agent_split(
             cwd: None,
             focus: true,
             env: HashMap::new(),
+            right_click: Default::default(),
         }),
     )?;
     let ResponseResult::PaneInfo { pane } = result else {
@@ -3515,6 +3516,7 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
         rows,
         cell_width_px: 0,
         cell_height_px: 0,
+        pixel_mouse: false,
     });
 
     loop {
@@ -4066,28 +4068,17 @@ fn run_agent_activity_subscription(
     resubscribe_rx: &mpsc::Receiver<()>,
 ) -> Result<(), BridgeError> {
     drain_resubscribe_signals(resubscribe_rx);
+    // Discover targets first; this is not the authoritative activity baseline.
     let panes = current_panes(&state.api)?;
-    observe_agent_activity_snapshot(state, &panes);
     let pane_ids = sorted_pane_ids(&panes);
     if pane_ids.is_empty() {
         wait_for_resubscribe_signal(resubscribe_rx)?;
         return Ok(());
     }
-    let request = Request {
-        id: "herdr-web:activity".to_string(),
-        method: Method::EventsSubscribe(EventsSubscribeParams {
-            subscriptions: activity_subscriptions(&pane_ids),
-        }),
+    let Some((baseline, mut stream)) = open_activity_subscription(&state.api, &pane_ids)? else {
+        return Ok(());
     };
-    let (ack, mut stream) = state.api.subscribe_value(&request, None)?;
-    let response = herdr_compat::api::client::parse_response_value(ack)?;
-    if !matches!(response.result, ResponseResult::SubscriptionStarted {}) {
-        return Err(BridgeError::Protocol(format!(
-            "unexpected subscription response: {:?}",
-            response.result
-        )));
-    }
-    stream.set_read_timeout(ACTIVITY_READ_TIMEOUT)?;
+    observe_agent_activity_snapshot(state, &baseline);
 
     loop {
         if drain_resubscribe_signals(resubscribe_rx) {
@@ -4126,6 +4117,36 @@ fn run_agent_activity_subscription(
             Err(err) => return Err(err.into()),
         }
     }
+}
+
+fn open_activity_subscription(
+    api: &ApiClient,
+    pane_ids: &[String],
+) -> Result<Option<(Vec<PaneInfo>, herdr_compat::api::client::EventStream)>, BridgeError> {
+    let request = Request {
+        id: "herdr-web:activity".to_string(),
+        method: Method::EventsSubscribe(EventsSubscribeParams {
+            subscriptions: activity_subscriptions(pane_ids),
+        }),
+    };
+    let (ack, stream) = api.subscribe_value(&request, None)?;
+    let response = herdr_compat::api::client::parse_response_value(ack)?;
+    if !matches!(response.result, ResponseResult::SubscriptionStarted {}) {
+        return Err(BridgeError::Protocol(format!(
+            "unexpected subscription response: {:?}",
+            response.result
+        )));
+    }
+    stream.set_read_timeout(ACTIVITY_READ_TIMEOUT)?;
+
+    // v0.9 subscriptions are live-only. Snapshot only after the subscription is
+    // acknowledged, then consume the buffered stream in order. If membership
+    // changed while subscribing, restart with the new targets before publishing.
+    let baseline = current_panes(api)?;
+    if activity_resubscribe_needed(pane_ids, &baseline) {
+        return Ok(None);
+    }
+    Ok(Some((baseline, stream)))
 }
 
 fn sorted_pane_ids(panes: &[PaneInfo]) -> Vec<String> {
@@ -4338,6 +4359,7 @@ fn handle_terminal_text_frame(write_tx: &TerminalWriter, text: &str) -> Result<(
                 rows,
                 cell_width_px,
                 cell_height_px,
+                pixel_mouse: false,
             })
             .map(|_| ())
             .map_err(|_| "terminal writer closed".to_string()),
@@ -4379,15 +4401,13 @@ fn open_terminal_attach(
     let mut stream = herdr_compat::ipc::connect_local_stream(&client_socket_path)?;
     protocol::write_message(
         &mut stream,
-        &ClientMessage::Hello {
+        &ClientMessage::TerminalHello {
             version: protocol_version,
             cols,
             rows,
             cell_width_px: 0,
             cell_height_px: 0,
-            requested_encoding: RenderEncoding::TerminalAnsi,
-            keybindings: ClientKeybindings::Server,
-            launch_mode: ClientLaunchMode::TerminalAttach,
+            pixel_mouse: false,
         },
     )
     .map_err(|err| BridgeError::Protocol(err.to_string()))?;
@@ -4395,7 +4415,11 @@ fn open_terminal_attach(
     let welcome: ServerMessage = protocol::read_message(&mut stream, MAX_FRAME_SIZE)
         .map_err(|err| BridgeError::Protocol(err.to_string()))?;
     match welcome {
-        ServerMessage::Welcome { error: None, .. } => {}
+        ServerMessage::Welcome {
+            version,
+            encoding: RenderEncoding::TerminalAnsi,
+            error: None,
+        } if version == protocol_version => {}
         ServerMessage::Welcome {
             error: Some(error), ..
         } => return Err(BridgeError::Protocol(error)),
@@ -4483,9 +4507,15 @@ fn open_terminal_attach(
                 | ServerMessage::WindowTitle { .. }
                 | ServerMessage::ReloadSoundConfig
                 | ServerMessage::MouseCapture { .. }
-                | ServerMessage::KittyKeyboardReportAll { .. }
-                | ServerMessage::PrefixInputSource { .. }
-                | ServerMessage::Frame(_)
+                | ServerMessage::DirectTerminalKeyboardProtocol { .. }
+                | ServerMessage::ClientShellKeyboardReportAll { .. }
+                | ServerMessage::ClientShellSnapshot(_)
+                | ServerMessage::PaneSurface(_)
+                | ServerMessage::PaneSurfacePatch(_)
+                | ServerMessage::SemanticNotification(_)
+                | ServerMessage::ClientShellError { .. }
+                | ServerMessage::ClientShellEndpointResponseChunk { .. }
+                | ServerMessage::EndpointControl { .. }
                 | ServerMessage::Graphics { .. }
                 | ServerMessage::TerminalBell { .. }
                 | ServerMessage::GraphicsFile { .. }
@@ -5149,7 +5179,7 @@ mod tests {
             let (mut sock, _) = listener.accept().unwrap();
             sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             let hello: ClientMessage = protocol::read_message(&mut sock, MAX_FRAME_SIZE).unwrap();
-            assert!(matches!(hello, ClientMessage::Hello { .. }));
+            assert!(matches!(hello, ClientMessage::TerminalHello { .. }));
             protocol::write_message(
                 &mut sock,
                 &ServerMessage::Welcome {
@@ -5318,6 +5348,102 @@ mod tests {
         assert!(activity_resubscribe_needed(&current, &[]));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn activity_bootstrap_subscribes_before_baseline_and_rechecks_membership() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::{UnixListener, UnixStream};
+
+        for membership_changed in [false, true] {
+            let socket_path = PathBuf::from(format!(
+                "/tmp/herdr-activity-{}-{}.sock",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let listener = UnixListener::bind(&socket_path).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let daemon = thread::spawn(move || {
+                let accept_request = || {
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    let socket = loop {
+                        match listener.accept() {
+                            Ok((socket, _)) => break socket,
+                            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                                assert!(Instant::now() < deadline, "API request timed out");
+                                thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(err) => panic!("accept failed: {err}"),
+                        }
+                    };
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut line = String::new();
+                    BufReader::new(socket.try_clone().unwrap())
+                        .read_line(&mut line)
+                        .unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    (socket, request)
+                };
+                let respond = |socket: &mut UnixStream, request: &serde_json::Value, result| {
+                    writeln!(
+                        socket,
+                        "{}",
+                        serde_json::json!({
+                            "id": request["id"], "result": result,
+                        })
+                    )
+                    .unwrap();
+                };
+                let (mut subscription, request) = accept_request();
+                assert_eq!(request["method"], "events.subscribe");
+                respond(
+                    &mut subscription,
+                    &request,
+                    serde_json::json!({"type": "subscription_started"}),
+                );
+                // An event arriving during the snapshot must remain readable.
+                writeln!(subscription, "{}", serde_json::json!({
+                    "event": "pane.agent_status_changed",
+                    "data": {"pane_id": "pane-1", "workspace_id": "workspace-1", "agent_status": "working"}
+                })).unwrap();
+                let (mut snapshot, request) = accept_request();
+                assert_eq!(request["method"], "pane.list");
+                let mut pane = test_pane(if membership_changed {
+                    "pane-2"
+                } else {
+                    "pane-1"
+                });
+                pane.agent_status = AgentStatus::Working;
+                respond(
+                    &mut snapshot,
+                    &request,
+                    serde_json::to_value(ResponseResult::PaneList { panes: vec![pane] }).unwrap(),
+                );
+            });
+
+            let api = ApiClient::for_socket_path(socket_path.clone());
+            let result = open_activity_subscription(&api, &["pane-1".to_string()]);
+            daemon.join().unwrap();
+            std::fs::remove_file(socket_path).unwrap();
+            let result = result.unwrap();
+            if membership_changed {
+                assert!(
+                    result.is_none(),
+                    "changed targets must trigger resubscription"
+                );
+            } else {
+                let (baseline, mut stream) = result.unwrap();
+                assert_eq!(baseline[0].agent_status, AgentStatus::Working);
+                let event = stream.next_value().unwrap().unwrap();
+                assert_eq!(event["event"], "pane.agent_status_changed");
+            }
+        }
+    }
+
     #[test]
     fn web_snapshot_adapter_preserves_web_shape_and_clear_name_flags() {
         let snapshot =
@@ -5459,7 +5585,7 @@ mod tests {
 
     fn test_session_snapshot() -> SessionSnapshot {
         SessionSnapshot {
-            version: "0.8.2".to_string(),
+            version: "0.9.0".to_string(),
             protocol: PROTOCOL_VERSION,
             focused_workspace_id: Some("workspace-1".to_string()),
             focused_tab_id: Some("tab-1".to_string()),
@@ -6117,7 +6243,7 @@ mod tests {
     #[test]
     fn daemon_status_accepts_minimum_version_and_exact_protocol() {
         assert_eq!(
-            validated_daemon_protocol(runtime_status("0.8.2", PROTOCOL_VERSION)).unwrap(),
+            validated_daemon_protocol(runtime_status("0.9.0", PROTOCOL_VERSION)).unwrap(),
             PROTOCOL_VERSION
         );
         assert_eq!(
@@ -6163,7 +6289,7 @@ mod tests {
 
     #[test]
     fn daemon_status_accepts_version_prefix_and_build_metadata() {
-        for version in ["v0.8.2", "0.8.2+linux-x86-64"] {
+        for version in ["v0.9.0", "0.9.0+linux-x86-64"] {
             assert_eq!(
                 validated_daemon_protocol(runtime_status(version, PROTOCOL_VERSION)).unwrap(),
                 PROTOCOL_VERSION
@@ -6172,8 +6298,8 @@ mod tests {
     }
 
     #[test]
-    fn daemon_status_rejects_version_before_0_8_2() {
-        for version in ["0.7.5", "0.8.0", "0.8.1"] {
+    fn daemon_status_rejects_version_before_0_9_0() {
+        for version in ["0.7.5", "0.8.0", "0.8.1", "0.8.2"] {
             let error = validated_daemon_protocol(runtime_status(version, PROTOCOL_VERSION))
                 .unwrap_err()
                 .to_string();
@@ -6200,14 +6326,14 @@ mod tests {
 
     #[test]
     fn daemon_status_rejects_any_other_protocol() {
-        let older = validated_daemon_protocol(runtime_status("0.8.2", PROTOCOL_VERSION - 1))
+        let older = validated_daemon_protocol(runtime_status("0.9.0", PROTOCOL_VERSION - 1))
             .unwrap_err()
             .to_string();
         assert!(older.contains("incompatible"));
         assert!(older.contains(&PROTOCOL_VERSION.to_string()));
 
         assert!(
-            validated_daemon_protocol(runtime_status("0.8.2", PROTOCOL_VERSION + 1))
+            validated_daemon_protocol(runtime_status("0.9.0", PROTOCOL_VERSION + 1))
                 .unwrap_err()
                 .to_string()
                 .contains("incompatible")

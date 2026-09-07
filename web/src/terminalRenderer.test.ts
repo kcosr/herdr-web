@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   handleTerminalCustomKeyEvent,
+  installTerminalInteractionRendering,
   renderGhosttyTerminalFrame,
   refreshTerminalFontRendering,
   shouldUseEventDrivenTerminalRendering,
@@ -8,6 +9,33 @@ import {
 } from "./terminalRenderer";
 
 describe("terminal event-driven rendering", () => {
+  it("redraws idle selections and scrolling and removes the hooks on disposal", () => {
+    const originalRequestRender = vi.fn();
+    const selectionManager = {
+      requestRender: originalRequestRender,
+      getSelectionCoords: vi.fn(),
+      getDirtySelectionRows: vi.fn(),
+    };
+    let onScroll: (() => void) | undefined;
+    const dispose = vi.fn();
+    const terminal = {
+      selectionManager,
+      onScroll: (callback: () => void) => {
+        onScroll = callback;
+        return { dispose };
+      },
+    } as never;
+    const redraw = vi.fn();
+    const cleanup = installTerminalInteractionRendering(terminal, redraw);
+    selectionManager.requestRender();
+    onScroll?.();
+    expect(redraw).toHaveBeenCalledTimes(2);
+    expect(originalRequestRender).not.toHaveBeenCalled();
+    cleanup();
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(selectionManager.requestRender).toBe(originalRequestRender);
+  });
+
   it("only enables the idle-loop workaround for a non-blinking Windows terminal", () => {
     expect(shouldUseEventDrivenTerminalRendering(false, "Win32")).toBe(true);
     expect(shouldUseEventDrivenTerminalRendering(true, "Win32")).toBe(false);

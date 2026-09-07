@@ -226,8 +226,6 @@ export function TerminalView({
   desktopCommandComposerRef.current = desktopCommandComposer;
   const mobileControlsRef = useRef(mobileControls);
   mobileControlsRef.current = mobileControls;
-  const cursorBlinkRef = useRef(cursorBlink);
-  cursorBlinkRef.current = cursorBlink;
   const terminalFontSizePxRef = useRef(terminalFontSizePx);
   terminalFontSizePxRef.current = terminalFontSizePx;
   const mobileTapTargetRef = useRef(mobileTapTarget);
@@ -513,7 +511,7 @@ export function TerminalView({
     rendererGenerationRef.current = generation;
     const renderer: TerminalRenderer = new GhosttyRenderer(
       terminalFontSizePxRef.current,
-      cursorBlinkRef.current,
+      cursorBlink,
     );
     rendererRef.current = renderer;
     setConnectionState("connecting");
@@ -630,6 +628,7 @@ export function TerminalView({
     };
   }, [
     connectionKey,
+    cursorBlink,
     clearQueuedTerminalInput,
     flushBatchedTerminalInput,
     focusCommandInput,

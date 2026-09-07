@@ -19,6 +19,10 @@
 
 ### Fixed
 
+- Redraw idle Windows terminal selections and scrolling with cursor blinking disabled,
+  and apply cursor-blink changes immediately to mounted terminals.
+  [PR #87](https://github.com/kcosr/herdr-web/pull/87).
+
 - Add a Terminal setting for cursor blinking and default it off on Windows. When it is
   off, render only for terminal updates and interactions instead of repainting the
   high-DPI canvas continuously, avoiding severe lag in large Windows browser windows.

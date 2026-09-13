@@ -26,6 +26,11 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 unicode-width = "0.2"
 
+[dev-dependencies]
+socket2 = "0.6"
+tokio = { version = "1", features = ["test-util"] }
+tokio-tungstenite = "0.29"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
     "Wdk_System_Threading",

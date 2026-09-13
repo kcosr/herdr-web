@@ -23,7 +23,7 @@ use axum::routing::{get, post};
 use axum::{extract::Request as AxumRequest, Json, Router};
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use herdr_compat::TryClone as _;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
@@ -56,6 +56,7 @@ use crate::notes::{
     AttachNoteRequest, CreateNoteRequest, NoteResponse, NotesError, NotesListQuery,
     NotesListResponse, NotesManager, RevisionRequest, UpdateNoteRequest,
 };
+use crate::websocket_heartbeat::{WebSocketHeartbeat, WebSocketHeartbeatAction};
 
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8787;
@@ -72,6 +73,7 @@ const TERMINAL_DETACH_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_TERMINAL_DETACH_DRAIN_WAITS: usize = 4;
 const MAX_ATTACH_HANDSHAKE_RETRIES: usize = 2;
 const TERMINAL_ATTACH_GATE_TIMEOUT: Duration = Duration::from_secs(5);
+const WEBSOCKET_SEND_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_TERMINAL_OUTPUT_COALESCE_MS: u64 = 16;
 const MAX_TERMINAL_OUTPUT_COALESCE_MS: u64 = 256;
 const TERMINAL_OUTPUT_COALESCE_MAX_BYTES: usize = 32 * 1024;
@@ -3332,7 +3334,8 @@ async fn activity_ws_handler(
     if let Err(err) = ensure_allowed_request(&headers, &state.request_policy) {
         return err.into_response();
     }
-    ws.on_upgrade(move |socket| handle_activity_socket(socket, state))
+    let activity_rx = state.activity_tx.subscribe();
+    ws.on_upgrade(move |socket| handle_activity_socket(socket, activity_rx))
         .into_response()
 }
 
@@ -3348,6 +3351,96 @@ async fn ui_events_ws_handler(
         .into_response()
 }
 
+fn record_websocket_peer_activity(
+    heartbeat: &mut WebSocketHeartbeat,
+    message: &Result<Message, axum::Error>,
+) {
+    if message.is_ok() {
+        heartbeat.record_peer_activity(Instant::now());
+    }
+}
+
+#[derive(Debug)]
+enum WebSocketSendError<E> {
+    Send(E),
+    Timeout,
+}
+
+impl<E> fmt::Display for WebSocketSendError<E>
+where
+    E: fmt::Display,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Send(error) => write!(formatter, "WebSocket send failed: {error}"),
+            Self::Timeout => formatter.write_str("WebSocket send timed out"),
+        }
+    }
+}
+
+impl<E> std::error::Error for WebSocketSendError<E>
+where
+    E: std::error::Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Send(error) => Some(error),
+            Self::Timeout => None,
+        }
+    }
+}
+
+/// Sends one WebSocket frame within the heartbeat's bounded dispatch budget.
+///
+/// # Errors
+///
+/// Returns [`WebSocketSendError::Send`] when the underlying sink rejects the
+/// frame, or [`WebSocketSendError::Timeout`] when dispatch exceeds the bounded
+/// send timeout.
+async fn send_websocket_message<S>(
+    ws_sender: &mut S,
+    message: Message,
+    stream_name: &'static str,
+) -> Result<(), WebSocketSendError<S::Error>>
+where
+    S: Sink<Message> + Unpin,
+{
+    match tokio::time::timeout(WEBSOCKET_SEND_TIMEOUT, ws_sender.send(message)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(WebSocketSendError::Send(err)),
+        Err(_) => {
+            warn!(stream = stream_name, "websocket send timed out");
+            Err(WebSocketSendError::Timeout)
+        }
+    }
+}
+
+async fn handle_websocket_heartbeat_deadline<S>(
+    ws_sender: &mut S,
+    heartbeat: &mut WebSocketHeartbeat,
+    stream_name: &'static str,
+) -> bool
+where
+    S: Sink<Message> + Unpin,
+{
+    match heartbeat.handle_deadline() {
+        WebSocketHeartbeatAction::SendPing => {
+            if send_websocket_message(ws_sender, Message::Ping(Bytes::new()), stream_name)
+                .await
+                .is_err()
+            {
+                return false;
+            }
+            heartbeat.record_ping_sent(Instant::now());
+            true
+        }
+        WebSocketHeartbeatAction::Disconnect => {
+            warn!(stream = stream_name, "websocket heartbeat timed out");
+            false
+        }
+    }
+}
+
 async fn handle_events_socket(socket: WebSocket, state: BridgeState) {
     let api = state.api.clone();
     let mut ui_event_rx = state.ui_event_tx.subscribe();
@@ -3357,21 +3450,47 @@ async fn handle_events_socket(socket: WebSocket, state: BridgeState) {
     };
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
+    let mut heartbeat = WebSocketHeartbeat::new(Instant::now());
     loop {
         tokio::select! {
+            _ = tokio::time::sleep_until(heartbeat.deadline()) => {
+                if !handle_websocket_heartbeat_deadline(
+                    &mut ws_sender,
+                    &mut heartbeat,
+                    "events",
+                )
+                .await
+                {
+                    break;
+                }
+            }
             Some(event) = event_rx.recv() => {
                 if event_may_close_terminal_session(&event) {
                     let prune_state = state.clone();
                     tokio::task::spawn_blocking(move || prune_detached_terminal_sessions(&prune_state));
                 }
-                if ws_sender.send(Message::Text(event.into())).await.is_err() {
+                if send_websocket_message(
+                    &mut ws_sender,
+                    Message::Text(event.into()),
+                    "events",
+                )
+                .await
+                .is_err()
+                {
                     break;
                 }
             }
             event = ui_event_rx.recv() => {
                 match event {
                     Ok(event) => {
-                        if ws_sender.send(Message::Text(event.into())).await.is_err() {
+                        if send_websocket_message(
+                            &mut ws_sender,
+                            Message::Text(event.into()),
+                            "events",
+                        )
+                        .await
+                        .is_err()
+                        {
                             break;
                         }
                     }
@@ -3380,6 +3499,7 @@ async fn handle_events_socket(socket: WebSocket, state: BridgeState) {
                 }
             }
             Some(message) = ws_receiver.next() => {
+                record_websocket_peer_activity(&mut heartbeat, &message);
                 match message {
                     Ok(Message::Close(_)) | Err(_) => break,
                     Ok(Message::Text(_))
@@ -3393,11 +3513,25 @@ async fn handle_events_socket(socket: WebSocket, state: BridgeState) {
     }
 }
 
-async fn handle_activity_socket(socket: WebSocket, state: BridgeState) {
-    let mut activity_rx = state.activity_tx.subscribe();
+async fn handle_activity_socket(
+    socket: WebSocket,
+    mut activity_rx: tokio::sync::broadcast::Receiver<ActivityMessage>,
+) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
+    let mut heartbeat = WebSocketHeartbeat::new(Instant::now());
     loop {
         tokio::select! {
+            _ = tokio::time::sleep_until(heartbeat.deadline()) => {
+                if !handle_websocket_heartbeat_deadline(
+                    &mut ws_sender,
+                    &mut heartbeat,
+                    "activity",
+                )
+                .await
+                {
+                    break;
+                }
+            }
             event = activity_rx.recv() => {
                 match event {
                     Ok(event) => {
@@ -3416,6 +3550,7 @@ async fn handle_activity_socket(socket: WebSocket, state: BridgeState) {
                 }
             }
             Some(message) = ws_receiver.next() => {
+                record_websocket_peer_activity(&mut heartbeat, &message);
                 match message {
                     Ok(Message::Close(_)) | Err(_) => break,
                     Ok(Message::Text(_))
@@ -3432,22 +3567,41 @@ async fn handle_activity_socket(socket: WebSocket, state: BridgeState) {
 async fn send_activity_message(
     ws_sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     event: &ActivityMessage,
-) -> Result<(), axum::Error> {
+) -> Result<(), WebSocketSendError<axum::Error>> {
     let text = serde_json::to_string(event).unwrap_or_else(|_| {
         r#"{"type":"resync_required","reason":"activity serialization failed"}"#.to_string()
     });
-    ws_sender.send(Message::Text(text.into())).await
+    send_websocket_message(ws_sender, Message::Text(text.into()), "activity").await
 }
 
 async fn handle_ui_events_socket(socket: WebSocket, state: BridgeState) {
     let mut ui_event_rx = state.ui_event_tx.subscribe();
     let (mut ws_sender, mut ws_receiver) = socket.split();
+    let mut heartbeat = WebSocketHeartbeat::new(Instant::now());
     loop {
         tokio::select! {
+            _ = tokio::time::sleep_until(heartbeat.deadline()) => {
+                if !handle_websocket_heartbeat_deadline(
+                    &mut ws_sender,
+                    &mut heartbeat,
+                    "ui_events",
+                )
+                .await
+                {
+                    break;
+                }
+            }
             event = ui_event_rx.recv() => {
                 match event {
                     Ok(event) => {
-                        if ws_sender.send(Message::Text(event.into())).await.is_err() {
+                        if send_websocket_message(
+                            &mut ws_sender,
+                            Message::Text(event.into()),
+                            "ui_events",
+                        )
+                        .await
+                        .is_err()
+                        {
                             break;
                         }
                     }
@@ -3456,6 +3610,7 @@ async fn handle_ui_events_socket(socket: WebSocket, state: BridgeState) {
                 }
             }
             Some(message) = ws_receiver.next() => {
+                record_websocket_peer_activity(&mut heartbeat, &message);
                 match message {
                     Ok(Message::Close(_)) | Err(_) => break,
                     Ok(Message::Text(_))
@@ -3493,9 +3648,12 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
     {
         Ok(session) => session,
         Err(err) => {
-            let _ = ws_sender
-                .send(Message::Text(close_message(&err.to_string()).into()))
-                .await;
+            let _ = send_websocket_message(
+                &mut ws_sender,
+                Message::Text(close_message(&err.to_string()).into()),
+                "terminal",
+            )
+            .await;
             return;
         }
     };
@@ -3504,13 +3662,17 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
     let mut terminal_rx = session.output_tx.subscribe();
     if output_encoding == TerminalOutputWireEncoding::Gzip {
         let ack = Message::Text(TERMINAL_OUTPUT_GZIP_ACKNOWLEDGEMENT.into());
-        if ws_sender.send(ack).await.is_err() {
+        if send_websocket_message(&mut ws_sender, ack, "terminal")
+            .await
+            .is_err()
+        {
             release_terminal_session(&state.terminal_sessions, &terminal_id, &session);
             return;
         }
     }
 
     let mut output_coalescer = TerminalOutputCoalescer::new(coalesce_window);
+    let mut heartbeat = WebSocketHeartbeat::new(Instant::now());
     let _ = write_tx.send(ClientMessage::Resize {
         cols,
         rows,
@@ -3523,6 +3685,17 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
         if let Some(deadline) = output_coalescer.deadline() {
             tokio::select! {
                 biased;
+                _ = tokio::time::sleep_until(heartbeat.deadline()) => {
+                    if !handle_websocket_heartbeat_deadline(
+                        &mut ws_sender,
+                        &mut heartbeat,
+                        "terminal",
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                }
                 _ = tokio::time::sleep_until(deadline) => {
                     if !handle_terminal_output_deadline(
                         &mut ws_sender,
@@ -3535,6 +3708,7 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
                     }
                 }
                 Some(message) = ws_receiver.next() => {
+                    record_websocket_peer_activity(&mut heartbeat, &message);
                     if !handle_terminal_client_message(&write_tx, message) {
                         break;
                     }
@@ -3555,6 +3729,17 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
             }
         } else {
             tokio::select! {
+                _ = tokio::time::sleep_until(heartbeat.deadline()) => {
+                    if !handle_websocket_heartbeat_deadline(
+                        &mut ws_sender,
+                        &mut heartbeat,
+                        "terminal",
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                }
                 output = terminal_rx.recv() => {
                     if !handle_terminal_output_message(
                         output,
@@ -3568,6 +3753,7 @@ async fn handle_terminal_socket(socket: WebSocket, state: BridgeState, query: Te
                     }
                 }
                 Some(message) = ws_receiver.next() => {
+                    record_websocket_peer_activity(&mut heartbeat, &message);
                     if !handle_terminal_client_message(&write_tx, message) {
                         break;
                     }
@@ -3599,13 +3785,13 @@ async fn send_terminal_output_frame(
     bytes: Bytes,
     output_encoding: TerminalOutputWireEncoding,
 ) -> bool {
-    ws_sender
-        .send(Message::Binary(encode_terminal_output_frame(
-            bytes,
-            output_encoding,
-        )))
-        .await
-        .is_ok()
+    send_websocket_message(
+        ws_sender,
+        Message::Binary(encode_terminal_output_frame(bytes, output_encoding)),
+        "terminal",
+    )
+    .await
+    .is_ok()
 }
 
 async fn handle_terminal_output_message(
@@ -3643,9 +3829,12 @@ async fn handle_terminal_output_message(
                     return false;
                 }
             }
-            let _ = ws_sender
-                .send(Message::Text(close_message(&reason).into()))
-                .await;
+            let _ = send_websocket_message(
+                ws_sender,
+                Message::Text(close_message(&reason).into()),
+                "terminal",
+            )
+            .await;
             false
         }
         Err(tokio::sync::broadcast::error::RecvError::Lagged(frames)) => {
@@ -4644,7 +4833,156 @@ fn startup_daemon_error(err: BridgeError) -> io::Error {
 mod tests {
     use super::*;
     use flate2::read::GzDecoder;
+    use socket2::SockRef;
+    use std::convert::Infallible;
     use std::io::Read;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::sync::Notify;
+
+    #[derive(Clone)]
+    struct ActivitySocketTestState {
+        activity_tx: tokio::sync::broadcast::Sender<ActivityMessage>,
+        ready: Arc<Notify>,
+        closed_at: Arc<Mutex<Option<Instant>>>,
+    }
+
+    async fn activity_socket_test_handler(
+        ws: WebSocketUpgrade,
+        State(state): State<ActivitySocketTestState>,
+    ) -> Response {
+        let activity_rx = state.activity_tx.subscribe();
+        state.ready.notify_one();
+        let closed_at = state.closed_at.clone();
+        ws.write_buffer_size(0)
+            .on_upgrade(move |socket| async move {
+                handle_activity_socket(socket, activity_rx).await;
+                *closed_at.lock().expect("test close timestamp lock") = Some(Instant::now());
+            })
+            .into_response()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn activity_socket_closes_when_peer_stops_reading() {
+        let (activity_tx, _) = tokio::sync::broadcast::channel(2);
+        let state = ActivitySocketTestState {
+            activity_tx: activity_tx.clone(),
+            ready: Arc::new(Notify::new()),
+            closed_at: Arc::new(Mutex::new(None)),
+        };
+        let ready = state.ready.clone();
+        let closed_at = state.closed_at.clone();
+        let app = Router::new()
+            .route("/ws", get(activity_socket_test_handler))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test WebSocket listener");
+        let address = listener.local_addr().expect("test WebSocket address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test WebSocket server");
+        });
+
+        let (client, _) = tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
+            .await
+            .expect("test WebSocket client");
+        let client_stream = client.get_ref().get_ref();
+        // Keep the peer alive but never poll it. A small receive buffer makes the server's
+        // real socket send become pending instead of relying on a fake Sink implementation.
+        SockRef::from(client_stream)
+            .set_recv_buffer_size(1024)
+            .expect("small test WebSocket receive buffer");
+        ready.notified().await;
+
+        let started_at = Instant::now();
+        let reason = "x".repeat(8 * 1024 * 1024);
+        activity_tx
+            .send(ActivityMessage::ResyncRequired { reason })
+            .expect("activity socket test receiver");
+
+        let heartbeat_deadline = started_at + crate::websocket_heartbeat::WEBSOCKET_PING_INTERVAL;
+        while Instant::now() < heartbeat_deadline {
+            tokio::task::yield_now().await;
+            if closed_at
+                .lock()
+                .expect("test close timestamp lock")
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::advance(Duration::from_millis(100)).await;
+        }
+
+        let closed_at = *closed_at.lock().expect("test close timestamp lock");
+        assert!(
+            closed_at.is_some_and(|closed_at| {
+                closed_at >= started_at + WEBSOCKET_SEND_TIMEOUT && closed_at < heartbeat_deadline
+            }),
+            "stalled activity send did not close at the send timeout before the heartbeat deadline"
+        );
+
+        drop(client);
+        server.abort();
+    }
+
+    struct PendingWebSocketSink;
+
+    impl Sink<Message> for PendingWebSocketSink {
+        type Error = Infallible;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+
+        fn start_send(self: Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn websocket_send_times_out_when_sink_remains_pending() {
+        let started_at = Instant::now();
+        let result = send_websocket_message(
+            &mut PendingWebSocketSink,
+            Message::Text("blocked".into()),
+            "test",
+        )
+        .await;
+
+        assert!(matches!(result, Err(WebSocketSendError::Timeout)));
+        assert_eq!(Instant::now(), started_at + WEBSOCKET_SEND_TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn websocket_send_completes_immediately_when_sink_is_ready() {
+        let started_at = Instant::now();
+        let mut ws_sender = futures_util::sink::drain();
+
+        let result =
+            send_websocket_message(&mut ws_sender, Message::Text("ready".into()), "test").await;
+
+        assert!(matches!(result, Ok(())));
+        assert_eq!(Instant::now(), started_at);
+    }
 
     #[test]
     fn gzip_terminal_output_frame_round_trips_and_reduces_repeated_output() {

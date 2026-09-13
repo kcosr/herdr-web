@@ -5,6 +5,7 @@ mod notes;
 mod session;
 mod store_util;
 mod web_bridge;
+mod websocket_heartbeat;
 mod workspace;
 
 fn main() -> std::io::Result<()> {

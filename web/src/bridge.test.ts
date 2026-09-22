@@ -38,13 +38,22 @@ describe("bridge URL normalization", () => {
     expect(normalizeBridgeBaseUrl("http://8.8.8.8:4000")).toBe("http://8.8.8.8:4000");
   });
 
+  it("normalizes path-prefixed bridge URLs", () => {
+    expect(normalizeBridgeBaseUrl(" https://herd.example/bridges/server60/ ")).toBe(
+      "https://herd.example/bridges/server60",
+    );
+  });
+
   it("rejects unsupported URL shapes", () => {
     expect(() => normalizeBridgeBaseUrl("ftp://192.168.1.20:4000")).toThrow(/http or https/iu);
     expect(() => normalizeBridgeBaseUrl("http://user@192.168.1.20:4000")).toThrow(
       /credentials/iu,
     );
-    expect(() => normalizeBridgeBaseUrl("http://192.168.1.20:4000/api")).toThrow(
-      /path/iu,
+    expect(() => normalizeBridgeBaseUrl("http://192.168.1.20:4000?target=api")).toThrow(
+      /query or fragment/iu,
+    );
+    expect(() => normalizeBridgeBaseUrl("http://192.168.1.20:4000#api")).toThrow(
+      /query or fragment/iu,
     );
   });
 });
@@ -78,6 +87,18 @@ describe("bridge URL builders", () => {
       "ws://192.168.1.20:4000/ws/terminal?terminal_id=term-1",
     );
   });
+
+  it("preserves configured bridge path prefixes", () => {
+    const query = new URLSearchParams({ terminal_id: "term-1" });
+    const baseUrl = "https://herd.example/bridges/server60";
+
+    expect(buildHttpUrl(baseUrl, "/api/snapshot")).toBe(
+      "https://herd.example/bridges/server60/api/snapshot",
+    );
+    expect(buildWsUrl(baseUrl, "/ws/terminal", query)).toBe(
+      "wss://herd.example/bridges/server60/ws/terminal?terminal_id=term-1",
+    );
+  });
 });
 
 describe("backend store parsing", () => {
@@ -88,7 +109,7 @@ describe("backend store parsing", () => {
         activeBackendId: "missing",
         backends: [
           { id: "one", name: "Home", baseUrl: "http://192.168.1.20:4000" },
-          { id: "bad", name: "Bad", baseUrl: "http://192.168.1.20:4000/api" },
+          { id: "bad", name: "Bad", baseUrl: "http://192.168.1.20:4000?target=api" },
         ],
       }),
     ).toEqual({

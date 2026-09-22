@@ -866,11 +866,11 @@ export function normalizeBridgeBaseUrl(input: string): string {
   if (url.username || url.password) {
     throw new Error("Bridge URL must not include credentials");
   }
-  if ((url.pathname && url.pathname !== "/") || url.search || url.hash) {
-    throw new Error("Bridge URL must not include a path, query, or fragment");
+  if (url.search || url.hash) {
+    throw new Error("Bridge URL must not include a query or fragment");
   }
   validateBridgeHost(url.hostname);
-  return url.origin;
+  return `${url.origin}${normalizeBridgeBasePath(url.pathname)}`;
 }
 
 function validateBridgeHost(hostname: string) {
@@ -921,6 +921,16 @@ function isValidHostname(host: string) {
     .every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(label));
 }
 
+function normalizeBridgeBasePath(pathname: string) {
+  return pathname === "/" ? "" : pathname.replace(/\/+$/u, "");
+}
+
+function bridgeEndpointUrl(baseUrl: string, endpointPath: string) {
+  const url = new URL(baseUrl);
+  url.pathname = `${normalizeBridgeBasePath(url.pathname)}${endpointPath}`;
+  return url;
+}
+
 export function buildHttpUrl(
   baseUrl: string | null,
   path: string,
@@ -931,7 +941,7 @@ export function buildHttpUrl(
   if (!baseUrl) {
     return `${normalizedPath}${suffix}`;
   }
-  const url = new URL(normalizedPath, baseUrl);
+  const url = bridgeEndpointUrl(baseUrl, normalizedPath);
   if (query) {
     url.search = query.toString();
   }
@@ -951,7 +961,7 @@ export function buildWsUrl(
     const host = location?.host || "localhost";
     return `${protocol}//${host}${normalizedPath}${suffix}`;
   }
-  const url = new URL(normalizedPath, baseUrl);
+  const url = bridgeEndpointUrl(baseUrl, normalizedPath);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   if (query) {
     url.search = query.toString();

@@ -346,6 +346,11 @@ For browser-served multi-bridge setups, configure both directions explicitly:
   origin that the page may connect to. This expands the served page's Content Security Policy for
   both HTTP and WebSocket bridge traffic.
 
+A configured bridge URL may include a reverse-proxy path prefix, such as
+`https://herd.example/bridges/server60`. The proxy must strip `/bridges/server60` before forwarding
+HTTP and WebSocket requests to the target bridge. A same-origin path keeps browser traffic under one
+public origin, so it does not require an additional `--allow-connect-origin` entry.
+
 For example, if the page is opened from `http://host-a:8787` and should connect to
 `http://host-b:8787`:
 

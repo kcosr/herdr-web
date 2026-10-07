@@ -1,8 +1,6 @@
 # Changelog
 
-## [Unreleased]
-
-### Breaking Changes
+## [0.6.2] - 2026-10-07
 
 ### Added
 
@@ -30,8 +28,6 @@
   traffic within 15 seconds, removing dead transports without claiming to detect frozen JavaScript.
   [PR #93](https://github.com/kcosr/herdr-web/pull/93), contributed by
   [Will Hampson (@Whamp)](https://github.com/Whamp).
-
-### Removed
 
 ## [0.6.1] - 2026-09-12
 

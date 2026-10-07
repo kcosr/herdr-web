@@ -129,13 +129,21 @@ mod tests {
 
     #[test]
     fn derive_label_falls_back_to_directory_name() {
-        let root = temp_test_dir("plain-label");
-
+        // A missing cwd is still labelled by its directory name. Keep it outside
+        // the checkout even when TMPDIR is configured inside a working tree.
+        let current = std::env::current_dir().unwrap();
+        let root = current.ancestors().last().unwrap().join(format!(
+            "herdr-web-bridge-plain-label-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(!root.exists());
         assert_eq!(
             derive_label_from_cwd(&root),
             root.file_name().unwrap().to_string_lossy()
         );
-
-        std::fs::remove_dir_all(root).unwrap();
     }
 }

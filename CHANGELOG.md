@@ -12,6 +12,8 @@
 
 ### Changed
 
+- Refresh vendored Herdr compatibility to v0.9.3, retaining terminal protocol 22 and the
+  v0.9.0 runtime minimum. [PR #95](https://github.com/kcosr/herdr-web/pull/95).
 - Automatically increment Android `versionCode` and stamp `versionName` in the tagged release
   commit, keeping repeated builds of that release on the same Android version.
   [PR #91](https://github.com/kcosr/herdr-web/pull/91).
@@ -21,6 +23,9 @@
 
 ### Fixed
 
+- Recover structural and activity event streams after lost events or disconnects, refresh
+  snapshots on resubscription, and release disconnected browser readers.
+  [PR #95](https://github.com/kcosr/herdr-web/pull/95).
 - Send protocol-level pings on idle browser WebSockets and close connections that do not return peer
   traffic within 15 seconds, removing dead transports without claiming to detect frozen JavaScript.
   [PR #93](https://github.com/kcosr/herdr-web/pull/93), contributed by

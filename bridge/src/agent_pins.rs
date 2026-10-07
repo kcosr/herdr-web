@@ -107,7 +107,7 @@ impl AgentPinsManager {
     }
 
     #[cfg(test)]
-    fn for_test(dir: PathBuf, session_key: &str) -> io::Result<Self> {
+    pub(crate) fn for_test(dir: PathBuf, session_key: &str) -> io::Result<Self> {
         ensure_private_dir(&dir)?;
         Ok(Self {
             pins_path: dir.join("agent-pins.json"),
@@ -429,6 +429,7 @@ mod tests {
             agent_status: AgentStatus::Idle,
             state_labels: HashMap::new(),
             tokens: HashMap::new(),
+            restore_error: None,
             scroll: None,
             revision: 1,
         }

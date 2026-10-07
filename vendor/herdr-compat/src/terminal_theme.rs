@@ -5,3 +5,9 @@ pub struct RgbColor {
     pub g: u8,
     pub b: u8,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefaultColorKind {
+    Foreground,
+    Background,
+}

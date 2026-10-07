@@ -41,6 +41,50 @@ afterEach(async () => {
 });
 
 describe("BridgeConnectionController sockets", () => {
+  it("refreshes after structural subscription acknowledgement, not the WebSocket upgrade", async () => {
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    let selectedPaneId = "before-disconnect";
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ ...emptySnapshot(), selected_pane_id: selectedPaneId })),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const connectionRefs = { current: {} } as MutableRefObject<Record<string, BridgeConnectionRef>>;
+    const setConnectionStates = vi.fn() as unknown as Dispatch<
+      SetStateAction<Record<string, BridgeConnectionState>>
+    >;
+    const { render } = createConnectionHarness({
+      runtime: bridgeRuntime("bridge-a"),
+      connectionRefs,
+      setConnectionStates,
+    });
+    await render(vi.fn());
+    expect(connectionRefs.current["bridge-a"].snapshot?.selected_pane_id).toBe("before-disconnect");
+    const original = FakeWebSocket.instances.find((socket) => socket.url.endsWith("/ws/events"))!;
+
+    await act(async () => {
+      original.close();
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    const reconnected = FakeWebSocket.instances.filter((socket) => socket.url.endsWith("/ws/events"));
+    expect(reconnected).toHaveLength(2);
+    selectedPaneId = "changed-while-disconnected";
+    const previousRequests = fetchMock.mock.calls.length;
+    await act(async () => {
+      reconnected[1].dispatchEvent(new Event("open"));
+      await Promise.resolve();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(previousRequests);
+    expect(connectionRefs.current["bridge-a"].snapshot?.selected_pane_id).toBe("before-disconnect");
+    await act(async () => {
+      reconnected[1].dispatchEvent(new MessageEvent("message", {
+        data: JSON.stringify({ type: "resync_required", reason: "event subscription established" }),
+      }));
+      await Promise.resolve();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(previousRequests + 1);
+    expect(connectionRefs.current["bridge-a"].snapshot?.selected_pane_id).toBe("changed-while-disconnected");
+  });
+
   it("does not recreate event sockets when only the notes callback identity changes", async () => {
     vi.stubGlobal("WebSocket", FakeWebSocket);
     vi.stubGlobal(

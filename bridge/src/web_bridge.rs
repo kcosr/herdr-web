@@ -3450,6 +3450,20 @@ async fn handle_events_socket(socket: WebSocket, state: BridgeState) {
     };
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
+    // WebSocket open precedes the upstream ack. Request a fresh snapshot only
+    // after subscribing so mutations during connection setup cannot be missed.
+    if send_websocket_message(
+        &mut ws_sender,
+        Message::Text(
+            r#"{"type":"resync_required","reason":"event subscription established"}"#.into(),
+        ),
+        "events",
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
     let mut heartbeat = WebSocketHeartbeat::new(Instant::now());
     loop {
         tokio::select! {
@@ -3464,7 +3478,11 @@ async fn handle_events_socket(socket: WebSocket, state: BridgeState) {
                     break;
                 }
             }
-            Some(event) = event_rx.recv() => {
+            event = event_rx.recv() => {
+                let Some(event) = event else {
+                    let _ = send_websocket_message(&mut ws_sender, Message::Close(None), "events").await;
+                    break;
+                };
                 if event_may_close_terminal_session(&event) {
                     let prune_state = state.clone();
                     tokio::task::spawn_blocking(move || prune_detached_terminal_sessions(&prune_state));
@@ -3498,7 +3516,8 @@ async fn handle_events_socket(socket: WebSocket, state: BridgeState) {
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
-            Some(message) = ws_receiver.next() => {
+            message = ws_receiver.next() => {
+                let Some(message) = message else { break };
                 record_websocket_peer_activity(&mut heartbeat, &message);
                 match message {
                     Ok(Message::Close(_)) | Err(_) => break,
@@ -4193,7 +4212,7 @@ fn spawn_agent_activity_watcher(state: BridgeState) {
 fn agent_activity_structural_watcher_loop(state: BridgeState, resubscribe_tx: mpsc::Sender<()>) {
     let mut backoff = ACTIVITY_WATCHER_INITIAL_BACKOFF;
     loop {
-        match run_agent_activity_structural_subscription(&state, &resubscribe_tx) {
+        match run_agent_activity_structural_subscription(&state, &resubscribe_tx, &mut backoff) {
             Ok(()) => {
                 backoff = ACTIVITY_WATCHER_INITIAL_BACKOFF;
             }
@@ -4209,7 +4228,7 @@ fn agent_activity_structural_watcher_loop(state: BridgeState, resubscribe_tx: mp
 fn agent_activity_watcher_loop(state: BridgeState, resubscribe_rx: mpsc::Receiver<()>) {
     let mut backoff = ACTIVITY_WATCHER_INITIAL_BACKOFF;
     loop {
-        match run_agent_activity_subscription(&state, &resubscribe_rx) {
+        match run_agent_activity_subscription(&state, &resubscribe_rx, &mut backoff) {
             Ok(()) => {
                 backoff = ACTIVITY_WATCHER_INITIAL_BACKOFF;
                 thread::sleep(ACTIVITY_RESUBSCRIBE_DEBOUNCE);
@@ -4226,6 +4245,7 @@ fn agent_activity_watcher_loop(state: BridgeState, resubscribe_rx: mpsc::Receive
 fn run_agent_activity_structural_subscription(
     state: &BridgeState,
     resubscribe_tx: &mpsc::Sender<()>,
+    backoff: &mut Duration,
 ) -> Result<(), BridgeError> {
     let request = Request {
         id: "herdr-web:activity-structural".to_string(),
@@ -4242,7 +4262,13 @@ fn run_agent_activity_structural_subscription(
         )));
     }
 
+    *backoff = ACTIVITY_WATCHER_INITIAL_BACKOFF;
+    // Recover pane membership even if structural changes occurred while disconnected.
+    if resubscribe_tx.send(()).is_err() {
+        return Ok(());
+    }
     while let Some(value) = stream.next_value()? {
+        check_subscription_value(&value)?;
         if is_structural_event_value(&value) && resubscribe_tx.send(()).is_err() {
             return Ok(());
         }
@@ -4255,6 +4281,7 @@ fn run_agent_activity_structural_subscription(
 fn run_agent_activity_subscription(
     state: &BridgeState,
     resubscribe_rx: &mpsc::Receiver<()>,
+    backoff: &mut Duration,
 ) -> Result<(), BridgeError> {
     drain_resubscribe_signals(resubscribe_rx);
     // Discover targets first; this is not the authoritative activity baseline.
@@ -4267,7 +4294,11 @@ fn run_agent_activity_subscription(
     let Some((baseline, mut stream)) = open_activity_subscription(&state.api, &pane_ids)? else {
         return Ok(());
     };
+    *backoff = ACTIVITY_WATCHER_INITIAL_BACKOFF;
     observe_agent_activity_snapshot(state, &baseline);
+    let _ = state.activity_tx.send(ActivityMessage::ResyncRequired {
+        reason: "activity subscription established".to_string(),
+    });
 
     loop {
         if drain_resubscribe_signals(resubscribe_rx) {
@@ -4280,6 +4311,7 @@ fn run_agent_activity_subscription(
         }
         match stream.next_value() {
             Ok(Some(value)) => {
+                check_subscription_value(&value)?;
                 if let Some(message) = activity_message_from_subscription_value(value) {
                     if let ActivityMessage::PaneAgentStatusChanged {
                         pane_id,
@@ -4441,6 +4473,16 @@ fn is_timeout_error(err: &ApiClientError) -> bool {
     )
 }
 
+// A subscription can emit a normal API error response after its initial ack,
+// notably `events_lost` when the daemon drops events for a slow subscriber.
+fn check_subscription_value(value: &serde_json::Value) -> Result<(), BridgeError> {
+    if value.get("error").is_some() {
+        let response = serde_json::from_value(value.clone()).map_err(ApiClientError::Json)?;
+        return Err(ApiClientError::ErrorResponse(response).into());
+    }
+    Ok(())
+}
+
 fn open_event_subscription(
     api: ApiClient,
 ) -> Result<tokio::sync::mpsc::UnboundedReceiver<String>, BridgeError> {
@@ -4459,24 +4501,26 @@ fn open_event_subscription(
         )));
     }
 
+    stream.set_read_timeout(ACTIVITY_READ_TIMEOUT)?;
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-    thread::spawn(move || loop {
-        match stream.next_value() {
-            Ok(Some(event)) => {
-                if event_tx.send(event.to_string()).is_err() {
+    thread::spawn(move || {
+        while !event_tx.is_closed() {
+            match stream.next_value() {
+                Ok(Some(event)) => {
+                    if let Err(err) = check_subscription_value(&event) {
+                        warn!(error = %err, "herdr-web event subscription failed");
+                        break;
+                    }
+                    if event_tx.send(event.to_string()).is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(err) if is_timeout_error(&err) => continue,
+                Err(err) => {
+                    warn!(error = %err, "herdr-web event subscription failed");
                     break;
                 }
-            }
-            Ok(None) => break,
-            Err(err) => {
-                let _ = event_tx.send(
-                    serde_json::json!({
-                        "type": "error",
-                        "error": err.to_string(),
-                    })
-                    .to_string(),
-                );
-                break;
             }
         }
     });
@@ -5503,12 +5547,12 @@ mod tests {
     #[test]
     fn detach_tears_down_attach_connection_without_daemon_close() {
         let dir = std::env::temp_dir();
-        let dir = if dir.as_os_str().len() <= 40 {
+        let dir = if dir.as_os_str().len() <= 70 {
             dir
         } else {
             PathBuf::from("/tmp")
         };
-        let socket_path = dir.join(format!("herdr-web-detach-test-{}.sock", std::process::id()));
+        let socket_path = dir.join(format!("hwd-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&socket_path);
         let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
 
@@ -5693,8 +5737,8 @@ mod tests {
         use std::os::unix::net::{UnixListener, UnixStream};
 
         for membership_changed in [false, true] {
-            let socket_path = PathBuf::from(format!(
-                "/tmp/herdr-activity-{}-{}.sock",
+            let socket_path = std::env::temp_dir().join(format!(
+                "herdr-activity-{}-{}.sock",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -6036,7 +6080,7 @@ mod tests {
         }
     }
 
-    fn test_pane(pane_id: &str) -> PaneInfo {
+    pub(super) fn test_pane(pane_id: &str) -> PaneInfo {
         test_pane_in(pane_id, "workspace-1", "tab-1", "/tmp/repo", false)
     }
 
@@ -6065,6 +6109,7 @@ mod tests {
             state_labels: HashMap::new(),
             tokens: HashMap::new(),
             agent_session: None,
+            restore_error: None,
             scroll: None,
             revision: 1,
         }
@@ -7046,6 +7091,7 @@ mod tests {
             state_labels: HashMap::new(),
             tokens: HashMap::new(),
             agent_session: None,
+            restore_error: None,
             scroll: None,
             revision: 1,
         }
@@ -7075,6 +7121,7 @@ mod tests {
             focused: true,
             launch_pending: true,
             interactive_ready: false,
+            completion_seq: None,
             state_change_seq: 1,
             cwd: None,
             foreground_cwd: None,
@@ -7375,3 +7422,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+mod subscription_tests;

@@ -6,4 +6,8 @@ pub enum RawInputEvent {
     Paste(String),
     OuterFocusGained,
     OuterFocusLost,
+    HostDefaultColor {
+        kind: crate::terminal_theme::DefaultColorKind,
+        color: crate::terminal_theme::RgbColor,
+    },
 }

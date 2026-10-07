@@ -529,6 +529,7 @@ mod tests {
             agent_status: AgentStatus::Unknown,
             state_labels: HashMap::new(),
             tokens: HashMap::new(),
+            restore_error: None,
             scroll: None,
             revision: 1,
         }

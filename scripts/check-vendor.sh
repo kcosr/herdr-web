@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPAT="$ROOT/vendor/herdr-compat"
-EXPECTED_HERDR_COMMIT="b99002ac99b09e00b4ca692436cb15a6b0d676f1"
+EXPECTED_HERDR_COMMIT="7b116c05bfda646af39d2524c54e70c751f57ee8"
 
 if ! command -v rg >/dev/null; then
   echo "ripgrep (rg) is required for vendor checks" >&2
@@ -62,7 +62,7 @@ if rg -n '#\[path[[:space:]]*=' "$ROOT/bridge" "$COMPAT" >/dev/null; then
 fi
 
 if rg -n '\bcustom_status\b' "$COMPAT" >/dev/null; then
-  echo "obsolete custom_status fields are not allowed in the Herdr 0.9.0 compatibility copy" >&2
+  echo "obsolete custom_status fields are not allowed in the Herdr 0.9.3 compatibility copy" >&2
   rg -n '\bcustom_status\b' "$COMPAT" >&2
   exit 1
 fi
@@ -87,13 +87,13 @@ if [[ -n "${HERDR_SRC:-}" ]]; then
 
   upstream_commit="$(git -C "$HERDR_SRC" rev-parse HEAD 2>/dev/null || true)"
   if [[ "$upstream_commit" != "$EXPECTED_HERDR_COMMIT" ]]; then
-    echo "HERDR_SRC must be a Herdr v0.9.0 checkout at $EXPECTED_HERDR_COMMIT" >&2
+    echo "HERDR_SRC must be a Herdr v0.9.3 checkout at $EXPECTED_HERDR_COMMIT" >&2
     echo "found: ${upstream_commit:-not a git checkout}" >&2
     exit 1
   fi
 
   if [[ -n "$(git -C "$HERDR_SRC" status --short)" ]]; then
-    echo "HERDR_SRC must be a clean Herdr v0.9.0 checkout" >&2
+    echo "HERDR_SRC must be a clean Herdr v0.9.3 checkout" >&2
     git -C "$HERDR_SRC" status --short >&2
     exit 1
   fi
@@ -169,8 +169,8 @@ if [[ -n "${HERDR_SRC:-}" ]]; then
   compare_wire_body
   compare_exact "src/input/model.rs" "src/input.rs"
 
-  echo "Herdr v0.9.0 compatibility vendor layout and HERDR_SRC drift checks passed"
+  echo "Herdr v0.9.3 compatibility vendor layout and HERDR_SRC drift checks passed"
 else
-  echo "Herdr v0.9.0 compatibility vendor layout looks clean"
-  echo "Set HERDR_SRC=/path/to/clean/herdr-v0.9.0 to compare exact upstream schema/wire copies"
+  echo "Herdr v0.9.3 compatibility vendor layout looks clean"
+  echo "Set HERDR_SRC=/path/to/clean/herdr-v0.9.3 to compare exact upstream schema/wire copies"
 fi

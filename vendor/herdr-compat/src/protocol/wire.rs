@@ -147,6 +147,10 @@ pub enum ClientInputEvent {
     },
     FocusGained,
     FocusLost,
+    HostDefaultColor {
+        kind: ClientHostDefaultColorKind,
+        color: ClientHostColor,
+    },
 }
 
 /// Pane-domain input after the client has classified and consumed shell actions.
@@ -458,6 +462,19 @@ impl ClientInputEvent {
             Self::Paste { text } => crate::raw_input::RawInputEvent::Paste(text.clone()),
             Self::FocusGained => crate::raw_input::RawInputEvent::OuterFocusGained,
             Self::FocusLost => crate::raw_input::RawInputEvent::OuterFocusLost,
+            Self::HostDefaultColor { kind, color } => {
+                crate::raw_input::RawInputEvent::HostDefaultColor {
+                    kind: match kind {
+                        ClientHostDefaultColorKind::Foreground => {
+                            crate::terminal_theme::DefaultColorKind::Foreground
+                        }
+                        ClientHostDefaultColorKind::Background => {
+                            crate::terminal_theme::DefaultColorKind::Background
+                        }
+                    },
+                    color: (*color).into(),
+                }
+            }
         }
     }
 }
@@ -699,7 +716,7 @@ pub enum AttachScrollSource {
 
 /// A single cell in a rendered frame, serialized independently from ratatui's
 /// `Cell` type to keep the wire protocol stable.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub struct CellData {
     /// Grapheme cluster displayed in this cell (usually 1–2 chars).
     pub symbol: String,
@@ -713,6 +730,21 @@ pub struct CellData {
     pub skip: bool,
     /// Index into `FrameData::hyperlinks` for this cell's OSC 8 target, if any.
     pub hyperlink: Option<u32>,
+}
+
+impl Clone for CellData {
+    fn clone(&self) -> Self {
+        Self {
+            symbol: self.symbol.clone(),
+            ..*self
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        let mut symbol = std::mem::take(&mut self.symbol);
+        symbol.clone_from(&source.symbol);
+        *self = Self { symbol, ..*source };
+    }
 }
 
 impl CellData {
@@ -736,7 +768,7 @@ impl CellData {
 pub type CursorShapeParam = u8;
 
 /// Cursor position within a rendered frame.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub struct CursorState {
     /// Column offset (0-based) of the cursor.
     pub x: u16,
@@ -1077,7 +1109,7 @@ pub struct ClientShellAgent {
 }
 
 /// Origin-relative geometry for one pane in a rendered pane surface.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub struct PaneSurfacePane {
     pub pane_id: String,
     pub content_revision: u64,
@@ -1093,7 +1125,7 @@ pub struct PaneSurfacePane {
     pub pixel_height: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub struct PaneSurfaceScrollMetrics {
     pub offset_from_bottom: u64,
     pub max_offset_from_bottom: u64,
@@ -1110,14 +1142,14 @@ pub struct PaneSurfaceSplit {
     pub path: Vec<bool>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub enum PaneSurfaceSplitDirection {
     Horizontal,
     Vertical,
 }
 
 /// Wire-safe rectangle relative to a pane surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub struct SurfaceRect {
     pub x: u16,
     pub y: u16,
@@ -1136,13 +1168,13 @@ impl From<ratatui::layout::Rect> for SurfaceRect {
     }
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub enum SurfaceGraphicsTarget {
     Pane { pane_id: String },
     Popup { terminal_id: String },
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub enum SurfaceGraphicsSource {
     Terminal {
         target: SurfaceGraphicsTarget,
@@ -1154,14 +1186,14 @@ pub enum SurfaceGraphicsSource {
     },
 }
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub enum SurfaceGraphicsFormat {
     Rgb,
     Rgba,
     Png,
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub struct SurfaceGraphicsAssetKey {
     pub source: SurfaceGraphicsSource,
     pub image_width: u32,
@@ -1175,11 +1207,57 @@ pub struct SurfaceGraphicsAssetKey {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SurfaceGraphicsAsset {
     pub key: SurfaceGraphicsAssetKey,
+    #[serde(
+        serialize_with = "serialize_graphics_bytes",
+        deserialize_with = "deserialize_graphics_bytes"
+    )]
     pub data: Vec<u8>,
 }
 
+fn serialize_graphics_bytes<S: serde::Serializer>(
+    data: &[u8],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    // Bincode's byte slice has the same length+bytes layout as Vec<u8>,
+    // but avoids per-byte serialization. Keep human-readable codecs unchanged.
+    if serializer.is_human_readable() {
+        data.serialize(serializer)
+    } else {
+        serializer.serialize_bytes(data)
+    }
+}
+
+fn deserialize_graphics_bytes<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<u8>, D::Error> {
+    if deserializer.is_human_readable() {
+        return Vec::<u8>::deserialize(deserializer);
+    }
+
+    struct BytesVisitor;
+    impl<'de> serde::de::Visitor<'de> for BytesVisitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("image bytes")
+        }
+
+        fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {
+            Ok(bytes.to_vec())
+        }
+
+        fn visit_byte_buf<E: serde::de::Error>(self, bytes: Vec<u8>) -> Result<Self::Value, E> {
+            Ok(bytes)
+        }
+    }
+
+    // The framed slice decoder checks the length against available input before
+    // handing bytes to the visitor, so a forged length cannot cause an allocation.
+    deserializer.deserialize_bytes(BytesVisitor)
+}
+
 /// One already-clipped desired placement relative to its target surface.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub struct SurfaceGraphicsPlacement {
     pub asset: SurfaceGraphicsAssetKey,
     pub logical_placement_id: u32,
@@ -1224,7 +1302,7 @@ pub struct PaneSurfaceFrame {
     pub graphics: SurfaceGraphicsScene,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub enum ClientShellPopupSize {
     Cells(u16),
     Percent(u8),

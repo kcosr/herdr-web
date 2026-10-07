@@ -223,7 +223,7 @@ impl NotesManager {
     }
 
     #[cfg(test)]
-    fn for_test(dir: PathBuf, session_key: &str) -> io::Result<Self> {
+    pub(crate) fn for_test(dir: PathBuf, session_key: &str) -> io::Result<Self> {
         ensure_private_dir(&dir)?;
         Ok(Self {
             notes_path: dir.join("notes.json"),
@@ -1398,6 +1398,7 @@ mod tests {
             state_labels: Default::default(),
             tokens: Default::default(),
             agent_session: None,
+            restore_error: None,
             scroll: None,
             revision,
         }

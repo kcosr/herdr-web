@@ -32,8 +32,8 @@ Herdr v0.9.2 and later report an `events_lost` error and terminate a subscriptio
 reader falls behind retained history. Other failures can also end a stream without a final event.
 
 The bridge treats subscription error responses as failures and closes the browser structural
-event WebSocket when its upstream stream ends. The browser reconnects and refreshes its snapshot;
-the bridge also requests a refresh after acknowledging the new upstream subscription, covering
+event WebSocket when its upstream stream ends. The browser reconnects and refreshes its snapshot
+when the bridge requests it after acknowledging the new upstream subscription, covering
 changes during reconnection. Disconnected browser subscriptions release their reader threads.
 
 Activity watchers resubscribe after errors, establish a fresh baseline, and ask browsers to resync.
@@ -41,18 +41,23 @@ The structural watcher rechecks pane membership after each subscription acknowle
 changes that occurred while disconnected. This covers new panes when the activity watcher had
 been waiting on an empty session.
 
+Successful subscription establishment resets watcher retry delays, so repeated interruptions do
+not accumulate a permanent maximum backoff. Failed setup attempts still use exponential backoff.
+
 The bridge retains its per-terminal ANSI transport, shared browser fanout, and last-resize
 ownership. Whole-tab surface encodings and new product features remain separate work.
 
 ## Verification — 2026-10-07
 
 - Exact v0.9.3 source drift check passed.
-- Full `npm run check` passed: 147 compatibility tests, 157 bridge tests, 421 web tests,
-  5 development-runner tests, and 6 release-script tests (736 total), plus lint, formatting,
+- Full `npm run check` passed: 147 compatibility tests, 158 bridge tests, 421 web tests,
+  5 development-runner tests, and 6 release-script tests (737 total), plus lint, formatting,
   TypeScript, frontend production build, and bridge build.
 - Recovery regressions exercise real Unix sockets and browser WebSockets for upstream EOF,
   `events_lost`, malformed JSON, post-acknowledgement resync, membership refresh, and activity
-  rebaselining. The frontend test verifies snapshot refresh before the polling interval.
+  rebaselining, retry-delay reset, and idle browser reader cleanup. The frontend test verifies
+  snapshot refresh on subscription acknowledgement before the polling interval, with no fetch
+  on WebSocket open alone.
 - An isolated official Linux x86_64 Herdr v0.9.3 daemon reported protocol 22. The downloaded
   executable's SHA256 matched GitHub release metadata:
   `18a8dc65f1c2fa485884344356dea1cfd911c6f06cf46fa78e193f4087f4dba7`.
@@ -60,7 +65,9 @@ ownership. Whole-tab surface encodings and new product features remain separate 
   resize (`stty size`), scroll up/down, and structural event delivery.
 - Headless Chromium rendered the terminal with zero page errors, accepted keyboard input,
   updated a workspace label from live events, and reconnected/resnapshotted after a forced
-  browser event-stream closure.
+  browser event-stream closure. This was rerun after removing the pre-acknowledgement refresh:
+  withholding the reconnected stream's `resync_required` frame for 400 ms produced no snapshot
+  fetch or label update; delivering the frame refreshed both before the 10-second polling interval.
 
 Builds and daemon state were isolated under `.scratch/`; tests used a writable temporary
 directory there. Installed services and production assets were not replaced. This validates

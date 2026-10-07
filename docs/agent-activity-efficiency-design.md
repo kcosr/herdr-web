@@ -26,6 +26,8 @@ The activity watcher:
 
 - reads the current pane set with `pane.list`
 - subscribes to Herdr `pane.agent_status_changed` events for each current pane
+- waits for the subscription acknowledgement, then reads and validates a fresh pane baseline
+- broadcasts `resync_required` after establishing that baseline
 - converts Herdr subscription events into compact web-facing activity messages
 - broadcasts those messages over a bridge-local broadcast channel
 - retries with backoff if the Herdr subscription fails
@@ -33,7 +35,9 @@ The activity watcher:
 A separate structural watcher also runs in the bridge. It listens for workspace, tab, pane, and
 worktree structural events only so it can tell the activity watcher when the subscribed pane set may
 need to be rebuilt. The activity watcher compares the new sorted pane IDs with the currently
-subscribed IDs and keeps the existing subscription when the pane set is unchanged.
+subscribed IDs and keeps the existing subscription when the pane set is unchanged. Each structural
+subscription acknowledgement also signals a membership refresh, covering changes made while
+that subscription was disconnected.
 
 ```mermaid
 flowchart LR
@@ -98,6 +102,10 @@ If a browser activity receiver lags behind the bridge broadcast channel, the bri
 
 The bridge then closes that activity socket. The browser reconnects and refreshes the full snapshot.
 
+The same message type is also broadcast with reason `activity subscription established` after
+each activity subscription is established and its baseline is read, including membership-driven
+resubscriptions. This requests a snapshot refresh without closing healthy browser sockets.
+
 ```mermaid
 sequenceDiagram
   participant Herdr
@@ -105,6 +113,16 @@ sequenceDiagram
   participant Bus as Bridge broadcast channel
   participant WS as /ws/activity
   participant UI as Browser snapshot state
+
+  Watcher->>Herdr: subscribe to current pane IDs
+  Herdr->>Watcher: subscription acknowledgement
+  Watcher->>Herdr: pane.list for baseline
+  Herdr->>Watcher: current panes
+  Watcher->>Watcher: validate membership and establish baseline
+  Watcher->>Bus: resync_required (subscription established)
+  Bus->>WS: broadcast to connected client
+  WS->>UI: resync_required (socket stays open)
+  UI->>UI: request full snapshot refresh
 
   Herdr->>Watcher: pane.agent_status_changed
   Watcher->>Bus: ActivityMessage
@@ -119,7 +137,8 @@ sequenceDiagram
   end
 
   alt browser receiver lags
-    Bus->>WS: resync_required
+    Bus->>WS: receiver lag error
+    WS->>UI: resync_required (receiver lagged)
     WS-->>UI: close socket
     UI->>UI: reconnect and refresh full snapshot
   end
@@ -212,9 +231,20 @@ The browser opens `/ws/activity` with reconnect backoff. Each open or reconnect 
 snapshot refresh through the same single-flight controller so activity changes missed while the
 socket was disconnected are recovered promptly.
 
+`/ws/events` opens a separate upstream structural subscription for each browser. Its first frame
+is a bridge `resync_required` message sent after Herdr acknowledges the subscription; the browser
+refreshes its snapshot on that message. A WebSocket upgrade alone does not trigger this refresh,
+because the upstream subscription may still be unavailable. The bridge closes this browser socket
+if its Herdr stream fails or ends, allowing the browser to reconnect and obtain a fresh snapshot.
+
 ## Error Handling
 
-- Herdr subscription failures retry with exponential backoff.
+- Herdr setup failures retry with exponential backoff. Successful structural acknowledgement or
+  activity subscription/baseline establishment resets the retry delay.
+- Upstream `events_lost` and other error responses, EOF, or malformed JSON terminate the affected
+  subscription. Shared watchers resubscribe, refresh membership/baselines, and request browser resync.
+- Disconnected structural-event browser sockets release their upstream reader even when Herdr
+  sends no further events; the reader checks for browser closure after a bounded read timeout.
 - Activity socket receiver lag sends `resync_required` and closes the socket.
 - Unknown panes, workspace mismatches, and malformed known messages trigger full snapshot refresh.
 - Partial JSON lines from Herdr event streams are buffered as bytes across read timeouts and parsed

@@ -4212,7 +4212,7 @@ fn spawn_agent_activity_watcher(state: BridgeState) {
 fn agent_activity_structural_watcher_loop(state: BridgeState, resubscribe_tx: mpsc::Sender<()>) {
     let mut backoff = ACTIVITY_WATCHER_INITIAL_BACKOFF;
     loop {
-        match run_agent_activity_structural_subscription(&state, &resubscribe_tx) {
+        match run_agent_activity_structural_subscription(&state, &resubscribe_tx, &mut backoff) {
             Ok(()) => {
                 backoff = ACTIVITY_WATCHER_INITIAL_BACKOFF;
             }
@@ -4228,7 +4228,7 @@ fn agent_activity_structural_watcher_loop(state: BridgeState, resubscribe_tx: mp
 fn agent_activity_watcher_loop(state: BridgeState, resubscribe_rx: mpsc::Receiver<()>) {
     let mut backoff = ACTIVITY_WATCHER_INITIAL_BACKOFF;
     loop {
-        match run_agent_activity_subscription(&state, &resubscribe_rx) {
+        match run_agent_activity_subscription(&state, &resubscribe_rx, &mut backoff) {
             Ok(()) => {
                 backoff = ACTIVITY_WATCHER_INITIAL_BACKOFF;
                 thread::sleep(ACTIVITY_RESUBSCRIBE_DEBOUNCE);
@@ -4245,6 +4245,7 @@ fn agent_activity_watcher_loop(state: BridgeState, resubscribe_rx: mpsc::Receive
 fn run_agent_activity_structural_subscription(
     state: &BridgeState,
     resubscribe_tx: &mpsc::Sender<()>,
+    backoff: &mut Duration,
 ) -> Result<(), BridgeError> {
     let request = Request {
         id: "herdr-web:activity-structural".to_string(),
@@ -4261,6 +4262,7 @@ fn run_agent_activity_structural_subscription(
         )));
     }
 
+    *backoff = ACTIVITY_WATCHER_INITIAL_BACKOFF;
     // Recover pane membership even if structural changes occurred while disconnected.
     if resubscribe_tx.send(()).is_err() {
         return Ok(());
@@ -4279,6 +4281,7 @@ fn run_agent_activity_structural_subscription(
 fn run_agent_activity_subscription(
     state: &BridgeState,
     resubscribe_rx: &mpsc::Receiver<()>,
+    backoff: &mut Duration,
 ) -> Result<(), BridgeError> {
     drain_resubscribe_signals(resubscribe_rx);
     // Discover targets first; this is not the authoritative activity baseline.
@@ -4291,6 +4294,7 @@ fn run_agent_activity_subscription(
     let Some((baseline, mut stream)) = open_activity_subscription(&state.api, &pane_ids)? else {
         return Ok(());
     };
+    *backoff = ACTIVITY_WATCHER_INITIAL_BACKOFF;
     observe_agent_activity_snapshot(state, &baseline);
     let _ = state.activity_tx.send(ActivityMessage::ResyncRequired {
         reason: "activity subscription established".to_string(),

@@ -393,7 +393,8 @@ The bridge exposes:
 - `GET /api/agent-pins` and `POST /api/agent-pins/{pane_id}/pin|unpin`: bridge-owned agent pins
 - `POST /api/uploads`: save uploaded files into the configured upload directory
 - `GET /ws/activity`: bridge-owned pane activity deltas
-- `GET /ws/events`: Herdr structural events
+- `GET /ws/events`: Herdr structural events, preceded by a bridge `resync_required` message after
+  subscription acknowledgement; closes on upstream failure so clients can reconnect and resnapshot
 - `GET /ws/ui-events`: bridge-local UI events such as selection changes
 - `GET /ws/terminal`: terminal attach stream
 

@@ -1,5 +1,5 @@
 use super::*;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::os::unix::net::{UnixListener, UnixStream};
 
 struct FakeDaemon {
@@ -212,8 +212,27 @@ fn structural_reconnect_requests_membership_refresh_without_new_events() {
             release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         }
     });
+    let mut backoff = ACTIVITY_WATCHER_MAX_BACKOFF;
+    let mut disconnected_state = state.clone();
+    disconnected_state.api =
+        ApiClient::for_socket_path(state.api.socket_path().with_extension("absent"));
+    assert!(run_agent_activity_structural_subscription(
+        &disconnected_state,
+        &signal_tx,
+        &mut backoff
+    )
+    .is_err());
+    assert_eq!(
+        backoff, ACTIVITY_WATCHER_MAX_BACKOFF,
+        "setup failures must retain the retry delay"
+    );
     for _ in 0..2 {
-        let err = run_agent_activity_structural_subscription(&state, &signal_tx).unwrap_err();
+        let err = run_agent_activity_structural_subscription(&state, &signal_tx, &mut backoff)
+            .unwrap_err();
+        assert_eq!(backoff, ACTIVITY_WATCHER_INITIAL_BACKOFF);
+        // The watcher increases the next delay after sleeping. The next healthy
+        // subscription must reset it even though its eventual termination is Err.
+        backoff *= 2;
         assert!(
             matches!(err, BridgeError::Api(ApiClientError::ErrorResponse(response)) if response.error.code == "events_lost")
         );
@@ -250,8 +269,21 @@ fn activity_reconnect_rebuilds_baseline_and_requests_browser_resync() {
             release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         }
     });
+    let mut backoff = ACTIVITY_WATCHER_MAX_BACKOFF;
+    let mut disconnected_state = state.clone();
+    disconnected_state.api =
+        ApiClient::for_socket_path(state.api.socket_path().with_extension("absent"));
+    assert!(
+        run_agent_activity_subscription(&disconnected_state, &signal_rx, &mut backoff).is_err()
+    );
+    assert_eq!(
+        backoff, ACTIVITY_WATCHER_MAX_BACKOFF,
+        "setup failures must retain the retry delay"
+    );
     for pane_id in ["before-disconnect", "created-during-disconnect"] {
-        let err = run_agent_activity_subscription(&state, &signal_rx).unwrap_err();
+        let err = run_agent_activity_subscription(&state, &signal_rx, &mut backoff).unwrap_err();
+        assert_eq!(backoff, ACTIVITY_WATCHER_INITIAL_BACKOFF);
+        backoff *= 2;
         assert!(
             matches!(err, BridgeError::Api(ApiClientError::ErrorResponse(response)) if response.error.code == "events_lost")
         );
@@ -269,4 +301,51 @@ fn activity_reconnect_rebuilds_baseline_and_requests_browser_resync() {
         release_tx.send(()).unwrap();
     }
     daemon_thread.join().unwrap();
+}
+
+#[tokio::test]
+async fn idle_browser_disconnect_releases_upstream_subscription() {
+    for graceful_close in [false, true] {
+        let daemon = FakeDaemon::new();
+        let state = test_state(daemon.path.clone());
+        let app = Router::new()
+            .route("/ws", get(test_events_handler))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let daemon_task = tokio::task::spawn_blocking(move || {
+            let mut stream = daemon.subscribe();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut byte = [0];
+            // Send no events: the bridge must release this reader on its own.
+            assert_eq!(
+                stream
+                    .read(&mut byte)
+                    .expect("upstream subscription leaked after idle browser disconnect"),
+                0
+            );
+        });
+        let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
+            .await
+            .unwrap();
+        let ready = tokio::time::timeout(Duration::from_secs(3), client.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let ready: serde_json::Value = serde_json::from_str(ready.to_text().unwrap()).unwrap();
+        assert_eq!(ready["type"], "resync_required");
+        if graceful_close {
+            client.close(None).await.unwrap();
+        }
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(5), daemon_task)
+            .await
+            .unwrap()
+            .unwrap();
+        server.abort();
+    }
 }

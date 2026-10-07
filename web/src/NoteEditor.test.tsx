@@ -41,7 +41,7 @@ afterEach(async () => {
 });
 
 describe("BridgeConnectionController sockets", () => {
-  it("refreshes the snapshot when structural events reconnect, before the polling interval", async () => {
+  it("refreshes after structural subscription acknowledgement, not the WebSocket upgrade", async () => {
     vi.stubGlobal("WebSocket", FakeWebSocket);
     let selectedPaneId = "before-disconnect";
     const fetchMock = vi.fn(async () =>
@@ -71,6 +71,14 @@ describe("BridgeConnectionController sockets", () => {
     const previousRequests = fetchMock.mock.calls.length;
     await act(async () => {
       reconnected[1].dispatchEvent(new Event("open"));
+      await Promise.resolve();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(previousRequests);
+    expect(connectionRefs.current["bridge-a"].snapshot?.selected_pane_id).toBe("before-disconnect");
+    await act(async () => {
+      reconnected[1].dispatchEvent(new MessageEvent("message", {
+        data: JSON.stringify({ type: "resync_required", reason: "event subscription established" }),
+      }));
       await Promise.resolve();
     });
     expect(fetchMock).toHaveBeenCalledTimes(previousRequests + 1);

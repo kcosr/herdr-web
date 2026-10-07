@@ -25,8 +25,9 @@
 ### Fixed
 
 - Recover event subscriptions after Herdr reports lost events or disconnects. Reconnect browser
-  structural-event streams, refresh their snapshots immediately, and rebuild activity subscriptions
-  and pane membership after interruptions.
+  structural-event streams, refresh snapshots after subscription acknowledgement, and rebuild
+  activity subscriptions and pane membership after interruptions. Reset retry delays after
+  successful recovery and release idle upstream readers when browsers disconnect.
 - Send protocol-level pings on idle browser WebSockets and close connections that do not return peer
   traffic within 15 seconds, removing dead transports without claiming to detect frozen JavaScript.
   [PR #93](https://github.com/kcosr/herdr-web/pull/93), contributed by

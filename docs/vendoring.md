@@ -1,7 +1,7 @@
 # Vendoring Herdr Compatibility
 
 `herdr-web` vendors a small Herdr compatibility crate because the bridge depends on private API and
-wire protocol details needed for its existing per-terminal ANSI attach behavior. Herdr v0.9.0 also
+wire protocol details needed for its existing per-terminal ANSI attach behavior. Herdr v0.9.3 also
 provides stable whole-tab endpoints, but this bridge deliberately retains the pane-oriented ANSI path.
 
 ## What Is Vendored
@@ -33,9 +33,10 @@ The browser app is not vendored into Herdr. It lives at `web/`, and `herdr-web-b
 ## Current Reference
 
 - Upstream checkout: a clean Herdr source checkout outside this repository
-- Upstream release baseline: `v0.9.0`
+- Upstream repository: <https://github.com/herdrdev/herdr>
+- Upstream release baseline: `v0.9.3`
 - Terminal wire baseline: protocol `22`
-- Upstream commit: `b99002ac99b09e00b4ca692436cb15a6b0d676f1`
+- Upstream commit: `7b116c05bfda646af39d2524c54e70c751f57ee8`
 
 Use the upstream checkout as an external reference for audits and refreshes. It is not required to
 build `herdr-web`.
@@ -64,7 +65,7 @@ bridge narrows the drift check to only the terminal attach message regions.
 
 ## Refresh Process
 
-Use a clean Herdr checkout at the reviewed `v0.9.0` release tag as the source reference. Do not
+Use a clean Herdr checkout at the reviewed `v0.9.3` release tag as the source reference. Do not
 refresh from an experimental tree that may contain unrelated local drift. Copy the reviewed
 upstream source files into the minimal compatibility crate; do not make the bridge compile against
 the external checkout or recreate a full upstream vendor snapshot.
@@ -100,6 +101,8 @@ src/server/socket_paths.rs -> vendor/herdr-compat/src/server/socket_paths.rs
 3. Preserve intentional local adaptations:
 
 - `ApiClient` takes concrete socket paths; it must not know bridge session rules.
+  It retains bridge request timeouts and partial subscription-line buffering. The upstream v0.9.3
+  status polling/deadline implementation is not copied into this adapted client.
 - `logging::init_file_logging` takes a concrete directory from the bridge.
 - socket path helpers derive paths from supplied overrides/defaults; bridge session resolution stays
   in `bridge/src/session.rs`.
@@ -110,8 +113,9 @@ src/server/socket_paths.rs -> vendor/herdr-compat/src/server/socket_paths.rs
   adaptation is expected by the vendor drift check.
 - `input.rs` contains the upstream pure input model. Small config/terminal-theme shims satisfy
   shared wire types; terminal parsing and rendering remain owned by Herdr.
-- Upstream wire serialization tests live in `protocol/wire/upstream_wire_tests.rs`; two tests requiring
-  the native terminal key encoder are excluded. The production wire body remains exact and
+- Upstream wire serialization tests live in `protocol/wire/upstream_wire_tests.rs`; three tests requiring
+  the native terminal key encoder/runtime are excluded: Windows dead-key reconstruction,
+  physical/generated-text encoding, and remote AltGr dead-key input. The production wire body remains exact and
   separately checked against the tagged source.
 - `protocol.rs` and schema tests include bridge fixture tests for the reviewed protocol/schema
   baseline.
@@ -152,6 +156,11 @@ protocol exactly `22`. Older daemons and any unreviewed newer protocol are rejec
 the web app. The version floor covers the private JSON API shape, including the managed
 `agent.start` contract; the exact protocol check protects the copied bincode terminal wire format.
 This is not a complete stability guarantee because the bridge mirrors private APIs.
+
+The reviewed source baseline is v0.9.3; the runtime version floor remains v0.9.0 because the
+commands and direct-terminal wire shapes used by the bridge are unchanged. The refresh removes
+the retired `pane.graphics.*` schema and includes additive API fields without exposing new browser
+commands. See [compatibility-v0.9.3.md](compatibility-v0.9.3.md) for validation and event recovery.
 
 When updating Herdr:
 

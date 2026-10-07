@@ -1,5 +1,82 @@
-//! Upstream v0.9.0 wire tests, excluding the two host keyboard-encoder tests.
+//! Upstream v0.9.3 wire tests, excluding three native keyboard-encoder/runtime tests.
 use super::*;
+
+#[test]
+fn graphics_bulk_codec_preserves_legacy_wire_and_json() {
+    #[derive(Serialize, Deserialize)]
+    struct LegacyAsset {
+        key: SurfaceGraphicsAssetKey,
+        data: Vec<u8>,
+    }
+    for len in [0, 1, 250, 251, 65535, 65536, 800 * 480 * 4] {
+        let asset = SurfaceGraphicsAsset {
+            key: SurfaceGraphicsAssetKey {
+                source: SurfaceGraphicsSource::Terminal {
+                    target: SurfaceGraphicsTarget::Pane {
+                        pane_id: "pane-1".into(),
+                    },
+                    image_id: 7,
+                },
+                image_width: 800,
+                image_height: 480,
+                format: SurfaceGraphicsFormat::Rgba,
+                data_len: len as u64,
+                data_fingerprint: 42,
+            },
+            data: (0..len).map(|i| (i % 256) as u8).collect(),
+        };
+        let legacy = LegacyAsset {
+            key: asset.key.clone(),
+            data: asset.data.clone(),
+        };
+        let config = bincode::config::standard();
+        let before = bincode::serde::encode_to_vec(&legacy, config).unwrap();
+        let after = bincode::serde::encode_to_vec(&asset, config).unwrap();
+        assert_eq!(after, before);
+        let (decoded, used): (SurfaceGraphicsAsset, _) =
+            bincode::serde::decode_from_slice(&before, config).unwrap();
+        assert_eq!(decoded, asset);
+        assert_eq!(used, before.len());
+        let (decoded, used): (LegacyAsset, _) =
+            bincode::serde::decode_from_slice(&after, config).unwrap();
+        assert_eq!(decoded.data, asset.data);
+        assert_eq!(decoded.key, asset.key);
+        assert_eq!(used, after.len());
+        let json = serde_json::to_value(&legacy).unwrap();
+        assert_eq!(serde_json::to_value(&asset).unwrap(), json);
+        assert_eq!(
+            serde_json::from_value::<SurfaceGraphicsAsset>(json).unwrap(),
+            asset
+        );
+        assert!(
+            bincode::serde::decode_from_slice::<SurfaceGraphicsAsset, _>(
+                &before[..before.len() - 1],
+                config
+            )
+            .is_err()
+        );
+    }
+}
+#[test]
+fn graphics_bulk_decode_rejects_truncated_and_forged_lengths() {
+    #[derive(Debug, Deserialize)]
+    struct Bytes(#[serde(deserialize_with = "deserialize_graphics_bytes")] Vec<u8>);
+    let config = bincode::config::standard();
+    let original: Vec<u8> = (0..=255).collect();
+    let encoded = bincode::serde::encode_to_vec(&original, config).unwrap();
+    for end in 0..encoded.len() {
+        assert!(bincode::serde::decode_from_slice::<Bytes, _>(&encoded[..end], config).is_err());
+    }
+    let (decoded, consumed): (Bytes, _) =
+        bincode::serde::decode_from_slice(&encoded, config).unwrap();
+    assert_eq!(decoded.0, original);
+    assert_eq!(consumed, encoded.len());
+    for length in [MAX_GRAPHICS_FRAME_SIZE as u64 + 1, u64::MAX] {
+        let forged = bincode::serde::encode_to_vec(length, config).unwrap();
+        assert!(bincode::serde::decode_from_slice::<Bytes, _>(&forged, config).is_err());
+    }
+}
+
 use ratatui::style::{Color, Modifier};
 use sha2::{Digest, Sha256};
 

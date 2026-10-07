@@ -4663,7 +4663,9 @@ export function BridgeConnectionController({
       interval = window.setInterval(refresh, SNAPSHOT_REFRESH_INTERVAL_MS);
     }, SNAPSHOT_REFRESH_INTERVAL_MS + refreshOffset);
 
-    const events = openEventsSocket(wsUrlRef.current, "/ws/events", refresh);
+    const events = openEventsSocket(wsUrlRef.current, "/ws/events", refresh, {
+      onOpen: refresh,
+    });
     const activity = openEventsSocket(
       wsUrlRef.current,
       "/ws/activity",

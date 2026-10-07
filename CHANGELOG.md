@@ -12,6 +12,9 @@
 
 ### Changed
 
+- Refresh the vendored Herdr compatibility sources to stable v0.9.3, retaining terminal protocol
+  22 and the v0.9.0 runtime minimum. Remove the retired pane graphics schema and reconcile the
+  current API fields and wire helpers.
 - Automatically increment Android `versionCode` and stamp `versionName` in the tagged release
   commit, keeping repeated builds of that release on the same Android version.
   [PR #91](https://github.com/kcosr/herdr-web/pull/91).
@@ -21,6 +24,9 @@
 
 ### Fixed
 
+- Recover event subscriptions after Herdr reports lost events or disconnects. Reconnect browser
+  structural-event streams, refresh their snapshots immediately, and rebuild activity subscriptions
+  and pane membership after interruptions.
 - Send protocol-level pings on idle browser WebSockets and close connections that do not return peer
   traffic within 15 seconds, removing dead transports without claiming to detect frozen JavaScript.
   [PR #93](https://github.com/kcosr/herdr-web/pull/93), contributed by
